@@ -1,16 +1,27 @@
 from flask import Flask
 from flask_cors import CORS
+from socket_instance import socketio
 
 from routes.monitor_odoo import monitor_odoo_bp
 from routes.auth import auth 
 from routes.usuarios import usuarios_bp
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "http://localhost:4200"}}, supports_credentials=True)
+
+socketio.init_app(app)  # IMPORTANTE
 
 app.register_blueprint(monitor_odoo_bp)
 app.register_blueprint(auth)
 app.register_blueprint(usuarios_bp)
 
+@socketio.on('connect')
+def handle_connect():
+    print('Cliente conectado')
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    print('Cliente desconectado')
+
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    socketio.run(app, debug=True, port=5000, host='0.0.0.0')

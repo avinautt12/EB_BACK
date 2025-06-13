@@ -1,14 +1,16 @@
 import hashlib
 import jwt
 import datetime
+import bcrypt
 
 SECRET_KEY = "121221"  
 
 def hash_password(contrasena):
-    return hashlib.sha256(contrasena.encode()).hexdigest()
+    hashed = bcrypt.hashpw(contrasena.encode('utf-8'), bcrypt.gensalt())
+    return hashed.decode('utf-8')
 
 def verificar_password(contrasena, hash_guardado):
-    return hash_password(contrasena) == hash_guardado
+    return bcrypt.checkpw(contrasena.encode('utf-8'), hash_guardado.encode('utf-8'))
 
 def generar_token(usuario_id):
     payload = {
