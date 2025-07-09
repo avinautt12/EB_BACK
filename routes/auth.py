@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 from db_conexion import obtener_conexion
-from utils.seguridad import hash_password, verificar_password, generar_token
+from utils.seguridad import hash_password, verificar_password
+from utils.jwt_utils import generar_token
 import re
 from app import socketio 
 import random
@@ -26,6 +27,7 @@ def registrar_usuario():
     nombre = data.get('nombre')
     correo = data.get('correo')
     rol = data.get('rol', 'Usuario')  # Puede venir como "Admin" o "Usuario"
+    cliente_id = data.get('cliente_id')
 
     if campo_vacio(usuario) or campo_vacio(contrasena) or campo_vacio(nombre) or campo_vacio(correo):
         return jsonify({"error": "Todos los campos son obligatorios"}), 400
@@ -52,6 +54,17 @@ def registrar_usuario():
 
     cursor = conexion.cursor(dictionary=True)
 
+    if cliente_id not in [None, "", "null"]:
+        try:
+            cliente_id = int(cliente_id)
+            cursor.execute("SELECT id FROM clientes WHERE id = %s", (cliente_id,))
+            if not cursor.fetchone():
+                return jsonify({"error": "El cliente_id proporcionado no existe"}), 400
+        except ValueError:
+            return jsonify({"error": "El cliente_id debe ser un número válido"}), 400
+    else:
+        cliente_id = None
+
     # Validar unicidad
     cursor.execute("SELECT id FROM usuarios WHERE usuario = %s", (usuario,))
     if cursor.fetchone():
@@ -69,8 +82,8 @@ def registrar_usuario():
 
     try:
         cursor.execute(
-            "INSERT INTO usuarios (usuario, contrasena, nombre, correo, rol_id, activo) VALUES (%s, %s, %s, %s, %s, %s)",
-            (usuario, contrasena_hash, nombre, correo, rol_id, True)
+            "INSERT INTO usuarios (usuario, contrasena, nombre, correo, rol_id, activo, cliente_id) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (usuario, contrasena_hash, nombre, correo, rol_id, True, cliente_id)
         )
         conexion.commit()
         
@@ -131,10 +144,17 @@ def login():
             print(f"Resultado de verificación de contraseña: {password_match}")
             
             if password_match:
-                token = generar_token(user['id'])
-                return jsonify({"token": token}), 200
-            
-        return jsonify({"error": "Credenciales incorrectas"}), 401
+                token = generar_token(
+                    user['id'],
+                    user['rol_id'],
+                    user['usuario'],
+                    user['nombre']
+                )
+                return jsonify({
+                    "token": token
+                }), 200
+
+        return jsonify({"error": "Credenciales incorrectas. Verifica tu correo o contraseña."}), 401
         
     except Exception as e:
         print(f"Error durante el login: {str(e)}")

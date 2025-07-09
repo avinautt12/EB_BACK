@@ -121,6 +121,23 @@ def actualizar_usuario(usuario_id):
             else:
                 errores.append("La contraseña debe ser una cadena de texto no vacía")
 
+        # Validación y actualización del cliente_id (opcional)
+        if 'cliente_id' in data:
+            cliente_id = data['cliente_id']
+
+            if cliente_id in [None, "", "null"]:
+                campos_actualizar['cliente_id'] = None
+            else:
+                try:
+                    cliente_id = int(cliente_id)
+                    cursor.execute("SELECT id FROM clientes WHERE id = %s", (cliente_id,))
+                    if not cursor.fetchone():
+                        errores.append("El cliente_id proporcionado no existe")
+                    else:
+                        campos_actualizar['cliente_id'] = cliente_id
+                except ValueError:
+                    errores.append("El cliente_id debe ser un número entero válido")
+
         # Si hay errores, retornarlos todos juntos
         if errores:
             return jsonify({"errores": errores}), 400
@@ -144,7 +161,8 @@ def actualizar_usuario(usuario_id):
             "nombre": campos_actualizar.get('nombre', usuario_existente['nombre']),
             "correo": campos_actualizar.get('correo', usuario_existente['correo']),
             "usuario": campos_actualizar.get('usuario', usuario_existente['usuario']),
-            "rol": "Administrador" if campos_actualizar.get('rol_id', usuario_existente['rol_id']) == 1 else "Usuario"
+            "rol": "Administrador" if campos_actualizar.get('rol_id', usuario_existente['rol_id']) == 1 else "Usuario",
+            "cliente_id": campos_actualizar.get('cliente_id', usuario_existente.get('cliente_id')),
         }
 
         socketio.emit('usuarioActualizado', campos_emitir)
