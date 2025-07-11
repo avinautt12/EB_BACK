@@ -3,7 +3,7 @@ from db_conexion import obtener_conexion
 from utils.seguridad import hash_password, verificar_password
 from utils.jwt_utils import generar_token
 import re
-from app import socketio 
+from socket_instance import socketio 
 import random
 from utils.email import enviar_correo_activacion
 from datetime import datetime, timedelta

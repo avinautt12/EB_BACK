@@ -22,15 +22,42 @@ def listar_usuarios():
                 "nombre": u["nombre"],
                 "correo": u["correo"],
                 "usuario": u["usuario"],
-                "contrasena": u["contrasena"],
+                # "contrasena": u["contrasena"],  # opcional ocultar
                 "activo": u["activo"],
-                "rol": "Administrador" if u["rol_id"] == 1 else "Usuario"
+                "rol": "Administrador" if u["rol_id"] == 1 else "Usuario",
+                "cliente_id": u.get("cliente_id"),
+                "cliente_nombre": u["nombre_cliente"]  # ya viene desde la consulta
             }
             usuarios_filtrados.append(usuario_filtrado)
 
         return jsonify(usuarios_filtrados), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    
+def obtener_usuarios():
+    try:
+        conexion = obtener_conexion()
+        cursor = conexion.cursor(dictionary=True)
+
+        consulta = """
+        SELECT 
+            u.id, u.nombre, u.correo, u.usuario, u.contrasena, 
+            u.activo, u.rol_id, u.cliente_id, c.nombre_cliente
+        FROM 
+            usuarios u
+        LEFT JOIN 
+            clientes c ON u.cliente_id = c.id
+        """
+        cursor.execute(consulta)
+        usuarios = cursor.fetchall()
+
+        cursor.close()
+        conexion.close()
+
+        return usuarios
+    except Exception as e:
+        print(f"Error al obtener usuarios: {e}")
+        return []
 
 @usuarios_bp.route('/<int:usuario_id>', methods=['PUT'])
 def actualizar_usuario(usuario_id):
