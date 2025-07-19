@@ -9,6 +9,7 @@ from routes.clientes import clientes_bp
 from routes.metas import metas_bp
 from routes.previo import previo_bp
 from routes.proyecciones import proyecciones_bp
+from routes.disponible import disponibilidad_bp
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "http://localhost:4200"}}, supports_credentials=True)
@@ -22,6 +23,7 @@ app.register_blueprint(clientes_bp)
 app.register_blueprint(metas_bp)
 app.register_blueprint(previo_bp)
 app.register_blueprint(proyecciones_bp)
+app.register_blueprint(disponibilidad_bp)
 
 @socketio.on('connect')
 def handle_connect():

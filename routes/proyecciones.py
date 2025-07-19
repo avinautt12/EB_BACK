@@ -4,6 +4,12 @@ from flask import request
 import mysql.connector
 import jwt
 import json
+from werkzeug.utils import secure_filename
+import os
+from datetime import datetime
+import pandas as pd
+import traceback 
+import numpy as np
 
 SECRET_KEY = "123456"
 
@@ -36,14 +42,60 @@ def listar_proyecciones_limpias():
 
     try:
         cursor.execute("""
-            SELECT id, clave_factura, clave_6_digitos, clave_odoo, descripcion, 
-                   modelo, precio_publico_iva, ean, referencia 
-            FROM proyecciones_ventas 
-            ORDER BY id
+            SELECT 
+                pv.id,
+                pv.referencia,
+                pv.clave_factura,
+                pv.clave_6_digitos,
+                pv.ean,
+                pv.clave_odoo,
+                pv.descripcion,
+                pv.modelo,
+
+                -- Precios
+                pv.precio_elite_plus_sin_iva,
+                pv.precio_elite_sin_iva,
+                pv.precio_partner_sin_iva,
+                pv.precio_distribuidor_sin_iva,
+                pv.precio_publico_sin_iva,
+                pv.precio_publico_con_iva_my26,
+                pv.precio_elite_plus_con_iva,
+                pv.precio_elite_con_iva,
+                pv.precio_partner_con_iva,
+                pv.precio_distribuidor_con_iva,
+                pv.precio_publico_con_iva,
+
+                -- Quincenas
+                pv.q1_sep_2025,
+                pv.q2_sep_2025,
+                pv.q1_oct_2025,
+                pv.q2_oct_2025,
+                pv.q1_nov_2025,
+                pv.q2_nov_2025,
+                pv.q1_dic_2025,
+                pv.q2_dic_2025,
+
+                -- Totales
+                pv.orden_total_cant,
+                pv.orden_total_importe,
+
+                -- Disponibilidad (opcional)
+                dp.q1_sep_2025 as disp_q1_sep_2025,
+                dp.q2_sep_2025 as disp_q2_sep_2025,
+                dp.q1_oct_2025 as disp_q1_oct_2025,
+                dp.q2_oct_2025 as disp_q2_oct_2025,
+                dp.q1_nov_2025 as disp_q1_nov_2025,
+                dp.q2_nov_2025 as disp_q2_nov_2025,
+                dp.q1_dic_2025 as disp_q1_dic_2025,
+                dp.q2_dic_2025 as disp_q2_dic_2025
+
+            FROM proyecciones_ventas pv
+            LEFT JOIN disponibilidad_proyeccion dp ON pv.id_disponibilidad = dp.id
+            ORDER BY pv.id
         """)
         resultados = cursor.fetchall()
-
         return jsonify(resultados), 200 if resultados else 404
+
     except Exception as e:
         print("Error al obtener proyecciones limpias:", str(e))
         return jsonify({"error": "Error al obtener proyecciones limpias"}), 500
@@ -70,7 +122,6 @@ def agregar_proyecciones_cliente():
     if not id_usuario:
         return jsonify({"error": "No se proporcionó id_usuario en headers"}), 400
 
-    # Esperamos que `data` sea una lista de proyecciones
     if not isinstance(data, list):
         return jsonify({"error": "Se esperaba una lista de proyecciones"}), 400
 
@@ -78,17 +129,54 @@ def agregar_proyecciones_cliente():
     cursor = conexion.cursor(dictionary=True)
 
     try:
-        # Obtener el cliente asociado al usuario una sola vez
+        # Obtener el cliente asociado al usuario
         cursor.execute("SELECT cliente_id FROM usuarios WHERE id = %s", (id_usuario,))
         cliente = cursor.fetchone()
         if not cliente or not cliente['cliente_id']:
             return jsonify({"error": "Cliente no encontrado para este usuario"}), 404
         id_cliente = cliente['cliente_id']
 
-        # Insertar cada proyección de la lista
+        # Obtener el nivel del cliente
+        cursor.execute("SELECT nivel FROM clientes WHERE id = %s", (id_cliente,))
+        cliente_info = cursor.fetchone()
+        nivel_cliente = cliente_info['nivel'] if cliente_info else None
+
+        # Obtener folio único para esta transacción
+        folio = f"FOL-{datetime.now().strftime('%Y%m%d%H%M%S')}-{id_cliente}"
+        total_proyeccion = 0
+
         for proyeccion in data:
             id_proyeccion = proyeccion.get('id_proyeccion')
+
+            # Obtener el precio según el nivel del cliente
+            cursor.execute("""
+                SELECT 
+                    precio_elite_plus_con_iva,
+                    precio_elite_con_iva,
+                    precio_partner_con_iva,
+                    precio_distribuidor_con_iva,
+                    precio_publico_con_iva
+                FROM proyecciones_ventas 
+                WHERE id = %s
+            """, (id_proyeccion,))
+            precios = cursor.fetchone()
+            
+            # Determinar el precio aplicado según el nivel
+            precio_aplicado = 0
+            if nivel_cliente == 'Partner Elite Plus':
+                precio_aplicado = precios['precio_elite_plus_con_iva']
+            elif nivel_cliente == 'Partner Elite':
+                precio_aplicado = precios['precio_elite_con_iva']
+            elif nivel_cliente == 'Partner':
+                precio_aplicado = precios['precio_partner_con_iva']
+            elif nivel_cliente == 'Distribuidor':
+                precio_aplicado = precios['precio_distribuidor_con_iva']
+            else:
+                precio_aplicado = precios['precio_publico_con_iva']
+
             cantidades = {
+                'q1_sep_2025': proyeccion.get('q1_sep_2025', 0),
+                'q2_sep_2025': proyeccion.get('q2_sep_2025', 0),
                 'q1_oct_2025': proyeccion.get('q1_oct_2025', 0),
                 'q2_oct_2025': proyeccion.get('q2_oct_2025', 0),
                 'q1_nov_2025': proyeccion.get('q1_nov_2025', 0),
@@ -97,19 +185,37 @@ def agregar_proyecciones_cliente():
                 'q2_dic_2025': proyeccion.get('q2_dic_2025', 0),
             }
 
+            # Calcular subtotal para esta proyección
+            cantidad_total = sum(cantidades.values())
+            subtotal = cantidad_total * precio_aplicado
+            total_proyeccion += subtotal
+
             cursor.execute("""
                 INSERT INTO proyecciones_cliente (
-                    id_cliente, id_proyeccion, q1_oct_2025, q2_oct_2025, q1_nov_2025, q2_nov_2025, q1_dic_2025, q2_dic_2025
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    id_cliente, id_proyeccion, precio_aplicado, folio,
+                    q1_sep_2025, q2_sep_2025, q1_oct_2025, q2_oct_2025, 
+                    q1_nov_2025, q2_nov_2025, q1_dic_2025, q2_dic_2025
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
-                id_cliente, id_proyeccion,
+                id_cliente, id_proyeccion, precio_aplicado, folio,
+                cantidades['q1_sep_2025'], cantidades['q2_sep_2025'],
                 cantidades['q1_oct_2025'], cantidades['q2_oct_2025'],
                 cantidades['q1_nov_2025'], cantidades['q2_nov_2025'],
                 cantidades['q1_dic_2025'], cantidades['q2_dic_2025']
             ))
 
         conexion.commit()
-        return jsonify({"mensaje": "Proyecciones registradas correctamente"}), 201
+        return jsonify({
+            "mensaje": "Proyecciones registradas correctamente",
+            "folio": folio,
+            "total_proyeccion": total_proyeccion,
+            "total_bicicletas": sum(sum(p.get(q, 0) for q in [
+                'q1_sep_2025', 'q2_sep_2025', 
+                'q1_oct_2025', 'q2_oct_2025',
+                'q1_nov_2025', 'q2_nov_2025',
+                'q1_dic_2025', 'q2_dic_2025'
+            ]) for p in data)
+        }), 201
 
     except mysql.connector.Error as err:
         print("Error al insertar proyecciones:", str(err))
@@ -149,11 +255,49 @@ def historial_proyecciones_cliente():
         # Buscar historial de proyecciones del cliente
         cursor.execute("""
             SELECT 
-                pc.*, 
+                pc.id,
+                pc.id_cliente,
+                pc.id_proyeccion,
+                pc.fecha_registro,
+                pc.q1_sep_2025,
+                pc.q2_sep_2025,
+                pc.q1_oct_2025,
+                pc.q2_oct_2025,
+                pc.q1_nov_2025,
+                pc.q2_nov_2025,
+                pc.q1_dic_2025,
+                pc.q2_dic_2025,
+                pc.precio_aplicado,
+                pv.id AS id_producto,
+                pv.referencia,
+                pv.clave_factura,
+                pv.clave_6_digitos,
+                pv.ean,
+                pv.clave_odoo,
                 pv.descripcion, 
                 pv.modelo,
-                pv.clave_factura,
-                pv.precio_publico_iva
+                pv.precio_elite_plus_sin_iva,
+                pv.precio_elite_sin_iva,
+                pv.precio_partner_sin_iva,
+                pv.precio_distribuidor_sin_iva,
+                pv.precio_publico_sin_iva,
+                pv.precio_publico_con_iva_my26,
+                pv.precio_elite_plus_con_iva,
+                pv.precio_elite_con_iva,
+                pv.precio_partner_con_iva,
+                pv.precio_distribuidor_con_iva,
+                pv.precio_publico_con_iva,
+                pv.q1_sep_2025 AS producto_q1_sep_2025,
+                pv.q2_sep_2025 AS producto_q2_sep_2025,
+                pv.q1_oct_2025 AS producto_q1_oct_2025,
+                pv.q2_oct_2025 AS producto_q2_oct_2025,
+                pv.q1_nov_2025 AS producto_q1_nov_2025,
+                pv.q2_nov_2025 AS producto_q2_nov_2025,
+                pv.q1_dic_2025 AS producto_q1_dic_2025,
+                pv.q2_dic_2025 AS producto_q2_dic_2025,
+                pv.orden_total_cant,
+                pv.orden_total_importe,
+                pv.id_disponibilidad
             FROM proyecciones_cliente pc
             JOIN proyecciones_ventas pv ON pc.id_proyeccion = pv.id
             WHERE pc.id_cliente = %s
@@ -179,7 +323,11 @@ def detalles_proyeccion(id_proyeccion):
     cursor = conexion.cursor(dictionary=True)
 
     try:
-        cursor.execute("""
+        # Debug: Verificar el ID recibido
+        print(f"Recibido ID Proyección: {id_proyeccion} (Tipo: {type(id_proyeccion)})")
+        
+        # Consulta SQL modificada con parámetros correctos
+        query = """
             SELECT 
                 pv.id,
                 pv.clave_factura,
@@ -187,21 +335,36 @@ def detalles_proyeccion(id_proyeccion):
                 pv.clave_odoo,
                 pv.descripcion,
                 pv.modelo,
-                pv.precio_publico_iva,
                 pv.ean,
                 pv.referencia,
-                pv.orden_total_cant,
-                pv.orden_total_importe,
+                pv.precio_elite_plus_sin_iva,
+                pv.precio_elite_sin_iva,
+                pv.precio_partner_sin_iva,
+                pv.precio_distribuidor_sin_iva,
+                pv.precio_publico_sin_iva,
+                pv.precio_elite_plus_con_iva,
+                pv.precio_elite_con_iva,
+                pv.precio_partner_con_iva,
+                pv.precio_distribuidor_con_iva,
+                pv.precio_publico_con_iva,
+                pv.precio_publico_con_iva_my26,
+                pv.q1_sep_2025,
+                pv.q2_sep_2025,
                 pv.q1_oct_2025,
                 pv.q2_oct_2025,
                 pv.q1_nov_2025,
                 pv.q2_nov_2025,
                 pv.q1_dic_2025,
                 pv.q2_dic_2025,
-                -- Historial por cliente
+                pv.orden_total_cant,
+                pv.orden_total_importe,
                 JSON_ARRAYAGG(JSON_OBJECT(
                     'nombre_cliente', c.nombre_cliente,
-                    'fecha_registro', pc.fecha_registro,
+                    'fecha_registro', DATE_FORMAT(pc.fecha_registro, '%%Y-%%m-%%d %%H:%%i:%%s'),
+                    'precio_aplicado', pc.precio_aplicado,
+                    'folio', pc.folio,
+                    'q1_sep_2025', pc.q1_sep_2025,
+                    'q2_sep_2025', pc.q2_sep_2025,
                     'q1_oct_2025', pc.q1_oct_2025,
                     'q2_oct_2025', pc.q2_oct_2025,
                     'q1_nov_2025', pc.q1_nov_2025,
@@ -209,32 +372,576 @@ def detalles_proyeccion(id_proyeccion):
                     'q1_dic_2025', pc.q1_dic_2025,
                     'q2_dic_2025', pc.q2_dic_2025
                 )) AS historial_clientes
-
             FROM proyecciones_ventas pv
             LEFT JOIN proyecciones_cliente pc ON pv.id = pc.id_proyeccion
             LEFT JOIN clientes c ON pc.id_cliente = c.id
             WHERE pv.id = %s
             GROUP BY pv.id
-        """, (id_proyeccion,))
+        """
+        
+        # Ejecutar con parámetros como tupla
+        cursor.execute(query, (id_proyeccion,))
         
         resultado = cursor.fetchone()
         if not resultado:
             return jsonify({"mensaje": "Proyección no encontrada"}), 404
 
+        # Parsear el historial de clientes
         if resultado.get("historial_clientes"):
             try:
                 resultado["historial_clientes"] = json.loads(resultado["historial_clientes"])
+                resultado["historial_clientes"] = [h for h in resultado["historial_clientes"] if h.get('nombre_cliente')]
             except Exception as e:
                 print("Error al parsear historial_clientes:", str(e))
                 resultado["historial_clientes"] = []
+        else:
+            resultado["historial_clientes"] = []
 
         return jsonify(resultado), 200
 
     except Exception as e:
-        print("Error al obtener detalles de proyección:", str(e))
-        return jsonify({"error": "Error al obtener detalles de proyección"}), 500
+        print("Error completo al obtener detalles:", str(e))
+        return jsonify({"error": "Error al obtener detalles de proyección", "detalles": str(e)}), 500
     finally:
         cursor.close()
         conexion.close()
 
+# Disponibilidades
+@proyecciones_bp.route('/disponibilidades', methods=['GET'])
+def listar_disponibilidades():
+    conexion = obtener_conexion()
+    cursor = conexion.cursor(dictionary=True)
 
+    try:
+        cursor.execute("SELECT * FROM disponibilidad_proyeccion ORDER BY id")
+        resultados = cursor.fetchall()
+        return jsonify(resultados), 200
+    except Exception as e:
+        print("Error al obtener disponibilidades:", str(e))
+        return jsonify({"error": "Error al obtener disponibilidades"}), 500
+    finally:
+        cursor.close()
+        conexion.close()
+
+@proyecciones_bp.route('/proyecciones/buscar/<int:id>', methods=['GET'])
+def buscar_proyeccion_por_id(id):
+    conexion = obtener_conexion()
+    cursor = conexion.cursor(dictionary=True)
+
+    try:
+        cursor.execute("SELECT * FROM proyecciones_ventas WHERE id = %s", (id,))
+        resultado = cursor.fetchone()
+
+        if resultado:
+            return jsonify(resultado), 200
+        else:
+            return jsonify({"mensaje": "Proyección no encontrada"}), 404
+    except Exception as e:
+        print("Error al buscar proyección por ID:", str(e))
+        return jsonify({"error": "Error al buscar proyección"}), 500
+    finally:
+        cursor.close()
+        conexion.close()
+
+@proyecciones_bp.route('/proyecciones/nueva', methods=['POST'])
+def agregar_proyeccion():
+    data = request.get_json()
+
+    campos_obligatorios = [
+        'referencia', 'clave_factura', 'clave_6_digitos', 'ean',
+        'clave_odoo', 'descripcion', 'modelo', 'id_disponibilidad',
+        'precio_distribuidor_sin_iva', 'precio_elite_plus_sin_iva',
+        'precio_elite_sin_iva', 'precio_partner_sin_iva',
+        'precio_publico_sin_iva'
+    ]
+
+    for campo in campos_obligatorios:
+        if campo not in data:
+            return jsonify({"error": f"El campo '{campo}' es obligatorio"}), 400
+
+    try:
+        # Calcular precios con IVA (16%)
+        precio_distribuidor_con_iva = round(float(data['precio_distribuidor_sin_iva']) * 1.16, 2)
+        precio_elite_plus_con_iva = round(float(data['precio_elite_plus_sin_iva']) * 1.16, 2)
+        precio_elite_con_iva = round(float(data['precio_elite_sin_iva']) * 1.16, 2)
+        precio_partner_con_iva = round(float(data['precio_partner_sin_iva']) * 1.16, 2)
+        precio_publico_con_iva = round(float(data['precio_publico_sin_iva']) * 1.16, 2)
+
+        conexion = obtener_conexion()
+        cursor = conexion.cursor()
+
+        cursor.execute("""
+            INSERT INTO proyecciones_ventas (
+                referencia, clave_factura, clave_6_digitos, ean, clave_odoo,
+                descripcion, modelo, 
+                precio_distribuidor_sin_iva, precio_distribuidor_con_iva,
+                precio_elite_plus_sin_iva, precio_elite_plus_con_iva,
+                precio_elite_sin_iva, precio_elite_con_iva,
+                precio_partner_sin_iva, precio_partner_con_iva,
+                precio_publico_sin_iva, precio_publico_con_iva, precio_publico_con_iva_my26,
+                id_disponibilidad
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            data['referencia'],
+            data['clave_factura'],
+            data['clave_6_digitos'],
+            data['ean'],
+            data['clave_odoo'],
+            data['descripcion'],
+            data['modelo'],
+            # Precios distribuidor
+            data['precio_distribuidor_sin_iva'],
+            precio_distribuidor_con_iva,
+            # Precios elite plus
+            data['precio_elite_plus_sin_iva'],
+            precio_elite_plus_con_iva,
+            # Precios elite
+            data['precio_elite_sin_iva'],
+            precio_elite_con_iva,
+            # Precios partner
+            data['precio_partner_sin_iva'],
+            precio_partner_con_iva,
+            # Precios público
+            data['precio_publico_sin_iva'],
+            precio_publico_con_iva,
+            precio_publico_con_iva,  # precio_publico_con_iva_my26 es igual
+            data['id_disponibilidad']
+        ))
+
+        conexion.commit()
+        return jsonify({
+            "mensaje": "Proyección agregada exitosamente",
+            "precios_calculados": {
+                "distribuidor": {
+                    "sin_iva": data['precio_distribuidor_sin_iva'],
+                    "con_iva": precio_distribuidor_con_iva
+                },
+                "elite_plus": {
+                    "sin_iva": data['precio_elite_plus_sin_iva'],
+                    "con_iva": precio_elite_plus_con_iva
+                },
+                "elite": {
+                    "sin_iva": data['precio_elite_sin_iva'],
+                    "con_iva": precio_elite_con_iva
+                },
+                "partner": {
+                    "sin_iva": data['precio_partner_sin_iva'],
+                    "con_iva": precio_partner_con_iva
+                },
+                "publico": {
+                    "sin_iva": data['precio_publico_sin_iva'],
+                    "con_iva": precio_publico_con_iva
+                }
+            }
+        }), 201
+
+    except ValueError as ve:
+        print("Error en formato de precios:", str(ve))
+        return jsonify({"error": "Los precios deben ser valores numéricos válidos"}), 400
+    except Exception as e:
+        print("Error al agregar proyección:", str(e))
+        return jsonify({"error": "Error interno al agregar proyección"}), 500
+    finally:
+        if 'cursor' in locals():
+            cursor.close()
+        if 'conexion' in locals():
+            conexion.close()
+
+@proyecciones_bp.route('/proyecciones/editar/<int:id>', methods=['PUT'])
+def editar_proyeccion(id):
+    data = request.get_json()
+
+    campos_obligatorios = [
+        'referencia', 'clave_factura', 'clave_6_digitos', 'ean',
+        'clave_odoo', 'descripcion', 'modelo', 'id_disponibilidad',
+        'precio_distribuidor_sin_iva', 'precio_elite_plus_sin_iva',
+        'precio_elite_sin_iva', 'precio_partner_sin_iva',
+        'precio_publico_sin_iva'
+    ]
+
+    for campo in campos_obligatorios:
+        if campo not in data:
+            return jsonify({"error": f"El campo '{campo}' es obligatorio"}), 400
+
+    try:
+        conexion = obtener_conexion()
+        cursor = conexion.cursor()
+
+        cursor.execute("""
+            UPDATE proyecciones_ventas SET
+                referencia = %s,
+                clave_factura = %s,
+                clave_6_digitos = %s,
+                ean = %s,
+                clave_odoo = %s,
+                descripcion = %s,
+                modelo = %s,
+                precio_distribuidor_sin_iva = %s,
+                precio_elite_plus_sin_iva = %s,
+                precio_elite_sin_iva = %s,
+                precio_partner_sin_iva = %s,
+                precio_publico_sin_iva = %s,
+                id_disponibilidad = %s
+            WHERE id = %s
+        """, (
+            data['referencia'],
+            data['clave_factura'],
+            data['clave_6_digitos'],
+            data['ean'],
+            data['clave_odoo'],
+            data['descripcion'],
+            data['modelo'],
+            data['precio_distribuidor_sin_iva'],
+            data['precio_elite_plus_sin_iva'],
+            data['precio_elite_sin_iva'],
+            data['precio_partner_sin_iva'],
+            data['precio_publico_sin_iva'],
+            data['id_disponibilidad'],
+            id
+        ))
+
+        conexion.commit()
+
+        if cursor.rowcount == 0:
+            return jsonify({"error": "No se encontró la proyección para actualizar"}), 404
+
+        return jsonify({"mensaje": "Proyección actualizada exitosamente"}), 200
+
+    except Exception as e:
+        print("Error al editar proyección:", str(e))
+        return jsonify({"error": "Error interno al editar proyección"}), 500
+
+    finally:
+        cursor.close()
+        conexion.close()
+
+@proyecciones_bp.route('/proyecciones/eliminar/<int:id>', methods=['DELETE'])
+def eliminar_proyeccion(id):
+    try:
+        conexion = obtener_conexion()
+        cursor = conexion.cursor()
+
+        cursor.execute("DELETE FROM proyecciones_ventas WHERE id = %s", (id,))
+
+        conexion.commit()
+
+        if cursor.rowcount == 0:
+            return jsonify({"error": "No se encontró la proyección para eliminar"}), 404
+
+        return jsonify({"mensaje": "Proyección eliminada exitosamente"}), 200
+
+    except Exception as e:
+        print("Error al eliminar proyección:", str(e))
+        return jsonify({"error": "Error interno al eliminar proyección"}), 500
+
+    finally:
+        cursor.close()
+        conexion.close()
+
+@proyecciones_bp.route('/proyecciones/ya-enviada', methods=['GET'])
+def verificar_proyeccion_enviada():
+    auth_header = request.headers.get('Authorization')
+    
+    if not auth_header:
+        return jsonify({"error": "No se proporcionó token"}), 401
+
+    try:
+        token = auth_header.split(" ")[1]
+        decoded = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        id_usuario = decoded.get("id")
+    except Exception as e:
+        print("Error al decodificar token:", str(e))
+        return jsonify({"error": "Token inválido"}), 401
+
+    if not id_usuario:
+        return jsonify({"error": "No se proporcionó id_usuario"}), 400
+
+    try:
+        conexion = obtener_conexion()
+        cursor = conexion.cursor(dictionary=True)
+
+        # Buscar el cliente vinculado al usuario
+        cursor.execute("SELECT cliente_id FROM usuarios WHERE id = %s", (id_usuario,))
+        cliente = cursor.fetchone()
+
+        if not cliente or not cliente['cliente_id']:
+            return jsonify({"error": "Cliente no encontrado"}), 404
+
+        id_cliente = cliente['cliente_id']
+
+        # Verificar si hay registros de proyección para este cliente
+        cursor.execute("""
+            SELECT COUNT(*) AS total FROM proyecciones_cliente WHERE id_cliente = %s
+        """, (id_cliente,))
+        resultado = cursor.fetchone()
+
+        ya_enviada = resultado['total'] > 0
+        return jsonify({"yaEnviada": ya_enviada}), 200
+
+    except Exception as e:
+        print("Error al verificar proyección:", str(e))
+        return jsonify({"error": "Error interno"}), 500
+
+    finally:
+        cursor.close()
+        conexion.close()
+
+@proyecciones_bp.route('/proyecciones/resumen-global', methods=['GET'])
+def resumen_global_proyecciones():
+    conexion = obtener_conexion()
+    cursor = conexion.cursor(dictionary=True)
+
+    try:
+        cursor.execute("""
+            SELECT
+                c.id AS id_cliente,
+                c.clave AS clave_cliente,
+                c.nombre_cliente,
+                c.zona,
+                c.nivel,
+
+                pv.referencia,
+                pv.clave_factura,
+                pv.clave_6_digitos,
+                pv.ean,
+                pv.clave_odoo,
+                pv.descripcion,
+                pv.modelo,
+                pc.precio_aplicado,
+                pv.precio_publico_con_iva,
+
+                pc.q1_sep_2025,
+                pc.q2_sep_2025,
+                pc.q1_oct_2025,
+                pc.q2_oct_2025,
+                pc.q1_nov_2025,
+                pc.q2_nov_2025,
+                pc.q1_dic_2025,
+                pc.q2_dic_2025,
+
+                (pc.q1_sep_2025 + pc.q2_sep_2025 + pc.q1_oct_2025 + pc.q2_oct_2025 + 
+                 pc.q1_nov_2025 + pc.q2_nov_2025 + pc.q1_dic_2025 + pc.q2_dic_2025) AS orden_total_cant,
+
+                (pc.precio_aplicado * 
+                 (pc.q1_sep_2025 + pc.q2_sep_2025 + pc.q1_oct_2025 + pc.q2_oct_2025 + 
+                  pc.q1_nov_2025 + pc.q2_nov_2025 + pc.q1_dic_2025 + pc.q2_dic_2025)
+                ) AS orden_total_importe,
+
+                pc.fecha_registro,
+                pc.folio
+
+            FROM proyecciones_cliente pc
+            JOIN proyecciones_ventas pv ON pc.id_proyeccion = pv.id
+            JOIN clientes c ON pc.id_cliente = c.id
+
+            ORDER BY c.nombre_cliente, pc.fecha_registro DESC, pv.clave_factura
+        """)
+
+        rows = cursor.fetchall()
+        agrupado = {}
+
+        for row in rows:
+            id_cliente = row["id_cliente"]
+            if id_cliente not in agrupado:
+                agrupado[id_cliente] = {
+                    "clave_cliente": row["clave_cliente"],
+                    "nombre_cliente": row["nombre_cliente"],
+                    "zona": row["zona"],
+                    "nivel": row["nivel"],
+                    "productos": []
+                }
+
+            producto = {
+                "referencia": row["referencia"],
+                "clave_factura": row["clave_factura"],
+                "clave_6_digitos": row["clave_6_digitos"],
+                "ean": row["ean"],
+                "clave_odoo": row["clave_odoo"],
+                "descripcion": row["descripcion"],
+                "modelo": row["modelo"],
+                "precio_aplicado": float(row["precio_aplicado"]) if row["precio_aplicado"] is not None else None,
+                "precio_publico_con_iva": float(row["precio_publico_con_iva"]) if row["precio_publico_con_iva"] is not None else None,
+                "q1_sep_2025": row["q1_sep_2025"],
+                "q2_sep_2025": row["q2_sep_2025"],
+                "q1_oct_2025": row["q1_oct_2025"],
+                "q2_oct_2025": row["q2_oct_2025"],
+                "q1_nov_2025": row["q1_nov_2025"],
+                "q2_nov_2025": row["q2_nov_2025"],
+                "q1_dic_2025": row["q1_dic_2025"],
+                "q2_dic_2025": row["q2_dic_2025"],
+                "orden_total_cant": row["orden_total_cant"],
+                "orden_total_importe": float(row["orden_total_importe"]) if row["orden_total_importe"] is not None else None,
+                "fecha_registro": row["fecha_registro"].strftime('%Y-%m-%d %H:%M:%S') if row["fecha_registro"] else None,
+                "folio": row["folio"]
+            }
+
+            agrupado[id_cliente]["productos"].append(producto)
+
+        return jsonify(list(agrupado.values())), 200
+
+    except Exception as e:
+        print("Error al obtener el resumen global:", str(e))
+        return jsonify({"error": "Error interno al obtener el resumen"}), 500
+
+    finally:
+        cursor.close()
+        conexion.close()
+
+@proyecciones_bp.route('/importar_proyecciones', methods=['POST'])
+def importar_proyecciones():
+    if 'file' not in request.files:
+        return jsonify({'success': False, 'error': 'No se proporcionó archivo'}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'success': False, 'error': 'Nombre de archivo vacío'}), 400
+
+    try:
+        # Guardar archivo temporalmente
+        UPLOAD_FOLDER = 'temp_uploads'
+        os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+        filename = secure_filename(f"proyecciones_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        file.save(filepath)
+
+        # Funciones de limpieza mejoradas
+        def to_decimal(val):
+            try:
+                if val is None or pd.isna(val):
+                    return None
+                if isinstance(val, str) and val.strip().lower() in ['nan', 'none', '']:
+                    return None
+                return float(str(val).replace(',', '').strip())
+            except:
+                return None
+
+        def to_int(val):
+            try:
+                if val is None or pd.isna(val):
+                    return 0
+                if isinstance(val, str) and val.strip().lower() in ['nan', 'none', '']:
+                    return 0
+                return int(float(val))  # Convertir primero a float por si viene como decimal
+            except:
+                return 0
+
+        # Leer el archivo Excel
+        df = pd.read_excel(filepath)
+
+        # Reemplazar todos los valores NaN/NaT con None
+        df = df.replace([np.nan, pd.NaT], None)
+
+        # Verificar columnas requeridas
+        columnas_requeridas = [
+            'referencia', 'clave_factura', 'clave_6_digitos', 'clave_odoo',
+            'descripcion', 'modelo', 'ean',
+            'precio_elite_plus_sin_iva', 'precio_elite_sin_iva', 'precio_partner_sin_iva',
+            'precio_distribuidor_sin_iva', 'precio_publico_sin_iva', 'precio_publico_con_iva_my26',
+            'precio_elite_plus_con_iva', 'precio_elite_con_iva', 'precio_partner_con_iva',
+            'precio_distribuidor_con_iva', 'precio_publico_con_iva',
+            'q1_sep_2025', 'q2_sep_2025', 'q1_oct_2025', 'q2_oct_2025',
+            'q1_nov_2025', 'q2_nov_2025', 'q1_dic_2025', 'q2_dic_2025'
+        ]
+
+        columnas_faltantes = [col for col in columnas_requeridas if col not in df.columns]
+        if columnas_faltantes:
+            return jsonify({'success': False, 'error': f'Faltan columnas: {", ".join(columnas_faltantes)}'}), 400
+
+        conexion = obtener_conexion()
+        cursor = conexion.cursor(dictionary=True)
+
+        total_insertados = 0
+        sql = """
+            INSERT INTO proyecciones_ventas (
+                referencia, clave_factura, clave_6_digitos, ean, clave_odoo, descripcion, modelo,
+                precio_elite_plus_sin_iva, precio_elite_sin_iva, precio_partner_sin_iva,
+                precio_distribuidor_sin_iva, precio_publico_sin_iva, precio_publico_con_iva_my26,
+                precio_elite_plus_con_iva, precio_elite_con_iva, precio_partner_con_iva,
+                precio_distribuidor_con_iva, precio_publico_con_iva,
+                q1_sep_2025, q2_sep_2025, q1_oct_2025, q2_oct_2025,
+                q1_nov_2025, q2_nov_2025, q1_dic_2025, q2_dic_2025,
+                orden_total_cant, orden_total_importe, id_disponibilidad
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+
+        for _, fila in df.iterrows():
+            # Calcular total_cant e importe si no vienen en el archivo
+            total_cant = to_int(fila.get('orden_total_cant', 0))
+            total_importe = to_decimal(fila.get('orden_total_importe'))
+            
+            if total_cant == 0:
+                total_cant = (
+                    to_int(fila['q1_sep_2025']) + to_int(fila['q2_sep_2025']) +
+                    to_int(fila['q1_oct_2025']) + to_int(fila['q2_oct_2025']) +
+                    to_int(fila['q1_nov_2025']) + to_int(fila['q2_nov_2025']) +
+                    to_int(fila['q1_dic_2025']) + to_int(fila['q2_dic_2025'])
+                )
+            
+            if total_importe is None and fila['precio_publico_con_iva'] is not None:
+                total_importe = to_decimal(fila['precio_publico_con_iva']) * total_cant
+
+            valores = (
+                fila['referencia'], 
+                str(int(fila['clave_factura'])) if pd.notna(fila['clave_factura']) else None,
+                str(int(fila['clave_6_digitos'])) if pd.notna(fila['clave_6_digitos']) else None,
+                str(int(fila['ean'])) if pd.notna(fila['ean']) else None,
+                fila['clave_odoo'], 
+                fila['descripcion'], 
+                fila['modelo'],
+                to_decimal(fila['precio_elite_plus_sin_iva']),
+                to_decimal(fila['precio_elite_sin_iva']),
+                to_decimal(fila['precio_partner_sin_iva']),
+                to_decimal(fila['precio_distribuidor_sin_iva']),
+                to_decimal(fila['precio_publico_sin_iva']),
+                to_decimal(fila['precio_publico_con_iva_my26']),
+                to_decimal(fila['precio_elite_plus_con_iva']),
+                to_decimal(fila['precio_elite_con_iva']),
+                to_decimal(fila['precio_partner_con_iva']),
+                to_decimal(fila['precio_distribuidor_con_iva']),
+                to_decimal(fila['precio_publico_con_iva']),
+                to_int(fila['q1_sep_2025']),
+                to_int(fila['q2_sep_2025']),
+                to_int(fila['q1_oct_2025']),
+                to_int(fila['q2_oct_2025']),
+                to_int(fila['q1_nov_2025']),
+                to_int(fila['q2_nov_2025']),
+                to_int(fila['q1_dic_2025']),
+                to_int(fila['q2_dic_2025']),
+                total_cant,
+                total_importe,
+                1  # Valor por defecto para id_disponibilidad
+            )
+
+            try:
+                cursor.execute(sql, valores)
+                total_insertados += 1
+            except Exception as e:
+                print(f"Error al insertar fila: {valores}")
+                print(f"Error: {str(e)}")
+                continue
+
+        conexion.commit()
+        cursor.close()
+        conexion.close()
+        os.remove(filepath)
+
+        return jsonify({
+            'success': True, 
+            'message': f'Se importaron {total_insertados} registros', 
+            'count': total_insertados
+        })
+
+    except Exception as e:
+        print("Error:", e)
+        traceback.print_exc()
+        if 'conexion' in locals():
+            conexion.rollback()
+            conexion.close()
+        if 'filepath' in locals() and os.path.exists(filepath):
+            os.remove(filepath)
+        return jsonify({
+            'success': False, 
+            'error': str(e),
+            'details': 'Verifica que el archivo tenga el formato correcto y todas las columnas requeridas'
+        }), 500

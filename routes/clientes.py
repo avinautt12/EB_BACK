@@ -1,5 +1,8 @@
 from flask import Blueprint, jsonify, request
 from db_conexion import obtener_conexion
+import jwt
+
+SECRET_KEY = "123456"
 
 clientes_bp = Blueprint('clientes', __name__, url_prefix='')
 
@@ -189,6 +192,108 @@ def eliminar_cliente(id_cliente):
     except Exception as e:
         print("Error al eliminar cliente:", str(e))
         return jsonify({"error": "Error al eliminar cliente"}), 500
+    finally:
+        cursor.close()
+        conexion.close()
+
+@clientes_bp.route('/clientes/nivel', methods=['GET'])
+def obtener_nivel_cliente_actual():
+    conexion = obtener_conexion()
+    cursor = conexion.cursor(dictionary=True)
+
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        return jsonify({"error": "Token no proporcionado"}), 401
+
+    token = auth_header.split(' ')[1]
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
+        usuario_id = payload['id']
+    except jwt.ExpiredSignatureError:
+        return jsonify({"error": "Token expirado"}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({"error": "Token inválido"}), 401
+
+    try:
+        # Obtener cliente_id del usuario
+        cursor.execute("SELECT cliente_id FROM usuarios WHERE id = %s", (usuario_id,))
+        usuario = cursor.fetchone()
+
+        if not usuario or not usuario['cliente_id']:
+            return jsonify({"error": "El usuario no tiene cliente asociado"}), 404
+
+        cliente_id = usuario['cliente_id']
+
+        # Obtener nivel y compromiso_scott del cliente
+        cursor.execute("""
+            SELECT c.nivel, n.compromiso_scott
+            FROM clientes c
+            JOIN niveles_distribuidor n ON c.nivel = n.nivel
+            WHERE c.id = %s
+        """, (cliente_id,))
+        cliente = cursor.fetchone()
+
+        if not cliente:
+            return jsonify({"error": "Cliente no encontrado"}), 404
+
+        return jsonify({
+            "nivel": cliente['nivel'],
+            "compromiso": cliente['compromiso_scott']
+        }), 200
+
+    except Exception as e:
+        print("Error al obtener nivel del cliente:", str(e))
+        return jsonify({"error": "Error en la consulta"}), 500
+    finally:
+        cursor.close()
+        conexion.close()
+
+@clientes_bp.route('/clientes/info', methods=['GET'])
+def obtener_info_cliente_actual():
+    conexion = obtener_conexion()
+    cursor = conexion.cursor(dictionary=True)
+
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        return jsonify({"error": "Token no proporcionado"}), 401
+
+    token = auth_header.split(' ')[1]
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
+        usuario_id = payload['id']
+    except jwt.ExpiredSignatureError:
+        return jsonify({"error": "Token expirado"}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({"error": "Token inválido"}), 401
+
+    try:
+        # Obtener cliente_id del usuario
+        cursor.execute("SELECT cliente_id FROM usuarios WHERE id = %s", (usuario_id,))
+        usuario = cursor.fetchone()
+
+        if not usuario or not usuario['cliente_id']:
+            return jsonify({"error": "El usuario no tiene cliente asociado"}), 404
+
+        cliente_id = usuario['cliente_id']
+
+        # Obtener la información completa del cliente
+        cursor.execute("""
+            SELECT id, clave, zona, nombre_cliente, nivel, id_grupo
+            FROM clientes
+            WHERE id = %s
+        """, (cliente_id,))
+        cliente = cursor.fetchone()
+
+        if not cliente:
+            return jsonify({"error": "Cliente no encontrado"}), 404
+
+        return jsonify(cliente), 200
+
+    except Exception as e:
+        print("Error al obtener la información del cliente:", str(e))
+        return jsonify({"error": "Error en la consulta"}), 500
     finally:
         cursor.close()
         conexion.close()
