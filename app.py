@@ -12,7 +12,7 @@ from routes.proyecciones import proyecciones_bp
 from routes.disponible import disponibilidad_bp
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "http://localhost:4200"}}, supports_credentials=True)
+CORS(app, resources={r"/*": {"origins": ["http://localhost:4200", "https://otro-dominio.com"]}}, supports_credentials=True)
 
 socketio.init_app(app)  # IMPORTANTE
 
