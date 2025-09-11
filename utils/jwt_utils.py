@@ -3,13 +3,21 @@ import datetime
 
 SECRET_KEY = "123456"
 
-def generar_token(id_usuario, rol, usuario, nombre):
+def generar_token(id_usuario, rol, usuario, nombre, cliente_id, clave_cliente, nombre_cliente):
     payload = {
+        # Datos del usuario
         'id': id_usuario,
         'rol': rol,
         'usuario': usuario,
         'nombre': nombre,
-        'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=3)
+        
+        # Datos del cliente
+        'cliente_id': cliente_id,
+        'clave': clave_cliente,
+        'nombre_cliente': nombre_cliente,
+        
+        # Expiración
+        'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=2)
     }
     return jwt.encode(payload, SECRET_KEY, algorithm='HS256')
 

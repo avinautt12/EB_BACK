@@ -4,7 +4,7 @@ from datetime import datetime, date
 def obtener_todos_los_registros():
     conexion = obtener_conexion()
     cursor = conexion.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM monitor_odoo")
+    cursor.execute("SELECT * FROM monitor")
     resultados = cursor.fetchall()
     cursor.close()
 
@@ -20,6 +20,5 @@ def obtener_todos_los_registros():
             except:
                 pass  # Deja la fecha como está si falla
 
-    return resultados
     return resultados
 

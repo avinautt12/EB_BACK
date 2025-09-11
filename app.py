@@ -10,11 +10,16 @@ from routes.metas import metas_bp
 from routes.previo import previo_bp
 from routes.proyecciones import proyecciones_bp
 from routes.disponible import disponibilidad_bp
+from routes.multimarcas import multimarcas_bp
+from routes.caratulas import caratulas_bp
+
+from routes.integrales import integrales_bp  
+from routes.email import email_bp
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": ["http://localhost:4200", "https://otro-dominio.com"]}}, supports_credentials=True)
 
-socketio.init_app(app)  # IMPORTANTE
+# socketio.init_app(app)  # IMPORTANTE
 
 app.register_blueprint(monitor_odoo_bp)
 app.register_blueprint(auth)
@@ -24,14 +29,22 @@ app.register_blueprint(metas_bp)
 app.register_blueprint(previo_bp)
 app.register_blueprint(proyecciones_bp)
 app.register_blueprint(disponibilidad_bp)
+app.register_blueprint(multimarcas_bp)
+app.register_blueprint(caratulas_bp)
+app.register_blueprint(integrales_bp)
+app.register_blueprint(email_bp)
 
-@socketio.on('connect')
-def handle_connect():
-    print('Cliente conectado')
+#@socketio.on('connect')
+# def handle_connect():
+#     print('Cliente conectado')
 
-@socketio.on('disconnect')
-def handle_disconnect():
-    print('Cliente desconectado')
+# #@socketio.on('disconnect')
+# def handle_disconnect():
+#     print('Cliente desconectado')
 
 if __name__ == '__main__':
-    socketio.run(app, debug=True, port=5000, host='0.0.0.0')
+    # Se comenta la ejecución de socketio
+    # socketio.run(app, debug=True, port=5000, host='0.0.0.0')
+    
+    # Se añade la ejecución estándar de Flask
+    app.run(debug=True, port=5000, host='0.0.0.0')

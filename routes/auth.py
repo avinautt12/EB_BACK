@@ -22,15 +22,25 @@ def registrar_usuario():
     if not data:
         return jsonify({"error": "No se proporcionaron datos"}), 400
 
+    # Obtener campos del JSON
     usuario = data.get('usuario')
     contrasena = data.get('contrasena')
     nombre = data.get('nombre')
     correo = data.get('correo')
-    rol = data.get('rol', 'Usuario')  # Puede venir como "Admin" o "Usuario"
+    rol = data.get('rol', 'Usuario')
     cliente_id = data.get('cliente_id')
 
-    if campo_vacio(usuario) or campo_vacio(contrasena) or campo_vacio(nombre) or campo_vacio(correo):
-        return jsonify({"error": "Todos los campos son obligatorios"}), 400
+    # Validaciones básicas
+    campos_requeridos = {
+        'usuario': usuario,
+        'contrasena': contrasena,
+        'nombre': nombre,
+        'correo': correo
+    }
+    
+    for campo, valor in campos_requeridos.items():
+        if not valor or (isinstance(valor, str) and valor.strip() == ''):
+            return jsonify({"error": f"El campo '{campo}' es obligatorio"}), 400
 
     if not isinstance(usuario, str) or not isinstance(contrasena, str):
         return jsonify({"error": "Usuario y contraseña deben ser cadenas de texto"}), 400
@@ -44,16 +54,16 @@ def registrar_usuario():
     if len(contrasena) < 6:
         return jsonify({"error": "La contraseña debe tener al menos 6 caracteres"}), 400
 
-    # Convertir el rol en ID
-    if rol == "Administrador":
-        rol_id = 1
-    elif rol == "Usuario":
-        rol_id = 2
-    else:
+    # Validar y traducir el rol
+    roles_validos = {"Administrador": 1, "Usuario": 2}
+    if rol not in roles_validos:
         return jsonify({"error": "Rol inválido, debe ser 'Administrador' o 'Usuario'"}), 400
+    
+    rol_id = roles_validos[rol]
 
     cursor = conexion.cursor(dictionary=True)
 
+    # Validar cliente_id si se proporciona
     if cliente_id not in [None, "", "null"]:
         try:
             cliente_id = int(cliente_id)
@@ -65,7 +75,7 @@ def registrar_usuario():
     else:
         cliente_id = None
 
-    # Validar unicidad
+    # Validar unicidad de usuario, correo y nombre
     cursor.execute("SELECT id FROM usuarios WHERE usuario = %s", (usuario,))
     if cursor.fetchone():
         return jsonify({"error": "El nombre de usuario ya está en uso"}), 400
@@ -78,33 +88,47 @@ def registrar_usuario():
     if cursor.fetchone():
         return jsonify({"error": "El nombre ya está en uso"}), 400
 
+    # Hashear la contraseña
     contrasena_hash = hash_password(contrasena)
 
+    # Insertar usuario
     try:
         cursor.execute(
-            "INSERT INTO usuarios (usuario, contrasena, nombre, correo, rol_id, activo, cliente_id) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            """
+            INSERT INTO usuarios (
+                usuario, contrasena, nombre, correo,
+                rol_id, activo, cliente_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
             (usuario, contrasena_hash, nombre, correo, rol_id, True, cliente_id)
         )
         conexion.commit()
-        
         nuevo_id = cursor.lastrowid
 
-        cursor.execute(
-            """
-            SELECT u.id, u.usuario, u.nombre, u.correo, r.nombre AS rol, u.activo
+        # Obtener datos del usuario recién creado
+        cursor.execute("""
+            SELECT
+                u.id,
+                u.usuario,
+                u.nombre,
+                u.correo,
+                r.nombre AS rol,
+                u.activo,
+                c.nombre_cliente AS cliente_nombre,
+                c.id AS cliente_id
             FROM usuarios u
             JOIN roles r ON u.rol_id = r.id
+            LEFT JOIN clientes c ON u.cliente_id = c.id
             WHERE u.id = %s
-            """, (nuevo_id,)
-        )
+        """, (nuevo_id,))
         usuario_creado = cursor.fetchone()
-
-        socketio.emit('usuarioCreado', usuario_creado) 
+        cursor.close()
 
         return jsonify({
             "mensaje": "Usuario registrado con éxito",
-            **usuario_creado
+            "usuario": usuario_creado
         }), 201
+
     except Exception as e:
         conexion.rollback()
         return jsonify({"error": f"Error al registrar el usuario: {str(e)}"}), 500
@@ -128,7 +152,13 @@ def login():
         # Agregar logging para ver qué usuario se está buscando
         print(f"Intentando login para usuario: {usuario}")
         
-        cursor.execute("SELECT * FROM usuarios WHERE usuario = %s AND activo = TRUE", (usuario,))
+        query = """
+        SELECT u.*, c.id as cliente_id, c.clave as clave_cliente, c.nombre_cliente 
+        FROM usuarios u 
+        LEFT JOIN clientes c ON u.cliente_id = c.id 
+        WHERE u.usuario = %s AND u.activo = TRUE
+        """
+        cursor.execute(query, (usuario,))
         user = cursor.fetchone()
         
         # Agregar logging para ver qué usuario se encontró
@@ -148,7 +178,10 @@ def login():
                     user['id'],
                     user['rol_id'],
                     user['usuario'],
-                    user['nombre']
+                    user['nombre'],
+                    user['cliente_id'],          
+                    user['clave_cliente'],     
+                    user['nombre_cliente']
                 )
                 return jsonify({
                     "token": token

@@ -51,6 +51,7 @@ def listar_proyecciones_limpias():
                 pv.clave_odoo,
                 pv.descripcion,
                 pv.modelo,
+                pv.spec,
 
                 -- Precios
                 pv.precio_elite_plus_sin_iva,
@@ -74,6 +75,12 @@ def listar_proyecciones_limpias():
                 pv.q2_nov_2025,
                 pv.q1_dic_2025,
                 pv.q2_dic_2025,
+                pv.q1_mar_2026,
+                pv.q2_mar_2026,
+                pv.q1_abr_2026,
+                pv.q2_abr_2026,
+                pv.q1_may_2026,
+                pv.q2_may_2026,
 
                 -- Totales
                 pv.orden_total_cant,
@@ -87,7 +94,13 @@ def listar_proyecciones_limpias():
                 dp.q1_nov_2025 as disp_q1_nov_2025,
                 dp.q2_nov_2025 as disp_q2_nov_2025,
                 dp.q1_dic_2025 as disp_q1_dic_2025,
-                dp.q2_dic_2025 as disp_q2_dic_2025
+                dp.q2_dic_2025 as disp_q2_dic_2025,
+                dp.q1_mar_2026 as disp_q1_mar_2026,
+                dp.q2_mar_2026 as disp_q2_mar_2026,
+                dp.q1_abr_2026 as disp_q1_abr_2026,
+                dp.q2_abr_2026 as disp_q2_abr_2026,
+                dp.q1_may_2026 as disp_q1_may_2026,
+                dp.q2_may_2026 as disp_q2_may_2026
 
             FROM proyecciones_ventas pv
             LEFT JOIN disponibilidad_proyeccion dp ON pv.id_disponibilidad = dp.id
@@ -183,6 +196,12 @@ def agregar_proyecciones_cliente():
                 'q2_nov_2025': proyeccion.get('q2_nov_2025', 0),
                 'q1_dic_2025': proyeccion.get('q1_dic_2025', 0),
                 'q2_dic_2025': proyeccion.get('q2_dic_2025', 0),
+                'q1_mar_2026': proyeccion.get('q1_mar_2026', 0),
+                'q2_mar_2026': proyeccion.get('q2_mar_2026', 0),
+                'q1_abr_2026': proyeccion.get('q1_abr_2026', 0),
+                'q2_abr_2026': proyeccion.get('q2_abr_2026', 0),
+                'q1_may_2026': proyeccion.get('q1_may_2026', 0),
+                'q2_may_2026': proyeccion.get('q2_may_2026', 0)
             }
 
             # Calcular subtotal para esta proyección
@@ -194,14 +213,19 @@ def agregar_proyecciones_cliente():
                 INSERT INTO proyecciones_cliente (
                     id_cliente, id_proyeccion, precio_aplicado, folio,
                     q1_sep_2025, q2_sep_2025, q1_oct_2025, q2_oct_2025, 
-                    q1_nov_2025, q2_nov_2025, q1_dic_2025, q2_dic_2025
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    q1_nov_2025, q2_nov_2025, q1_dic_2025, q2_dic_2025,
+                    q1_mar_2026, q2_mar_2026, q1_abr_2026, q2_abr_2026,
+                    q1_may_2026, q2_may_2026
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 id_cliente, id_proyeccion, precio_aplicado, folio,
                 cantidades['q1_sep_2025'], cantidades['q2_sep_2025'],
                 cantidades['q1_oct_2025'], cantidades['q2_oct_2025'],
                 cantidades['q1_nov_2025'], cantidades['q2_nov_2025'],
-                cantidades['q1_dic_2025'], cantidades['q2_dic_2025']
+                cantidades['q1_dic_2025'], cantidades['q2_dic_2025'],
+                cantidades['q1_mar_2026'], cantidades['q2_mar_2026'],
+                cantidades['q1_abr_2026'], cantidades['q2_abr_2026'],
+                cantidades['q1_may_2026'], cantidades['q2_may_2026']
             ))
 
         conexion.commit()
@@ -213,7 +237,10 @@ def agregar_proyecciones_cliente():
                 'q1_sep_2025', 'q2_sep_2025', 
                 'q1_oct_2025', 'q2_oct_2025',
                 'q1_nov_2025', 'q2_nov_2025',
-                'q1_dic_2025', 'q2_dic_2025'
+                'q1_dic_2025', 'q2_dic_2025',
+                'q1_mar_2026', 'q2_mar_2026',
+                'q1_abr_2026', 'q2_abr_2026',
+                'q1_may_2026', 'q2_may_2026'
             ]) for p in data)
         }), 201
 
@@ -267,6 +294,12 @@ def historial_proyecciones_cliente():
                 pc.q2_nov_2025,
                 pc.q1_dic_2025,
                 pc.q2_dic_2025,
+                pc.q1_mar_2026,
+                pc.q2_mar_2026,
+                pc.q1_abr_2026,
+                pc.q2_abr_2026,
+                pc.q1_may_2026,
+                pc.q2_may_2026,
                 pc.precio_aplicado,
                 pv.id AS id_producto,
                 pv.referencia,
@@ -276,6 +309,7 @@ def historial_proyecciones_cliente():
                 pv.clave_odoo,
                 pv.descripcion, 
                 pv.modelo,
+                pv.spec,
                 pv.precio_elite_plus_sin_iva,
                 pv.precio_elite_sin_iva,
                 pv.precio_partner_sin_iva,
@@ -295,6 +329,12 @@ def historial_proyecciones_cliente():
                 pv.q2_nov_2025 AS producto_q2_nov_2025,
                 pv.q1_dic_2025 AS producto_q1_dic_2025,
                 pv.q2_dic_2025 AS producto_q2_dic_2025,
+                pv.q1_mar_2026 AS producto_q1_mar_2026,
+                pv.q2_mar_2026 AS producto_q2_mar_2026,
+                pv.q1_abr_2026 AS producto_q1_abr_2026,
+                pv.q2_abr_2026 AS producto_q2_abr_2026,
+                pv.q1_may_2026 AS producto_q1_may_2026,
+                pv.q2_may_2026 AS producto_q2_may_2026,
                 pv.orden_total_cant,
                 pv.orden_total_importe,
                 pv.id_disponibilidad
@@ -335,6 +375,7 @@ def detalles_proyeccion(id_proyeccion):
                 pv.clave_odoo,
                 pv.descripcion,
                 pv.modelo,
+                pv.spec,
                 pv.ean,
                 pv.referencia,
                 pv.precio_elite_plus_sin_iva,
@@ -356,6 +397,12 @@ def detalles_proyeccion(id_proyeccion):
                 pv.q2_nov_2025,
                 pv.q1_dic_2025,
                 pv.q2_dic_2025,
+                pv.q1_mar_2026,
+                pv.q2_mar_2026,
+                pv.q1_abr_2026,
+                pv.q2_abr_2026,
+                pv.q1_may_2026,
+                pv.q2_may_2026,
                 pv.orden_total_cant,
                 pv.orden_total_importe,
                 JSON_ARRAYAGG(JSON_OBJECT(
@@ -370,7 +417,13 @@ def detalles_proyeccion(id_proyeccion):
                     'q1_nov_2025', pc.q1_nov_2025,
                     'q2_nov_2025', pc.q2_nov_2025,
                     'q1_dic_2025', pc.q1_dic_2025,
-                    'q2_dic_2025', pc.q2_dic_2025
+                    'q2_dic_2025', pc.q2_dic_2025,
+                    'q1_mar_2026', pc.q1_mar_2026,
+                    'q2_mar_2026', pc.q2_mar_2026,
+                    'q1_abr_2026', pc.q1_abr_2026,
+                    'q2_abr_2026', pc.q2_abr_2026,
+                    'q1_may_2026', pc.q1_may_2026,
+                    'q2_may_2026', pc.q2_may_2026
                 )) AS historial_clientes
             FROM proyecciones_ventas pv
             LEFT JOIN proyecciones_cliente pc ON pv.id = pc.id_proyeccion
@@ -449,7 +502,7 @@ def agregar_proyeccion():
 
     campos_obligatorios = [
         'referencia', 'clave_factura', 'clave_6_digitos', 'ean',
-        'clave_odoo', 'descripcion', 'modelo', 'id_disponibilidad',
+        'clave_odoo', 'descripcion', 'modelo', 'spec', 'id_disponibilidad',
         'precio_distribuidor_sin_iva', 'precio_elite_plus_sin_iva',
         'precio_elite_sin_iva', 'precio_partner_sin_iva',
         'precio_publico_sin_iva'
@@ -473,14 +526,14 @@ def agregar_proyeccion():
         cursor.execute("""
             INSERT INTO proyecciones_ventas (
                 referencia, clave_factura, clave_6_digitos, ean, clave_odoo,
-                descripcion, modelo, 
+                descripcion, modelo, spec,
                 precio_distribuidor_sin_iva, precio_distribuidor_con_iva,
                 precio_elite_plus_sin_iva, precio_elite_plus_con_iva,
                 precio_elite_sin_iva, precio_elite_con_iva,
                 precio_partner_sin_iva, precio_partner_con_iva,
                 precio_publico_sin_iva, precio_publico_con_iva, precio_publico_con_iva_my26,
                 id_disponibilidad
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             data['referencia'],
             data['clave_factura'],
@@ -489,6 +542,7 @@ def agregar_proyeccion():
             data['clave_odoo'],
             data['descripcion'],
             data['modelo'],
+            data['spec'],
             # Precios distribuidor
             data['precio_distribuidor_sin_iva'],
             precio_distribuidor_con_iva,
@@ -553,7 +607,7 @@ def editar_proyeccion(id):
 
     campos_obligatorios = [
         'referencia', 'clave_factura', 'clave_6_digitos', 'ean',
-        'clave_odoo', 'descripcion', 'modelo', 'id_disponibilidad',
+        'clave_odoo', 'descripcion', 'modelo', 'spec', 'id_disponibilidad',
         'precio_distribuidor_sin_iva', 'precio_elite_plus_sin_iva',
         'precio_elite_sin_iva', 'precio_partner_sin_iva',
         'precio_publico_sin_iva'
@@ -576,6 +630,7 @@ def editar_proyeccion(id):
                 clave_odoo = %s,
                 descripcion = %s,
                 modelo = %s,
+                spec = %s,
                 precio_distribuidor_sin_iva = %s,
                 precio_elite_plus_sin_iva = %s,
                 precio_elite_sin_iva = %s,
@@ -591,6 +646,7 @@ def editar_proyeccion(id):
             data['clave_odoo'],
             data['descripcion'],
             data['modelo'],
+            data['spec'],
             data['precio_distribuidor_sin_iva'],
             data['precio_elite_plus_sin_iva'],
             data['precio_elite_sin_iva'],
@@ -707,6 +763,7 @@ def resumen_global_proyecciones():
                 pv.clave_odoo,
                 pv.descripcion,
                 pv.modelo,
+                pv.spec,
                 pc.precio_aplicado,
                 pv.precio_publico_con_iva,
 
@@ -718,13 +775,23 @@ def resumen_global_proyecciones():
                 pc.q2_nov_2025,
                 pc.q1_dic_2025,
                 pc.q2_dic_2025,
+                pc.q1_mar_2026,
+                pc.q2_mar_2026,
+                pc.q1_abr_2026,
+                pc.q2_abr_2026,
+                pc.q1_may_2026,
+                pc.q2_may_2026,
 
                 (pc.q1_sep_2025 + pc.q2_sep_2025 + pc.q1_oct_2025 + pc.q2_oct_2025 + 
-                 pc.q1_nov_2025 + pc.q2_nov_2025 + pc.q1_dic_2025 + pc.q2_dic_2025) AS orden_total_cant,
+                 pc.q1_nov_2025 + pc.q2_nov_2025 + pc.q1_dic_2025 + pc.q2_dic_2025 +
+                 pc.q1_mar_2026 + pc.q2_mar_2026 + pc.q1_abr_2026 + pc.q2_abr_2026 +
+                 pc.q1_may_2026 + pc.q2_may_2026) AS orden_total_cant,
 
                 (pc.precio_aplicado * 
                  (pc.q1_sep_2025 + pc.q2_sep_2025 + pc.q1_oct_2025 + pc.q2_oct_2025 + 
-                  pc.q1_nov_2025 + pc.q2_nov_2025 + pc.q1_dic_2025 + pc.q2_dic_2025)
+                  pc.q1_nov_2025 + pc.q2_nov_2025 + pc.q1_dic_2025 + pc.q2_dic_2025 +
+                  pc.q1_mar_2026 + pc.q2_mar_2026 + pc.q1_abr_2026 + pc.q2_abr_2026 +
+                  pc.q1_may_2026 + pc.q2_may_2026)
                 ) AS orden_total_importe,
 
                 pc.fecha_registro,
@@ -759,6 +826,7 @@ def resumen_global_proyecciones():
                 "clave_odoo": row["clave_odoo"],
                 "descripcion": row["descripcion"],
                 "modelo": row["modelo"],
+                "spec": row["spec"],
                 "precio_aplicado": float(row["precio_aplicado"]) if row["precio_aplicado"] is not None else None,
                 "precio_publico_con_iva": float(row["precio_publico_con_iva"]) if row["precio_publico_con_iva"] is not None else None,
                 "q1_sep_2025": row["q1_sep_2025"],
@@ -769,6 +837,12 @@ def resumen_global_proyecciones():
                 "q2_nov_2025": row["q2_nov_2025"],
                 "q1_dic_2025": row["q1_dic_2025"],
                 "q2_dic_2025": row["q2_dic_2025"],
+                "q1_mar_2026": row["q1_mar_2026"],
+                "q2_mar_2026": row["q2_mar_2026"],
+                "q1_abr_2026": row["q1_abr_2026"],
+                "q2_abr_2026": row["q2_abr_2026"],
+                "q1_may_2026": row["q1_may_2026"],
+                "q2_may_2026": row["q2_may_2026"],
                 "orden_total_cant": row["orden_total_cant"],
                 "orden_total_importe": float(row["orden_total_importe"]) if row["orden_total_importe"] is not None else None,
                 "fecha_registro": row["fecha_registro"].strftime('%Y-%m-%d %H:%M:%S') if row["fecha_registro"] else None,
@@ -805,7 +879,7 @@ def importar_proyecciones():
         filepath = os.path.join(UPLOAD_FOLDER, filename)
         file.save(filepath)
 
-        # Funciones de limpieza mejoradas
+        # Funciones de limpieza (se mantienen igual)
         def to_decimal(val):
             try:
                 if val is None or pd.isna(val):
@@ -822,26 +896,27 @@ def importar_proyecciones():
                     return 0
                 if isinstance(val, str) and val.strip().lower() in ['nan', 'none', '']:
                     return 0
-                return int(float(val))  # Convertir primero a float por si viene como decimal
+                return int(float(val))
             except:
                 return 0
 
         # Leer el archivo Excel
         df = pd.read_excel(filepath)
-
-        # Reemplazar todos los valores NaN/NaT con None
         df = df.replace([np.nan, pd.NaT], None)
 
-        # Verificar columnas requeridas
+        # Verificar columnas requeridas (agregando las columnas de totales)
         columnas_requeridas = [
             'referencia', 'clave_factura', 'clave_6_digitos', 'clave_odoo',
-            'descripcion', 'modelo', 'ean',
+            'descripcion', 'modelo', 'spec', 'ean',
             'precio_elite_plus_sin_iva', 'precio_elite_sin_iva', 'precio_partner_sin_iva',
             'precio_distribuidor_sin_iva', 'precio_publico_sin_iva', 'precio_publico_con_iva_my26',
             'precio_elite_plus_con_iva', 'precio_elite_con_iva', 'precio_partner_con_iva',
             'precio_distribuidor_con_iva', 'precio_publico_con_iva',
             'q1_sep_2025', 'q2_sep_2025', 'q1_oct_2025', 'q2_oct_2025',
-            'q1_nov_2025', 'q2_nov_2025', 'q1_dic_2025', 'q2_dic_2025'
+            'q1_nov_2025', 'q2_nov_2025', 'q1_dic_2025', 'q2_dic_2025',
+            'q1_mar_2026', 'q2_mar_2026', 'q1_abr_2026', 'q2_abr_2026',
+            'q1_may_2026', 'q2_may_2026',
+            'orden_total_cant', 'orden_total_importe'  # Asegúrate de que estas columnas existen
         ]
 
         columnas_faltantes = [col for col in columnas_requeridas if col not in df.columns]
@@ -854,41 +929,34 @@ def importar_proyecciones():
         total_insertados = 0
         sql = """
             INSERT INTO proyecciones_ventas (
-                referencia, clave_factura, clave_6_digitos, ean, clave_odoo, descripcion, modelo,
+                referencia, clave_factura, clave_6_digitos, ean, clave_odoo, descripcion, modelo, spec,
                 precio_elite_plus_sin_iva, precio_elite_sin_iva, precio_partner_sin_iva,
                 precio_distribuidor_sin_iva, precio_publico_sin_iva, precio_publico_con_iva_my26,
                 precio_elite_plus_con_iva, precio_elite_con_iva, precio_partner_con_iva,
                 precio_distribuidor_con_iva, precio_publico_con_iva,
                 q1_sep_2025, q2_sep_2025, q1_oct_2025, q2_oct_2025,
                 q1_nov_2025, q2_nov_2025, q1_dic_2025, q2_dic_2025,
+                q1_mar_2026, q2_mar_2026, q1_abr_2026, q2_abr_2026,
+                q1_may_2026, q2_may_2026,
                 orden_total_cant, orden_total_importe, id_disponibilidad
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
 
         for _, fila in df.iterrows():
-            # Calcular total_cant e importe si no vienen en el archivo
-            total_cant = to_int(fila.get('orden_total_cant', 0))
-            total_importe = to_decimal(fila.get('orden_total_importe'))
-            
-            if total_cant == 0:
-                total_cant = (
-                    to_int(fila['q1_sep_2025']) + to_int(fila['q2_sep_2025']) +
-                    to_int(fila['q1_oct_2025']) + to_int(fila['q2_oct_2025']) +
-                    to_int(fila['q1_nov_2025']) + to_int(fila['q2_nov_2025']) +
-                    to_int(fila['q1_dic_2025']) + to_int(fila['q2_dic_2025'])
-                )
-            
-            if total_importe is None and fila['precio_publico_con_iva'] is not None:
-                total_importe = to_decimal(fila['precio_publico_con_iva']) * total_cant
+            # Usamos DIRECTAMENTE los valores del archivo sin calcular
+            total_cant = to_int(fila['orden_total_cant'])  # Asume que la columna existe
+            total_importe = to_decimal(fila['orden_total_importe'])  # Asume que la columna existe
 
             valores = (
                 fila['referencia'], 
-                str(int(fila['clave_factura'])) if pd.notna(fila['clave_factura']) else None,
-                str(int(fila['clave_6_digitos'])) if pd.notna(fila['clave_6_digitos']) else None,
-                str(int(fila['ean'])) if pd.notna(fila['ean']) else None,
+                str(fila['clave_factura']) if pd.notna(fila['clave_factura']) else None,  # Modificado
+                str(fila['clave_6_digitos']) if pd.notna(fila['clave_6_digitos']) else None,  # Modificado
+                str(fila['ean']) if pd.notna(fila['ean']) else None,  # Modificado
                 fila['clave_odoo'], 
                 fila['descripcion'], 
                 fila['modelo'],
+                fila['spec'],
                 to_decimal(fila['precio_elite_plus_sin_iva']),
                 to_decimal(fila['precio_elite_sin_iva']),
                 to_decimal(fila['precio_partner_sin_iva']),
@@ -908,6 +976,12 @@ def importar_proyecciones():
                 to_int(fila['q2_nov_2025']),
                 to_int(fila['q1_dic_2025']),
                 to_int(fila['q2_dic_2025']),
+                to_int(fila['q1_mar_2026']),
+                to_int(fila['q2_mar_2026']),
+                to_int(fila['q1_abr_2026']),
+                to_int(fila['q2_abr_2026']),
+                to_int(fila['q1_may_2026']),
+                to_int(fila['q2_may_2026']),
                 total_cant,
                 total_importe,
                 1  # Valor por defecto para id_disponibilidad
@@ -917,10 +991,10 @@ def importar_proyecciones():
                 cursor.execute(sql, valores)
                 total_insertados += 1
             except Exception as e:
-                print(f"Error al insertar fila: {valores}")
+                print(f"Error al insertar fila: {fila['referencia']}")
                 print(f"Error: {str(e)}")
                 continue
-
+            
         conexion.commit()
         cursor.close()
         conexion.close()
@@ -945,3 +1019,128 @@ def importar_proyecciones():
             'error': str(e),
             'details': 'Verifica que el archivo tenga el formato correcto y todas las columnas requeridas'
         }), 500
+
+@proyecciones_bp.route('/proyecciones/autoguardado', methods=['POST'])
+def manejar_autoguardado():
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        return jsonify({"error": "No se proporcionó token"}), 401
+
+    try:
+        token = auth_header.split(" ")[1]
+        decoded = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        id_usuario = decoded.get("id")
+    except Exception as e:
+        print("Error al decodificar token:", str(e))
+        return jsonify({"error": "Token inválido"}), 401
+
+    conexion = obtener_conexion()
+    cursor = conexion.cursor(dictionary=True)
+
+    try:
+        # Obtener el cliente asociado al usuario
+        cursor.execute("SELECT cliente_id FROM usuarios WHERE id = %s", (id_usuario,))
+        cliente = cursor.fetchone()
+        if not cliente or not cliente['cliente_id']:
+            return jsonify({"error": "Cliente no encontrado para este usuario"}), 404
+        id_cliente = cliente['cliente_id']
+
+        data = request.get_json()
+        
+        # Validar estructura de datos
+        if not isinstance(data, dict):
+            return jsonify({"error": "Se esperaba un objeto con acción y datos"}), 400
+            
+        accion = data.get('accion')
+        proyecciones = data.get('proyecciones', [])
+        
+        # 1. Guardar datos (acción por defecto)
+        if accion in (None, 'guardar'):
+            if not isinstance(proyecciones, list):
+                return jsonify({"error": "Se esperaba una lista de proyecciones"}), 400
+
+            for proyeccion in proyecciones:
+                id_proyeccion = proyeccion.get('id_proyeccion')
+                if not id_proyeccion:
+                    continue  # O podrías devolver error
+
+                cursor.execute("""
+                    INSERT INTO proyecciones_autoguardado (
+                        id_cliente, id_proyeccion,
+                        q1_sep_2025, q2_sep_2025, q1_oct_2025, q2_oct_2025,
+                        q1_nov_2025, q2_nov_2025, q1_dic_2025, q2_dic_2025,
+                        q1_mar_2026, q2_mar_2026, q1_abr_2026, q2_abr_2026,
+                        q1_may_2026, q2_may_2026
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        q1_sep_2025 = VALUES(q1_sep_2025),
+                        q2_sep_2025 = VALUES(q2_sep_2025),
+                        q1_oct_2025 = VALUES(q1_oct_2025),
+                        q2_oct_2025 = VALUES(q2_oct_2025),
+                        q1_nov_2025 = VALUES(q1_nov_2025),
+                        q2_nov_2025 = VALUES(q2_nov_2025),
+                        q1_dic_2025 = VALUES(q1_dic_2025),
+                        q2_dic_2025 = VALUES(q2_dic_2025),
+                        q1_mar_2026 = VALUES(q1_mar_2026),
+                        q2_mar_2026 = VALUES(q2_mar_2026),
+                        q1_abr_2026 = VALUES(q1_abr_2026),
+                        q2_abr_2026 = VALUES(q2_abr_2026),
+                        q1_may_2026 = VALUES(q1_may_2026),
+                        q2_may_2026 = VALUES(q2_may_2026),
+                        fecha_actualizacion = CURRENT_TIMESTAMP
+                """, (
+                    id_cliente, id_proyeccion,
+                    proyeccion.get('q1_sep_2025', 0),
+                    proyeccion.get('q2_sep_2025', 0),
+                    proyeccion.get('q1_oct_2025', 0),
+                    proyeccion.get('q2_oct_2025', 0),
+                    proyeccion.get('q1_nov_2025', 0),
+                    proyeccion.get('q2_nov_2025', 0),
+                    proyeccion.get('q1_dic_2025', 0),
+                    proyeccion.get('q2_dic_2025', 0),
+                    proyeccion.get('q1_mar_2026', 0),
+                    proyeccion.get('q2_mar_2026', 0),
+                    proyeccion.get('q1_abr_2026', 0),
+                    proyeccion.get('q2_abr_2026', 0),
+                    proyeccion.get('q1_may_2026', 0),
+                    proyeccion.get('q2_may_2026', 0)
+                ))
+
+            conexion.commit()
+            return jsonify({
+                "mensaje": "Autoguardado realizado correctamente",
+                "accion": "guardado",
+                "proyecciones_actualizadas": len(proyecciones)
+            }), 200
+
+        # 2. Cargar datos existentes
+        elif accion == 'cargar':
+            cursor.execute("""
+                SELECT * FROM proyecciones_autoguardado 
+                WHERE id_cliente = %s
+            """, (id_cliente,))
+            return jsonify({
+                "mensaje": "Datos de autoguardado cargados",
+                "accion": "cargar",
+                "data": cursor.fetchall()
+            }), 200
+
+        # 3. Limpiar autoguardado
+        elif accion == 'limpiar':
+            cursor.execute("DELETE FROM proyecciones_autoguardado WHERE id_cliente = %s", (id_cliente,))
+            conexion.commit()
+            return jsonify({
+                "mensaje": "Autoguardado eliminado correctamente",
+                "accion": "limpiar"
+            }), 200
+
+        else:
+            return jsonify({"error": "Acción no válida"}), 400
+
+    except mysql.connector.Error as err:
+        print("Error en autoguardado:", str(err))
+        conexion.rollback()
+        return jsonify({"error": "Error en el servidor"}), 500
+    finally:
+        cursor.close()
+        conexion.close()

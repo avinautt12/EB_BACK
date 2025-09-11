@@ -1,6 +1,10 @@
 from flask import Blueprint, jsonify, request
 from db_conexion import obtener_conexion
 import jwt
+from datetime import date, datetime
+
+from utils.jwt_utils import verificar_token
+from functools import wraps
 
 SECRET_KEY = "123456"
 
@@ -13,21 +17,33 @@ def obtener_detalles_clientes():
 
     try:
         cursor.execute("""
-            SELECT 
-                COALESCE(g.nombre_grupo, c.clave) AS clave,
-                c.zona,
-                c.nombre_cliente,
-                c.nivel,
-                n.compromiso_scott,
-                n.compromiso_syncros,
-                n.compromiso_apparel,
-                n.compromiso_vittoria
-            FROM clientes c
-            JOIN niveles_distribuidor n ON c.nivel = n.nivel
-            LEFT JOIN grupo_clientes g ON c.id_grupo = g.id
-            ORDER BY clave
+                SELECT 
+                    c.clave,
+                    c.evac,
+                    c.nombre_cliente,
+                    c.nivel,
+                    c.f_inicio,
+                    c.f_fin
+                FROM clientes c
+                WHERE c.nombre_cliente NOT IN ('Alberto Garcia', 'Andre Padilla Goray', 'Andre Vittoria')
+                ORDER BY 
+                    CASE 
+                        WHEN c.evac = 'A' THEN 1
+                        WHEN c.evac = 'B' THEN 2
+                        WHEN c.evac = 'GO' THEN 3
+                        ELSE 4
+                    END,
+                    c.nombre_cliente ASC
         """)
         resultados = cursor.fetchall()
+        
+        # Convertir objetos date/datetime a strings en formato YYYY-MM-DD
+        for cliente in resultados:
+            if cliente['f_inicio'] and isinstance(cliente['f_inicio'], (datetime, date)):
+                cliente['f_inicio'] = cliente['f_inicio'].strftime('%Y-%m-%d')
+            if cliente['f_fin'] and isinstance(cliente['f_fin'], (datetime, date)):
+                cliente['f_fin'] = cliente['f_fin'].strftime('%Y-%m-%d')
+        
         return jsonify(resultados), 200
     except Exception as e:
         print("Error al obtener los detalles de los clientes:", str(e))
@@ -75,7 +91,7 @@ def buscar_cliente():
 
     try:
         query = """
-            SELECT id, clave, zona, nombre_cliente, nivel
+            SELECT id, clave, evac, nombre_cliente, nivel, f_inicio, f_fin
             FROM clientes
             WHERE clave = %s OR nombre_cliente = %s
             LIMIT 1
@@ -99,12 +115,14 @@ def agregar_cliente():
     data = request.get_json()
 
     clave = data.get('clave')
-    zona = data.get('zona')
+    evac = data.get('evac')  # Changed from zona to evac
     nombre_cliente = data.get('nombre_cliente')
     nivel = data.get('nivel')
+    f_inicio = data.get('f_inicio')
+    f_fin = data.get('f_fin')
 
     # Validar que todos los campos estén presentes
-    if not all([clave, zona, nombre_cliente, nivel]):
+    if not all([clave, evac, nombre_cliente, nivel, f_inicio, f_fin]):
         return jsonify({"error": "Todos los campos son obligatorios"}), 400
 
     conexion = obtener_conexion()
@@ -120,10 +138,10 @@ def agregar_cliente():
 
         # Insertar el nuevo cliente
         query = """
-            INSERT INTO clientes (clave, zona, nombre_cliente, nivel)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO clientes (clave, evac, nombre_cliente, nivel, f_inicio, f_fin)
+            VALUES (%s, %s, %s, %s, %s, %s)
         """
-        cursor.execute(query, (clave, zona, nombre_cliente, nivel))
+        cursor.execute(query, (clave, evac, nombre_cliente, nivel, f_inicio, f_fin))
         conexion.commit()
 
         return jsonify({"mensaje": "Cliente agregado exitosamente"}), 201
@@ -139,11 +157,13 @@ def editar_cliente(id_cliente):
     data = request.get_json()
 
     clave = data.get('clave')
-    zona = data.get('zona')
+    evac = data.get('evac')  # Changed from zona to evac
     nombre_cliente = data.get('nombre_cliente')
     nivel = data.get('nivel')
+    f_inicio = data.get('f_inicio')
+    f_fin = data.get('f_fin')
 
-    if not all([clave, zona, nombre_cliente, nivel]):
+    if not all([clave, evac, nombre_cliente, nivel, f_inicio, f_fin]):
         return jsonify({"error": "Todos los campos son obligatorios"}), 400
 
     conexion = obtener_conexion()
@@ -159,12 +179,14 @@ def editar_cliente(id_cliente):
         query = """
             UPDATE clientes
             SET clave = %s,
-                zona = %s,
+                evac = %s,  # Changed zona to evac
                 nombre_cliente = %s,
-                nivel = %s
+                nivel = %s,
+                f_inicio = %s,
+                f_fin = %s
             WHERE id = %s
         """
-        cursor.execute(query, (clave, zona, nombre_cliente, nivel, id_cliente))
+        cursor.execute(query, (clave, evac, nombre_cliente, nivel, f_inicio, f_fin, id_cliente))
         conexion.commit()
 
         return jsonify({"mensaje": "Cliente actualizado exitosamente"}), 200
@@ -294,6 +316,217 @@ def obtener_info_cliente_actual():
     except Exception as e:
         print("Error al obtener la información del cliente:", str(e))
         return jsonify({"error": "Error en la consulta"}), 500
+    finally:
+        cursor.close()
+        conexion.close()
+
+@clientes_bp.route('/clientes_multimarcas', methods=['GET'])
+def obtener_clientes_multimarcas():
+    conexion = obtener_conexion()
+    cursor = conexion.cursor(dictionary=True)
+
+    try:
+        cursor.execute("SELECT * FROM clientes_multimarcas")
+        resultados = cursor.fetchall()
+        return jsonify(resultados), 200
+    except Exception as e:
+        print("Error al obtener clientes multimarcas:", str(e))
+        return jsonify({"error": "Error en la consulta"}), 500
+    finally:
+        cursor.close()
+        conexion.close()
+
+@clientes_bp.route('/clientes_multimarcas_claves', methods=['GET'])
+def obtener_clientes_multimarcas_claves():
+    conexion = obtener_conexion()
+    cursor = conexion.cursor(dictionary=True)
+    
+    clave = request.args.get('clave')  # Obtener parámetro de consulta 'clave'
+
+    try:
+        if clave:
+            # Buscar cliente específico por clave
+            cursor.execute(
+                "SELECT id, clave, cliente_razon_social FROM clientes_multimarcas WHERE clave = %s", 
+                (clave,)
+            )
+            resultado = cursor.fetchone()
+            return jsonify(resultado) if resultado else jsonify({"error": "Cliente no encontrado"}), 404
+        else:
+            # Obtener todos los clientes
+            cursor.execute("SELECT id, clave, cliente_razon_social FROM clientes_multimarcas")
+            return jsonify(cursor.fetchall()), 200
+            
+    except Exception as e:
+        print("Error al obtener clientes multimarcas:", str(e))
+        return jsonify({"error": "Error en la consulta"}), 500
+    finally:
+        cursor.close()
+        conexion.close()
+
+@clientes_bp.route('/clientes_multimarcas_buscar', methods=['GET'])
+def buscar_cliente_multimarcas():
+    conexion = obtener_conexion()
+    cursor = conexion.cursor(dictionary=True)
+    
+    busqueda = request.args.get('q')  # Parámetro de búsqueda
+
+    try:
+        if busqueda:
+            # Buscar por clave o razón social (insensible a mayúsculas)
+            query = """
+                SELECT id, clave, cliente_razon_social, evac 
+                FROM clientes_multimarcas 
+                WHERE clave LIKE %s OR cliente_razon_social LIKE %s
+            """
+            parametro_busqueda = f"%{busqueda}%"
+            cursor.execute(query, (parametro_busqueda, parametro_busqueda))
+            
+            resultados = cursor.fetchall()
+            return jsonify(resultados), 200
+        else:
+            return jsonify({"error": "Parámetro de búsqueda requerido"}), 400
+            
+    except Exception as e:
+        print("Error al buscar cliente:", str(e))
+        return jsonify({"error": "Error en la consulta"}), 500
+    finally:
+        cursor.close()
+        conexion.close()
+
+@clientes_bp.route('/clientes_fechas', methods=['GET'])
+def obtener_fechas_clientes():
+    conexion = obtener_conexion()
+    cursor = conexion.cursor(dictionary=True)
+
+    try:
+        cursor.execute("""
+                SELECT 
+                    c.nombre_cliente,
+                    c.f_inicio,
+                    c.f_fin
+                FROM clientes c
+                WHERE c.nombre_cliente NOT IN ('Alberto Garcia', 'Andre Padilla Goray', 'Andre Vittoria')
+                ORDER BY 
+                    c.nombre_cliente ASC
+        """)
+        resultados = cursor.fetchall()
+        
+        # Convertir objetos date/datetime a strings en formato YYYY-MM-DD
+        for cliente in resultados:
+            if cliente['f_inicio'] and isinstance(cliente['f_inicio'], (datetime, date)):
+                cliente['f_inicio'] = cliente['f_inicio'].strftime('%Y-%m-%d')
+            if cliente['f_fin'] and isinstance(cliente['f_fin'], (datetime, date)):
+                cliente['f_fin'] = cliente['f_fin'].strftime('%Y-%m-%d')
+        
+        return jsonify(resultados), 200
+    except Exception as e:
+        print("Error al obtener las fechas de los clientes:", str(e))
+        return jsonify({"error": "Error en la consulta"}), 500
+    finally:
+        cursor.close()
+        conexion.close()
+
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = request.headers.get('Authorization')
+        
+        if not token:
+            return jsonify({'error': 'Token es requerido'}), 401
+        
+        try:
+            # Remover 'Bearer ' si está presente
+            if token.startswith('Bearer '):
+                token = token[7:]
+            
+            # Usar tu función de verificación
+            decoded_token = verificar_token(token)
+            if not decoded_token:
+                return jsonify({'error': 'Token inválido o expirado'}), 401
+            
+            request.cliente_data = decoded_token  # Almacenar datos del cliente
+        except Exception as e:
+            print("Error al procesar token:", str(e))
+            return jsonify({'error': 'Error al procesar token'}), 401
+        
+        return f(*args, **kwargs)
+    return decorated
+
+@clientes_bp.route('/facturas-cliente', methods=['GET'])
+@token_required
+def obtener_facturas_cliente():
+    conexion = obtener_conexion()
+    cursor = conexion.cursor(dictionary=True)
+
+    try:
+        # Obtener datos del cliente del token
+        cliente_data = getattr(request, 'cliente_data', None)
+        if not cliente_data:
+            return jsonify({"error": "Datos del cliente no encontrados"}), 400
+
+        clave_cliente = cliente_data.get('clave')
+        nombre_cliente = cliente_data.get('nombre_cliente')
+
+        if not clave_cliente and not nombre_cliente:
+            return jsonify({"error": "No se encontró información del cliente en el token"}), 400
+
+        # Consulta que prioriza clave pero también busca por nombre si no hay resultados
+        query = """
+            SELECT 
+                id,
+                numero_factura,
+                referencia_interna,
+                nombre_producto,
+                contacto_referencia,
+                contacto_nombre,
+                fecha_factura,
+                precio_unitario,
+                cantidad,
+                venta_total,
+                marca,
+                subcategoria,
+                apparel,
+                eride,
+                evac,
+                categoria_producto,
+                estado_factura
+            FROM monitor
+            WHERE (contacto_referencia = %s OR contacto_nombre = %s)
+            AND numero_factura IS NOT NULL 
+            AND numero_factura != '/'
+            AND fecha_factura IS NOT NULL 
+            AND fecha_factura != '0001-01-01 00:00:00'
+            ORDER BY 
+                CASE 
+                    WHEN contacto_referencia = %s THEN 1  # Priorizar coincidencia exacta de clave
+                    WHEN contacto_nombre = %s THEN 2      # Luego coincidencia de nombre
+                    ELSE 3
+                END,
+                fecha_factura DESC
+        """
+
+        cursor.execute(query, (clave_cliente, nombre_cliente, clave_cliente, nombre_cliente))
+        facturas = cursor.fetchall()
+
+        # Formatear fechas
+        for factura in facturas:
+            if factura['fecha_factura'] and isinstance(factura['fecha_factura'], (datetime, date)):
+                factura['fecha_factura'] = factura['fecha_factura'].strftime('%Y-%m-%d %H:%M:%S')
+
+        return jsonify({
+            "success": True,
+            "cliente": {
+                "clave": clave_cliente,
+                "nombre": nombre_cliente
+            },
+            "total_facturas": len(facturas),
+            "data": facturas
+        }), 200
+
+    except Exception as e:
+        print("Error al obtener las facturas del cliente:", str(e))
+        return jsonify({"error": "Error en la consulta de facturas"}), 500
     finally:
         cursor.close()
         conexion.close()
