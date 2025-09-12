@@ -47,7 +47,7 @@ def crear_cuerpo_email(data):
     mensaje_personalizado = data.get('mensaje_personalizado', '')
     periodos = data.get('periodos', [])
     fecha_actual = datetime.now().strftime('%d/%m/%Y')
-    logo_url = "https://eb-imagenes-26.s3.us-east-2.amazonaws.com/img-elite.png"
+    logo_url = "https://eb-imagenes-26.s3.us-east-2.amazonaws.com/prueba-logo-3.png"
 
     def to_currency(value):
         try: return f"${float(value):,.2f}"
@@ -305,11 +305,10 @@ def crear_cuerpo_email(data):
         <table>
             <thead><tr><th></th><th>SCOTT</th><th>APPAREL, SYNCROS, VITTORIA</th></tr></thead>
             <tbody>
-                <tr><td>Compromiso Acumulado</td><td>{to_currency(compromiso_acum_scott)}</td><td>{to_currency(compromiso_acum_apparel)}</td></tr>
-                <tr><td>Avance Acumulado</td><td>{to_currency(avance_acum_scott)}</td><td>{to_currency(avance_acum_apparel)}</td></tr>
-                <tr><td>% Acumulado</td><td>{to_percent(porcentaje_scott)}%</td><td>{to_percent(porcentaje_apparel)}%</td></tr>
-                <tr><td>Importe Faltante Acumulado</td><td>{to_currency(faltante_scott if faltante_scott > 0 else 0)}</td><td>{to_currency(faltante_apparel if faltante_apparel > 0 else 0)}</td></tr>
-                <tr><td>Sobrante Acumulado</td><td>{get_sobrante_acumulado(compromiso_acum_scott, avance_acum_scott)}</td><td>{get_sobrante_acumulado(compromiso_acum_apparel, avance_acum_apparel)}</td></tr>
+                <tr><td>Compromiso</td><td>{to_currency(compromiso_acum_scott)}</td><td>{to_currency(compromiso_acum_apparel)}</td></tr>
+                <tr><td>Avance</td><td>{to_currency(avance_acum_scott)}</td><td>{to_currency(avance_acum_apparel)}</td></tr>
+                <tr><td>%</td><td>{to_percent(porcentaje_scott)}%</td><td>{to_percent(porcentaje_apparel)}%</td></tr>
+                <tr><td>Importe Faltante</td><td>{to_currency(faltante_scott if faltante_scott > 0 else 0)}</td><td>{to_currency(faltante_apparel if faltante_apparel > 0 else 0)}</td></tr>
                 <tr>
                     <td>Estatus Acumulado</td>
                     <td class="{get_status_class(faltante_scott)}">{get_status_text(faltante_scott)}</td>
