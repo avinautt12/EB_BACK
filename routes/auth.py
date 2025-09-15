@@ -132,6 +132,13 @@ def registrar_usuario():
     except Exception as e:
         conexion.rollback()
         return jsonify({"error": f"Error al registrar el usuario: {str(e)}"}), 500
+    
+    finally:
+        # ESTO ES OBLIGATORIO Y SE EJECUTA SIEMPRE
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @auth.route('/login', methods=['POST'])
 def login():
@@ -193,8 +200,10 @@ def login():
         print(f"Error durante el login: {str(e)}")
         return jsonify({"error": f"Error en la consulta: {str(e)}"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @auth.route('/logout', methods=['POST'])
 def logout():
@@ -213,6 +222,11 @@ def logout():
     except Exception as e:
         conexion.rollback()
         return jsonify({"error": f"Error al cerrar sesión: {str(e)}"}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @auth.route('/enviar_codigo_activacion', methods=['POST'])
 def enviar_codigo_activacion():
@@ -242,6 +256,11 @@ def enviar_codigo_activacion():
     except Exception as e:
         conexion.rollback()
         return jsonify({"error": f"Error al generar el código: {str(e)}"}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @auth.route('/verificar_codigo', methods=['POST'])
 def verificar_codigo():
@@ -272,6 +291,11 @@ def verificar_codigo():
     except Exception as e:
         conexion.rollback()
         return jsonify({"error": f"Error en el proceso: {str(e)}"}), 500  
+    finally:
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @auth.route('/cambiar_contrasena', methods=['POST'])    
 def cambiar_contrasena():
@@ -308,3 +332,8 @@ def cambiar_contrasena():
     except Exception as e:
         conexion.rollback()
         return jsonify({"error": f"Error al cambiar la contraseña: {str(e)}"}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()

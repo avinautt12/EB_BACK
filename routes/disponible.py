@@ -34,8 +34,10 @@ def listar_disponibilidades():
             "details": str(e)
         }), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @disponibilidad_bp.route('/disponibilidades/agregar', methods=['POST'])
 def agregar_disponibilidad():
@@ -105,8 +107,10 @@ def agregar_disponibilidad():
             "details": str(e)
         }), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @disponibilidad_bp.route('/disponibilidades/<int:id>', methods=['GET'])
 def obtener_disponibilidad(id):
@@ -144,8 +148,10 @@ def obtener_disponibilidad(id):
             "details": str(e)
         }), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @disponibilidad_bp.route('/disponibilidades/editar/<int:id>', methods=['PUT'])
 def editar_disponibilidad(id):
@@ -225,8 +231,10 @@ def editar_disponibilidad(id):
             "details": str(e)
         }), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @disponibilidad_bp.route('/disponibilidades/eliminar/<int:id>', methods=['DELETE'])
 def eliminar_disponibilidad(id):
@@ -259,5 +267,7 @@ def eliminar_disponibilidad(id):
             "details": str(e)
         }), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()

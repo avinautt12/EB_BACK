@@ -114,7 +114,7 @@ def actualizar_multimarcas():
     finally:
         if cursor:
             cursor.close()
-        if conexion:
+        if conexion and conexion.is_connected():
             conexion.close()
 
 @multimarcas_bp.route('/obtener_multimarcas', methods=['GET'])
@@ -133,7 +133,7 @@ def obtener_multimarcas():
     finally:
         if cursor:
             cursor.close()
-        if conexion:
+        if conexion and conexion.is_connected():
             conexion.close()
 
 @multimarcas_bp.route('/agregar_cliente', methods=['POST'])
@@ -176,7 +176,7 @@ def agregar_cliente():
     finally:
         if cursor:
             cursor.close()
-        if conexion:
+        if conexion and conexion.is_connected():
             conexion.close()
 
 @multimarcas_bp.route('/editar_cliente/<int:id>', methods=['PUT'])
@@ -226,7 +226,7 @@ def editar_cliente(id):
     finally:
         if cursor:
             cursor.close()
-        if conexion:
+        if conexion and conexion.is_connected():
             conexion.close()
 
 @multimarcas_bp.route('/eliminar_cliente/<int:id>', methods=['DELETE'])
@@ -255,5 +255,5 @@ def eliminar_cliente(id):
     finally:
         if cursor:
             cursor.close()
-        if conexion:
+        if conexion and conexion.is_connected():
             conexion.close()

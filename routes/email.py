@@ -18,6 +18,9 @@ email_bp = Blueprint('email', __name__, url_prefix='')
 @email_bp.route('/email/enviar-caratura-pdf', methods=['POST'])
 def enviar_caratula_pdf():
     """Endpoint para enviar carátula por email de forma asíncrona."""
+    conexion = obtener_conexion()
+    cursor = conexion.cursor()
+    
     try:
         data = request.get_json()
         
@@ -62,9 +65,17 @@ def enviar_caratula_pdf():
     except Exception as e:
         print(f"Error al procesar la solicitud: {str(e)}")
         return jsonify({"error": f"Error al procesar la solicitud: {str(e)}"}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
     
 @email_bp.route('/email/configuracion', methods=['GET'])
 def obtener_configuracion_email():
+    conexion = obtener_conexion()
+    cursor = conexion.cursor()
+    
     """Obtener configuración de email basada en el usuario autenticado"""
     try:
         auth_header = request.headers.get('Authorization')
@@ -90,6 +101,11 @@ def obtener_configuracion_email():
             "configurado": False,
             "error": f"No se pudo determinar la configuración: {str(e)}"
         }), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @email_bp.route('/email/historial-caratulas', methods=['GET'])
 def obtener_historial_caratulas():
@@ -118,6 +134,8 @@ def obtener_historial_caratulas():
         print(f"Error al obtener historial: {str(e)}")
         return jsonify({"error": f"Error al obtener el historial: {str(e)}"}), 500
     finally:
-        if conexion:
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
             conexion.close()
 

@@ -11,34 +11,42 @@ monitor_odoo_bp = Blueprint('monitor_odoo', __name__, url_prefix='')
 
 @monitor_odoo_bp.route('/monitor_odoo', methods=['GET'])
 def obtener_todos_los_registros():
-    conexion = obtener_conexion()
-    cursor = conexion.cursor(dictionary=True)
-    consulta = """
-    SELECT 
-        id,
-        numero_factura,
-        referencia_interna,
-        nombre_producto,
-        contacto_referencia,
-        contacto_nombre,
-        fecha_factura,
-        precio_unitario,
-        cantidad,
-        venta_total,
-        marca,
-        subcategoria,
-        apparel,
-        eride,
-        evac,
-        categoria_producto,
-        estado_factura
-    FROM elite_bike_db.monitor
-    """
-    cursor.execute(consulta)
-    resultados = cursor.fetchall()
-    cursor.close()
-    conexion.close()
-    return resultados
+    conexion = None
+    cursor = None
+    try:
+        conexion = obtener_conexion()
+        cursor = conexion.cursor(dictionary=True)
+        consulta = """
+        SELECT 
+            id,
+            numero_factura,
+            referencia_interna,
+            nombre_producto,
+            contacto_referencia,
+            contacto_nombre,
+            fecha_factura,
+            precio_unitario,
+            cantidad,
+            venta_total,
+            marca,
+            subcategoria,
+            apparel,
+            eride,
+            evac,
+            categoria_producto,
+            estado_factura
+        FROM elite_bike_db.monitor
+        """
+        cursor.execute(consulta)
+        resultados = cursor.fetchall()
+        return jsonify(resultados)
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @monitor_odoo_bp.route('/importar_facturas', methods=['POST'])
 def importar_facturas():
@@ -346,3 +354,8 @@ def importar_facturas():
             'success': False,
             'error': f'Ocurrió un error durante la importación: {str(e)}'
         }), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()

@@ -23,8 +23,10 @@ def obtener_grupos():
         print("Error al obtener grupos:", str(e))
         return jsonify({"error": "Error al obtener grupos"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @integrales_bp.route('/integrales/agregar', methods=['POST'])
 def agregar_grupo():
@@ -56,8 +58,10 @@ def agregar_grupo():
         print("Error al agregar grupo:", str(e))
         return jsonify({"error": "Error al agregar grupo"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @integrales_bp.route('/integrales/grupos/editar/<int:id_grupo>', methods=['PUT'])
 def editar_grupo(id_grupo):
@@ -92,8 +96,10 @@ def editar_grupo(id_grupo):
         print("Error al editar grupo:", str(e))
         return jsonify({"error": "Error al editar grupo"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @integrales_bp.route('/integrales/grupos/eliminar/<int:id_grupo>', methods=['DELETE'])
 def eliminar_grupo(id_grupo):
@@ -121,8 +127,10 @@ def eliminar_grupo(id_grupo):
         print("Error al eliminar grupo:", str(e))
         return jsonify({"error": "Error al eliminar grupo"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @integrales_bp.route('/integrales/clientes/grupo/<int:id_grupo>', methods=['GET'])
 def obtener_clientes_por_grupo(id_grupo):
@@ -169,8 +177,10 @@ def obtener_clientes_por_grupo(id_grupo):
         print("Error al obtener clientes del grupo:", str(e))
         return jsonify({"error": "Error al obtener clientes del grupo"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @integrales_bp.route('/integrales/clientes/asignar-grupo', methods=['POST'])
 def asignar_grupo_cliente():
@@ -213,5 +223,7 @@ def asignar_grupo_cliente():
         print("Error al asignar grupo al cliente:", str(e))
         return jsonify({"error": "Error al asignar grupo al cliente"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()

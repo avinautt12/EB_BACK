@@ -89,8 +89,10 @@ def buscar_caratula_evac():
         return jsonify({'error': 'Error al procesar la solicitud'}), 500
         
     finally:
-        if 'cursor' in locals(): cursor.close()
-        if 'conexion' in locals(): conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @caratulas_bp.route('/nombres_caratula', methods=['GET'])
 def obtener_nombres():
@@ -117,8 +119,10 @@ def obtener_nombres():
         return jsonify({'error': 'Error al procesar la solicitud'}), 500
 
     finally:
-        if 'cursor' in locals(): cursor.close()
-        if 'conexion' in locals(): conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @caratulas_bp.route('/clientes_a', methods=['GET'])
 def obtener_previo_evac_a():
@@ -141,9 +145,11 @@ def obtener_previo_evac_a():
         return jsonify({"error": str(e)}), 500
 
     finally:
-        if conexion.is_connected():
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
             conexion.close()
-
+            
 @caratulas_bp.route('/clientes_b', methods=['GET'])
 def obtener_previo_evac_b():
     try:
@@ -165,7 +171,9 @@ def obtener_previo_evac_b():
         return jsonify({"error": str(e)}), 500
 
     finally:
-        if conexion.is_connected():
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
             conexion.close()
 
 @caratulas_bp.route('/clientes_go', methods=['GET'])
@@ -189,7 +197,9 @@ def obtener_previo_evac_go():
         return jsonify({"error": str(e)}), 500
 
     finally:
-        if conexion.is_connected():
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
             conexion.close()
 
 @caratulas_bp.route('/caratula_evac_a', methods=['POST'])
@@ -232,7 +242,9 @@ def actualizar_caratula_evac_a():
         print("Traceback:", traceback.format_exc())
         return jsonify({'error': str(e)}), 500
     finally:
-        if 'conexion' in locals():
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
             conexion.close()
 
 @caratulas_bp.route('/caratula_evac_b', methods=['POST'])
@@ -275,7 +287,9 @@ def actualizar_caratula_evac_b():
         print("Traceback:", traceback.format_exc())
         return jsonify({'error': str(e)}), 500
     finally:
-        if 'conexion' in locals():
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
             conexion.close()
 
 @caratulas_bp.route('/datos_evac_a', methods=['GET'])
@@ -294,7 +308,9 @@ def obtener_caratula_evac_a():
         except Exception as e:
             return jsonify({'error': str(e)}), 500
         finally:
-            if 'conexion' in locals():
+            if cursor:
+                cursor.close()
+            if conexion and conexion.is_connected():
                 conexion.close()
 
 @caratulas_bp.route('/datos_evac_b', methods=['GET'])
@@ -313,7 +329,9 @@ def obtener_caratula_evac_b():
         except Exception as e:
             return jsonify({'error': str(e)}), 500
         finally:
-            if 'conexion' in locals():
+            if cursor:
+                cursor.close()
+            if conexion and conexion.is_connected():
                 conexion.close()
 
 @caratulas_bp.route('/datos_previo', methods=['GET'])
@@ -345,6 +363,8 @@ def obtener_datos_previo():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:
-        if 'conexion' in locals():
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
             conexion.close()
 

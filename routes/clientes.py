@@ -49,8 +49,10 @@ def obtener_detalles_clientes():
         print("Error al obtener los detalles de los clientes:", str(e))
         return jsonify({"error": "Error en la consulta"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @clientes_bp.route('/clientes/nombres', methods=['GET'])
 def obtener_nombres_clientes():
@@ -75,8 +77,10 @@ def obtener_nombres_clientes():
         print("Error al obtener los nombres de los clientes:", str(e))
         return jsonify({"error": "Error en la consulta"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
         
 @clientes_bp.route('/clientes/buscar', methods=['POST'])
 def buscar_cliente():
@@ -107,8 +111,10 @@ def buscar_cliente():
         print("Error al buscar cliente:", str(e))
         return jsonify({"error": "Error al buscar cliente"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @clientes_bp.route('/clientes/agregar', methods=['POST'])
 def agregar_cliente():
@@ -149,8 +155,10 @@ def agregar_cliente():
         print("Error al agregar cliente:", str(e))
         return jsonify({"error": "Error al agregar cliente"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @clientes_bp.route('/clientes/editar/<int:id_cliente>', methods=['PUT'])
 def editar_cliente(id_cliente):
@@ -194,8 +202,10 @@ def editar_cliente(id_cliente):
         print("Error al editar cliente:", str(e))
         return jsonify({"error": "Error al editar cliente"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @clientes_bp.route('/clientes/eliminar/<int:id_cliente>', methods=['DELETE'])
 def eliminar_cliente(id_cliente):
@@ -215,8 +225,10 @@ def eliminar_cliente(id_cliente):
         print("Error al eliminar cliente:", str(e))
         return jsonify({"error": "Error al eliminar cliente"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @clientes_bp.route('/clientes/nivel', methods=['GET'])
 def obtener_nivel_cliente_actual():
@@ -268,8 +280,10 @@ def obtener_nivel_cliente_actual():
         print("Error al obtener nivel del cliente:", str(e))
         return jsonify({"error": "Error en la consulta"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @clientes_bp.route('/clientes/info', methods=['GET'])
 def obtener_info_cliente_actual():
@@ -317,8 +331,10 @@ def obtener_info_cliente_actual():
         print("Error al obtener la información del cliente:", str(e))
         return jsonify({"error": "Error en la consulta"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @clientes_bp.route('/clientes_multimarcas', methods=['GET'])
 def obtener_clientes_multimarcas():
@@ -333,8 +349,10 @@ def obtener_clientes_multimarcas():
         print("Error al obtener clientes multimarcas:", str(e))
         return jsonify({"error": "Error en la consulta"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @clientes_bp.route('/clientes_multimarcas_claves', methods=['GET'])
 def obtener_clientes_multimarcas_claves():
@@ -361,8 +379,10 @@ def obtener_clientes_multimarcas_claves():
         print("Error al obtener clientes multimarcas:", str(e))
         return jsonify({"error": "Error en la consulta"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @clientes_bp.route('/clientes_multimarcas_buscar', methods=['GET'])
 def buscar_cliente_multimarcas():
@@ -391,9 +411,11 @@ def buscar_cliente_multimarcas():
         print("Error al buscar cliente:", str(e))
         return jsonify({"error": "Error en la consulta"}), 500
     finally:
-        cursor.close()
-        conexion.close()
-
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
+            
 @clientes_bp.route('/clientes_fechas', methods=['GET'])
 def obtener_fechas_clientes():
     conexion = obtener_conexion()
@@ -424,8 +446,10 @@ def obtener_fechas_clientes():
         print("Error al obtener las fechas de los clientes:", str(e))
         return jsonify({"error": "Error en la consulta"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 def token_required(f):
     @wraps(f)
@@ -528,5 +552,7 @@ def obtener_facturas_cliente():
         print("Error al obtener las facturas del cliente:", str(e))
         return jsonify({"error": "Error en la consulta de facturas"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()

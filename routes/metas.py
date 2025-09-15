@@ -20,8 +20,10 @@ def listar_metas():
         print("Error al obtener niveles:", str(e))
         return jsonify({"error": "Error al obtener niveles"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @metas_bp.route('/metas/agregar', methods=['POST'])
 def agregar_meta():
@@ -54,8 +56,10 @@ def agregar_meta():
         print("Error al agregar nivel:", str(e))
         return jsonify({"error": "Error al agregar nivel"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @metas_bp.route('/metas/editar/<int:id_meta>', methods=['PUT'])
 def editar_meta(id_meta):
@@ -93,8 +97,10 @@ def editar_meta(id_meta):
         print("Error al editar nivel:", str(e))
         return jsonify({"error": "Error al editar nivel"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @metas_bp.route('/metas/eliminar/<int:id_meta>', methods=['DELETE'])
 def eliminar_meta(id_meta):
@@ -114,5 +120,7 @@ def eliminar_meta(id_meta):
         print("Error al eliminar nivel:", str(e))
         return jsonify({"error": "Error al eliminar nivel"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()

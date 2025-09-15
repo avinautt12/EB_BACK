@@ -12,8 +12,23 @@ usuarios_bp = Blueprint('usuarios', __name__, url_prefix='/usuarios')
 
 @usuarios_bp.route('', methods=['GET'])
 def listar_usuarios():
+    conexion = None
+    cursor = None
     try:
-        usuarios = obtener_usuarios()
+        conexion = obtener_conexion()
+        cursor = conexion.cursor(dictionary=True)
+
+        consulta = """
+        SELECT 
+            u.id, u.nombre, u.correo, u.usuario, u.contrasena, 
+            u.activo, u.rol_id, u.cliente_id, c.nombre_cliente
+        FROM 
+            usuarios u
+        LEFT JOIN 
+            clientes c ON u.cliente_id = c.id
+        """
+        cursor.execute(consulta)
+        usuarios = cursor.fetchall()
         usuarios_filtrados = []
 
         for u in usuarios:
@@ -33,6 +48,11 @@ def listar_usuarios():
         return jsonify(usuarios_filtrados), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
     
 def obtener_usuarios():
     try:
@@ -58,6 +78,11 @@ def obtener_usuarios():
     except Exception as e:
         print(f"Error al obtener usuarios: {e}")
         return []
+    finally:
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @usuarios_bp.route('/<int:usuario_id>', methods=['PUT'])
 def actualizar_usuario(usuario_id):
@@ -203,8 +228,10 @@ def actualizar_usuario(usuario_id):
         conexion.rollback()
         return jsonify({"error": f"Error al actualizar el usuario: {str(e)}"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
     
 @usuarios_bp.route('/<int:usuario_id>', methods=['DELETE'])
 def eliminar_usuario(usuario_id):
@@ -249,3 +276,8 @@ def eliminar_usuario(usuario_id):
         return jsonify({
             "error": f"Error al eliminar el usuario: {str(e)}"
         }), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
