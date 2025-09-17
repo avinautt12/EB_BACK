@@ -1,7 +1,9 @@
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, Response
 from db_conexion import obtener_conexion
 from decimal import Decimal
 import json
+from weasyprint import HTML
+from utils.email_utils import crear_cuerpo_email
 
 caratulas_bp = Blueprint('caratulas', __name__, url_prefix='')
 
@@ -368,3 +370,36 @@ def obtener_datos_previo():
         if conexion and conexion.is_connected():
             conexion.close()
 
+@caratulas_bp.route('/generar-pdf', methods=['POST'])
+def generar_caratula_pdf():
+    """
+    Endpoint para generar un PDF de la carátula en el servidor y devolverlo.
+    """
+    try:
+        # 1. Obtener los datos del cliente enviados desde Angular
+        data = request.get_json()
+        if not data or 'datos_caratula' not in data:
+            return jsonify({"error": "No se proporcionaron datos de la carátula"}), 400
+
+        # 2. Reutilizar la lógica para crear el HTML del PDF
+        # La función crear_cuerpo_email devuelve un dict con 'html_caratula_pdf'
+        htmls = crear_cuerpo_email(data)
+        html_para_pdf = htmls['html_caratula_pdf']
+
+        # 3. Generar el PDF en memoria usando WeasyPrint
+        pdf_bytes = HTML(string=html_para_pdf).write_pdf()
+
+        # 4. Preparar el nombre del archivo
+        clave_cliente = data.get('datos_caratula', {}).get('clave', 'SIN_CLAVE')
+        filename = f"Caratula_{clave_cliente}.pdf"
+
+        # 5. Crear una respuesta de Flask con el contenido del PDF
+        return Response(
+            pdf_bytes,
+            mimetype="application/pdf",
+            headers={"Content-Disposition": f"attachment;filename={filename}"}
+        )
+
+    except Exception as e:
+        print(f"Error al generar PDF: {str(e)}")
+        return jsonify({"error": f"Error interno al generar el PDF: {str(e)}"}), 500
