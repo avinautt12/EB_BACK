@@ -10,7 +10,7 @@ import re
 monitor_odoo_bp = Blueprint('monitor_odoo', __name__, url_prefix='')
 
 @monitor_odoo_bp.route('/monitor_odoo', methods=['GET'])
-def obtener_todos_los_registros():
+def obtener_monitor():
     conexion = None
     cursor = None
     try:
