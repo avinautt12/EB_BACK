@@ -196,11 +196,6 @@ def actualizar_previo():
                 print(f"Error insertando registro {i} (clave: {registro.get('clave', 'N/A')}): {insert_error}")
                 # Continuamos con el siguiente registro en lugar de fallar completamente
                 continue
-            finally:
-                if cursor:
-                    cursor.close()
-                if conexion and conexion.is_connected():
-                    conexion.close()
         
         conexion.commit()
         return jsonify({
