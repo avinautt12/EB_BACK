@@ -60,6 +60,8 @@ def obtener_ultima_actualizacion():
     try:
         conexion = obtener_conexion()
         cursor = conexion.cursor(dictionary=True)
+        
+        cursor.execute("SET time_zone = 'America/Mexico_City'")
 
         consulta = """
         SELECT MAX(fecha_actualizacion) as ultima_fecha
@@ -146,6 +148,9 @@ def importar_facturas():
 
         conexion = obtener_conexion()
         cursor = conexion.cursor(dictionary=True)
+        
+        # Le decimos a esta sesión de MySQL que trabaje en la zona horaria de México
+        cursor.execute("SET time_zone = 'America/Mexico_City'")
 
         # Obtener todos los clientes de la base de datos
         cursor.execute("SELECT clave, nombre_cliente, evac FROM clientes")
