@@ -6,6 +6,7 @@ import os
 from datetime import datetime
 from models.monitor_odoo_model import obtener_todos_los_registros
 import re
+from zoneinfo import ZoneInfo
 
 monitor_odoo_bp = Blueprint('monitor_odoo', __name__, url_prefix='')
 
@@ -377,7 +378,8 @@ def importar_facturas():
         conexion.commit()
         
         try:
-            fecha_actual = datetime.now()
+            zona_horaria_mexico = ZoneInfo("America/Mexico_City")
+            fecha_actual = datetime.now(zona_horaria_mexico)
             cursor.execute(
                 "INSERT INTO historial_actualizaciones (fecha_actualizacion) VALUES (%s)",
                 (fecha_actual,)
