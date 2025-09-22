@@ -51,10 +51,6 @@ def obtener_monitor():
 
 @monitor_odoo_bp.route('/ultima_actualizacion', methods=['GET'])
 def obtener_ultima_actualizacion():
-    """
-    Esta función obtiene la fecha más reciente de la tabla 'historial_actualizaciones'
-    para saber cuándo se realizó la última importación de datos.
-    """
     conexion = None
     cursor = None
     try:
@@ -64,10 +60,11 @@ def obtener_ultima_actualizacion():
         cursor.execute("SET time_zone = 'America/Mexico_City'")
 
         consulta = """
-        SELECT MAX(fecha_actualizacion) as ultima_fecha
+        SELECT fecha_actualizacion as ultima_fecha
         FROM historial_actualizaciones
+        ORDER BY id DESC
+        LIMIT 1
         """
-        
         cursor.execute(consulta)
         resultado = cursor.fetchone()
         
