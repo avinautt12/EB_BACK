@@ -35,13 +35,53 @@ def obtener_monitor():
             evac,
             categoria_producto,
             estado_factura
-        FROM elite_bike_db.monitor
+        FROM monitor
         """
         cursor.execute(consulta)
         resultados = cursor.fetchall()
         return jsonify(resultados)
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
+
+@monitor_odoo_bp.route('/ultima_actualizacion', methods=['GET'])
+def obtener_ultima_actualizacion():
+    """
+    Esta función obtiene la fecha más reciente de la tabla 'historial_actualizaciones'
+    para saber cuándo se realizó la última importación de datos.
+    """
+    conexion = None
+    cursor = None
+    try:
+        conexion = obtener_conexion()
+        cursor = conexion.cursor(dictionary=True)
+
+        consulta = """
+        SELECT MAX(fecha_actualizacion) as ultima_fecha
+        FROM historial_actualizaciones
+        """
+        
+        cursor.execute(consulta)
+        resultado = cursor.fetchone()
+        
+        if resultado and resultado['ultima_fecha']:
+            return jsonify({
+                'success': True,
+                'ultima_fecha_actualizacion': resultado['ultima_fecha'].isoformat()
+            })
+        else:
+            return jsonify({
+                'success': True,
+                'ultima_fecha_actualizacion': None
+            })
+            
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+        
     finally:
         if cursor:
             cursor.close()
@@ -335,6 +375,17 @@ def importar_facturas():
             total_insertados += 1
 
         conexion.commit()
+        
+        try:
+            fecha_actual = datetime.now()
+            cursor.execute(
+                "INSERT INTO historial_actualizaciones (fecha_actualizacion) VALUES (%s)",
+                (fecha_actual,)
+            )
+            conexion.commit() 
+        except Exception as e:
+            print(f"No se pudo guardar la fecha de actualización: {e}")
+
         cursor.close()
         os.remove(filepath)
 
