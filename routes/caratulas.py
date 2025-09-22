@@ -403,3 +403,47 @@ def generar_caratula_pdf():
     except Exception as e:
         print(f"Error al generar PDF: {str(e)}")
         return jsonify({"error": f"Error interno al generar el PDF: {str(e)}"}), 500
+    
+@caratulas_bp.route('/verificar_grupo_cliente', methods=['GET'])
+def verificar_grupo_cliente():
+    """
+    Verifica si un cliente, basado en su clave, pertenece a un grupo.
+    Si pertenece, devuelve el ID y el nombre del grupo.
+    """
+    clave = request.args.get('clave')
+    if not clave:
+        return jsonify({'error': 'Se requiere la clave del cliente'}), 400
+
+    try:
+        conexion = obtener_conexion()
+        cursor = conexion.cursor(dictionary=True)
+        
+        query = """
+            SELECT
+                c.id_grupo,
+                g.nombre_grupo
+            FROM clientes c
+            JOIN grupo_clientes g ON c.id_grupo = g.id
+            WHERE c.clave = %s AND c.id_grupo IS NOT NULL;
+        """
+        cursor.execute(query, (clave,))
+        resultado = cursor.fetchone()
+
+        if resultado:
+            # ¡Éxito! El cliente tiene un grupo.
+            return jsonify({
+                'tiene_grupo': True,
+                'id_grupo': resultado['id_grupo'],
+                'nombre_grupo': resultado['nombre_grupo']
+            })
+        else:
+            # El cliente no pertenece a ningún grupo.
+            return jsonify({'tiene_grupo': False})
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if 'cursor' in locals() and cursor:
+            cursor.close()
+        if 'conexion' in locals() and conexion.is_connected():
+            conexion.close()
