@@ -484,7 +484,6 @@ def obtener_facturas_cliente():
     cursor = conexion.cursor(dictionary=True)
 
     try:
-        # Obtener datos del cliente del token
         cliente_data = getattr(request, 'cliente_data', None)
         if not cliente_data:
             return jsonify({"error": "Datos del cliente no encontrados"}), 400
@@ -495,45 +494,44 @@ def obtener_facturas_cliente():
         if not clave_cliente and not nombre_cliente:
             return jsonify({"error": "No se encontró información del cliente en el token"}), 400
 
-        # Consulta que prioriza clave pero también busca por nombre si no hay resultados
+        cursor.execute("SELECT f_inicio FROM clientes WHERE clave = %s", (clave_cliente,))
+        cliente_info = cursor.fetchone()
+
+        if not cliente_info or not cliente_info['f_inicio']:
+            return jsonify({
+                "success": True,
+                "mensaje": "El cliente no tiene una fecha de inicio de temporada configurada.",
+                "data": []
+            }), 200
+        
+        fecha_inicio_temporada = cliente_info['f_inicio']
+        
         query = """
             SELECT 
-                id,
-                numero_factura,
-                referencia_interna,
-                nombre_producto,
-                contacto_referencia,
-                contacto_nombre,
-                fecha_factura,
-                precio_unitario,
-                cantidad,
-                venta_total,
-                marca,
-                subcategoria,
-                apparel,
-                eride,
-                evac,
-                categoria_producto,
-                estado_factura
+                id, numero_factura, referencia_interna, nombre_producto,
+                contacto_referencia, contacto_nombre, fecha_factura,
+                precio_unitario, cantidad, venta_total, marca,
+                subcategoria, apparel, eride, evac,
+                categoria_producto, estado_factura
             FROM monitor
             WHERE (contacto_referencia = %s OR contacto_nombre = %s)
+            AND fecha_factura >= %s  -- <-- NUEVA CONDICIÓN
             AND numero_factura IS NOT NULL 
             AND numero_factura != '/'
             AND fecha_factura IS NOT NULL 
             AND fecha_factura != '0001-01-01 00:00:00'
             ORDER BY 
                 CASE 
-                    WHEN contacto_referencia = %s THEN 1  # Priorizar coincidencia exacta de clave
-                    WHEN contacto_nombre = %s THEN 2      # Luego coincidencia de nombre
+                    WHEN contacto_referencia = %s THEN 1
+                    WHEN contacto_nombre = %s THEN 2
                     ELSE 3
                 END,
                 fecha_factura DESC
         """
 
-        cursor.execute(query, (clave_cliente, nombre_cliente, clave_cliente, nombre_cliente))
+        cursor.execute(query, (clave_cliente, nombre_cliente, fecha_inicio_temporada, clave_cliente, nombre_cliente))
         facturas = cursor.fetchall()
 
-        # Formatear fechas
         for factura in facturas:
             if factura['fecha_factura'] and isinstance(factura['fecha_factura'], (datetime, date)):
                 factura['fecha_factura'] = factura['fecha_factura'].strftime('%Y-%m-%d %H:%M:%S')
@@ -551,6 +549,50 @@ def obtener_facturas_cliente():
     except Exception as e:
         print("Error al obtener las facturas del cliente:", str(e))
         return jsonify({"error": "Error en la consulta de facturas"}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
+
+@clientes_bp.route('/facturas-grupo/<int:id_grupo>', methods=['GET'])
+@token_required
+def obtener_facturas_grupo(id_grupo):
+    conexion = None
+    cursor = None
+    try:
+        conexion = obtener_conexion()
+        cursor = conexion.cursor(dictionary=True)
+
+        ## NUEVO: Consulta optimizada con JOIN para filtrar por fecha en una sola operación
+        query_facturas = """
+            SELECT 
+                m.* -- Seleccionamos todas las columnas de la tabla monitor
+            FROM 
+                monitor m
+            JOIN 
+                clientes c ON m.contacto_referencia = c.clave -- Unimos con clientes por la clave
+            WHERE 
+                c.id_grupo = %s -- Filtramos por el ID del grupo
+                AND m.fecha_factura >= c.f_inicio -- Condición: la fecha de factura debe ser mayor o igual a la f_inicio del cliente
+                AND m.numero_factura IS NOT NULL 
+                AND m.numero_factura != '/'
+            ORDER BY 
+                m.fecha_factura DESC
+        """
+        
+        cursor.execute(query_facturas, (id_grupo,))
+        facturas = cursor.fetchall()
+        
+        for factura in facturas:
+            if factura.get('fecha_factura') and isinstance(factura['fecha_factura'], (datetime, date)):
+                factura['fecha_factura'] = factura['fecha_factura'].strftime('%Y-%m-%d %H:%M:%S')
+
+        return jsonify({"success": True, "data": facturas}), 200
+
+    except Exception as e:
+        print(f"Error al obtener facturas del grupo: {str(e)}")
+        return jsonify({"error": "Error en la consulta de facturas del grupo"}), 500
     finally:
         if cursor:
             cursor.close()

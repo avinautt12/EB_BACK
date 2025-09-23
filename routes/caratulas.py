@@ -10,90 +10,68 @@ caratulas_bp = Blueprint('caratulas', __name__, url_prefix='')
 @caratulas_bp.route('/caratula_evac', methods=['GET'])
 def buscar_caratula_evac():
     try:
-        # Obtener parámetros
         clave = request.args.get('clave')
         nombre_cliente = request.args.get('nombre_cliente')
         
-        # Validar que al menos un parámetro esté presente
         if not clave and not nombre_cliente:
-            return jsonify({
-                'error': 'Se requiere al menos uno de los parámetros: clave o nombre_cliente'
-            }), 400
+            return jsonify({'error': 'Se requiere clave o nombre_cliente'}), 400
 
-        # Conexión a BD
         conexion = obtener_conexion()
         cursor = conexion.cursor(dictionary=True)
+        
+        nombre_a_buscar = nombre_cliente
+        columna_a_buscar = "nombre_cliente" # Por defecto buscamos en nombre_cliente
+        
+        # Si la búsqueda es por nombre y contiene "Integral", es un grupo.
+        if nombre_cliente and "integral" in nombre_cliente.lower():
+            cursor.execute("SELECT id FROM grupo_clientes WHERE nombre_grupo = %s", (nombre_cliente,))
+            grupo = cursor.fetchone()
+            
+            if grupo:
+                # Si es un grupo, CAMBIAMOS la columna y el valor a buscar
+                nombre_a_buscar = f"Integral {grupo['id']}"
+                columna_a_buscar = "clave" # ¡Aquí está la magia!
+                print(f"Búsqueda de GRUPO. Traducido '{nombre_cliente}' a buscar '{nombre_a_buscar}' en la columna '{columna_a_buscar}'.")
 
         # Construir consulta dinámica
-        query = """
-        SELECT 
-            clave,
-            evac,
-            nombre_cliente,
-            nivel,
-            compra_minima_anual,
-            compromiso_scott,
-            avance_global_scott,
-            porcentaje_scott,
-            compromiso_apparel_syncros_vittoria,
-            avance_global_apparel_syncros_vittoria,
-            porcentaje_apparel_syncros_vittoria,
-            compromiso_jul_ago,
-            avance_jul_ago,
-            porcentaje_jul_ago,
-            compromiso_sep_oct,
-            avance_sep_oct,
-            porcentaje_sep_oct,
-            compromiso_nov_dic,
-            avance_nov_dic,
-            porcentaje_nov_dic,
-            compromiso_jul_ago_app,
-            avance_jul_ago_app,
-            porcentaje_jul_ago_app,
-            compromiso_sep_oct_app,
-            avance_sep_oct_app,
-            porcentaje_sep_oct_app,
-            compromiso_nov_dic_app,
-            avance_nov_dic_app,
-            porcentaje_nov_dic_app,
-            compra_minima_inicial,
-            avance_global,
-            porcentaje_global,
-            acumulado_anticipado,
-            porcentaje_anual
-        FROM previo
-        WHERE """
-        
+        query = "SELECT * FROM previo WHERE "
         params = []
         conditions = []
         
         if clave:
             conditions.append("clave = %s")
             params.append(clave)
-            
-        if nombre_cliente:
-            conditions.append("nombre_cliente LIKE %s")
-            params.append(f"%{nombre_cliente}%")
+
+        # Usamos la columna y el nombre correctos para la búsqueda
+        if nombre_a_buscar:
+            # Usamos f-string para insertar el nombre de la columna dinámicamente
+            conditions.append(f"{columna_a_buscar} LIKE %s")
+            params.append(f"%{nombre_a_buscar}%")
         
         query += " AND ".join(conditions)
         
-        # Ejecutar consulta
         cursor.execute(query, tuple(params))
         resultados = cursor.fetchall()
 
         if not resultados:
             return jsonify({'error': 'No se encontraron registros'}), 404
 
+        # Convertir Decimal a float
+        for fila in resultados:
+            for key, value in fila.items():
+                if isinstance(value, Decimal):
+                    fila[key] = float(value)
+        
         return jsonify(resultados), 200
 
     except Exception as e:
-        print(f"Error en buscar_previo: {str(e)}")
+        print(f"Error en buscar_caratula_evac: {str(e)}")
         return jsonify({'error': 'Error al procesar la solicitud'}), 500
         
     finally:
-        if cursor:
+        if 'cursor' in locals() and cursor:
             cursor.close()
-        if conexion and conexion.is_connected():
+        if 'conexion' in locals() and conexion.is_connected():
             conexion.close()
 
 @caratulas_bp.route('/nombres_caratula', methods=['GET'])

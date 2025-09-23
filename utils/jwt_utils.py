@@ -3,7 +3,7 @@ import datetime
 
 SECRET_KEY = "123456"
 
-def generar_token(id_usuario, rol, usuario, nombre, cliente_id, clave_cliente, nombre_cliente):
+def generar_token(id_usuario, rol, usuario, nombre, cliente_id, clave_cliente, nombre_cliente, id_grupo):
     payload = {
         # Datos del usuario
         'id': id_usuario,
@@ -15,6 +15,7 @@ def generar_token(id_usuario, rol, usuario, nombre, cliente_id, clave_cliente, n
         'cliente_id': cliente_id,
         'clave': clave_cliente,
         'nombre_cliente': nombre_cliente,
+        'id_grupo': id_grupo,
         
         # Expiración
         'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=2)

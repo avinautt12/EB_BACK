@@ -3,7 +3,6 @@ from db_conexion import obtener_conexion
 from utils.seguridad import hash_password, verificar_password
 from utils.jwt_utils import generar_token
 import re
-from socket_instance import socketio 
 import random
 from utils.email import enviar_correo_activacion
 from datetime import datetime, timedelta
@@ -160,7 +159,7 @@ def login():
         print(f"Intentando login para usuario: {usuario}")
         
         query = """
-        SELECT u.*, c.id as cliente_id, c.clave as clave_cliente, c.nombre_cliente 
+        SELECT u.*, c.id as cliente_id, c.clave as clave_cliente, c.nombre_cliente, c.id_grupo 
         FROM usuarios u 
         LEFT JOIN clientes c ON u.cliente_id = c.id 
         WHERE u.usuario = %s AND u.activo = TRUE
@@ -188,7 +187,8 @@ def login():
                     user['nombre'],
                     user['cliente_id'],          
                     user['clave_cliente'],     
-                    user['nombre_cliente']
+                    user['nombre_cliente'],
+                    user['id_grupo']
                 )
                 return jsonify({
                     "token": token

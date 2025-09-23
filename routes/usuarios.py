@@ -3,7 +3,6 @@ from models.user_model import obtener_usuarios
 import re
 from utils.seguridad import hash_password, verificar_password, generar_token
 from db_conexion import obtener_conexion
-from socket_instance import socketio
 
 def campo_vacio(valor):
     return valor is None or (isinstance(valor, str) and valor.strip() == "")
@@ -217,8 +216,6 @@ def actualizar_usuario(usuario_id):
             "cliente_id": campos_actualizar.get('cliente_id', usuario_existente.get('cliente_id')),
         }
 
-        socketio.emit('usuarioActualizado', campos_emitir)
-
         return jsonify({
             "mensaje": "Usuario actualizado con éxito",
             "campos_actualizados": list(campos_actualizar.keys())
@@ -264,8 +261,6 @@ def eliminar_usuario(usuario_id):
         # 3. Eliminación física (PERMANENTE)
         cursor.execute("DELETE FROM usuarios WHERE id = %s", (usuario_id,))
         conexion.commit()  # Confirmar la transacción
-
-        socketio.emit('usuarioEliminado', {'id': usuario_id})
 
         return jsonify({
             "mensaje": "Usuario eliminado permanentemente de la base de datos",
