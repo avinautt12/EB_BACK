@@ -221,6 +221,7 @@ def actualizar_caratula_evac_a():
         import traceback
         print("Traceback:", traceback.format_exc())
         return jsonify({'error': str(e)}), 500
+    
     finally:
         if cursor:
             cursor.close()
@@ -353,6 +354,9 @@ def generar_caratula_pdf():
     """
     Endpoint para generar un PDF de la carátula en el servidor y devolverlo.
     """
+    conexion = obtener_conexion()
+    cursor = conexion.cursor(dictionary=True)
+    
     try:
         # 1. Obtener los datos del cliente enviados desde Angular
         data = request.get_json()
@@ -381,6 +385,11 @@ def generar_caratula_pdf():
     except Exception as e:
         print(f"Error al generar PDF: {str(e)}")
         return jsonify({"error": f"Error interno al generar el PDF: {str(e)}"}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
     
 @caratulas_bp.route('/verificar_grupo_cliente', methods=['GET'])
 def verificar_grupo_cliente():

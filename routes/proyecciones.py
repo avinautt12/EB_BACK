@@ -32,8 +32,10 @@ def listar_proyecciones():
         print("Error al obtener proyecciones:", str(e))
         return jsonify({"error": "Error al obtener proyecciones"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @proyecciones_bp.route('/proyecciones-limpias', methods=['GET'])
 def listar_proyecciones_limpias():
@@ -113,8 +115,10 @@ def listar_proyecciones_limpias():
         print("Error al obtener proyecciones limpias:", str(e))
         return jsonify({"error": "Error al obtener proyecciones limpias"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @proyecciones_bp.route('/proyecciones/agregar', methods=['POST'])
 def agregar_proyecciones_cliente():
@@ -249,8 +253,10 @@ def agregar_proyecciones_cliente():
         conexion.rollback()
         return jsonify({"error": "Error al insertar proyecciones"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @proyecciones_bp.route('/proyecciones/historial', methods=['GET'])
 def historial_proyecciones_cliente():
@@ -354,8 +360,10 @@ def historial_proyecciones_cliente():
         print("Error al obtener historial:", str(e))
         return jsonify({"error": "Error al obtener historial"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @proyecciones_bp.route('/proyecciones/detalles/<int:id_proyeccion>', methods=['GET'])
 def detalles_proyeccion(id_proyeccion):
@@ -456,8 +464,10 @@ def detalles_proyeccion(id_proyeccion):
         print("Error completo al obtener detalles:", str(e))
         return jsonify({"error": "Error al obtener detalles de proyección", "detalles": str(e)}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 # Disponibilidades
 @proyecciones_bp.route('/disponibilidades', methods=['GET'])
@@ -473,8 +483,10 @@ def listar_disponibilidades():
         print("Error al obtener disponibilidades:", str(e))
         return jsonify({"error": "Error al obtener disponibilidades"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @proyecciones_bp.route('/proyecciones/buscar/<int:id>', methods=['GET'])
 def buscar_proyeccion_por_id(id):
@@ -493,8 +505,10 @@ def buscar_proyeccion_por_id(id):
         print("Error al buscar proyección por ID:", str(e))
         return jsonify({"error": "Error al buscar proyección"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @proyecciones_bp.route('/proyecciones/nueva', methods=['POST'])
 def agregar_proyeccion():
@@ -668,8 +682,10 @@ def editar_proyeccion(id):
         return jsonify({"error": "Error interno al editar proyección"}), 500
 
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @proyecciones_bp.route('/proyecciones/eliminar/<int:id>', methods=['DELETE'])
 def eliminar_proyeccion(id):
@@ -691,8 +707,10 @@ def eliminar_proyeccion(id):
         return jsonify({"error": "Error interno al eliminar proyección"}), 500
 
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @proyecciones_bp.route('/proyecciones/ya-enviada', methods=['GET'])
 def verificar_proyeccion_enviada():
@@ -739,8 +757,10 @@ def verificar_proyeccion_enviada():
         return jsonify({"error": "Error interno"}), 500
 
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @proyecciones_bp.route('/proyecciones/resumen-global', methods=['GET'])
 def resumen_global_proyecciones():
@@ -858,8 +878,10 @@ def resumen_global_proyecciones():
         return jsonify({"error": "Error interno al obtener el resumen"}), 500
 
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @proyecciones_bp.route('/importar_proyecciones', methods=['POST'])
 def importar_proyecciones():
@@ -1019,6 +1041,12 @@ def importar_proyecciones():
             'error': str(e),
             'details': 'Verifica que el archivo tenga el formato correcto y todas las columnas requeridas'
         }), 500
+    
+    finally:
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
 
 @proyecciones_bp.route('/proyecciones/autoguardado', methods=['POST'])
 def manejar_autoguardado():
@@ -1142,5 +1170,7 @@ def manejar_autoguardado():
         conexion.rollback()
         return jsonify({"error": "Error en el servidor"}), 500
     finally:
-        cursor.close()
-        conexion.close()
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
