@@ -20,6 +20,10 @@ EMAIL_CONFIGS = {
         'user': os.getenv('EVACB_GMAIL_USER', 'servicioalcliente02@elitebike-mx.com'),
         'password': os.getenv('EVACB_GMAIL_PASSWORD', 'otns ntux ebvs hnlc')
     },
+    'alma_fraire': {
+        'user': os.getenv('ALMAF_GMAIL_USER', 'gerencia.operaciones@elitebike-mx.com'), 
+        'password': os.getenv('ALMAF_GMAIL_PASSWORD', 'huko lvse pbpf kazh') 
+    },
     'default': {
         'user': os.getenv('GMAIL_USER', 'sistemas@elitebike-mx.com'),
         'password': os.getenv('GMAIL_PASSWORD', 'yjtt fmca kbrr htar')
@@ -34,6 +38,8 @@ def obtener_credenciales_por_usuario(usuario):
         return EMAIL_CONFIGS['evacA']
     elif usuario_lower.startswith('evacb') or usuario_lower.startswith('evac_b'):
         return EMAIL_CONFIGS['evacB']
+    elif usuario_lower == 'gerencia.operaciones' or 'alma fraire' in usuario_lower:
+        return EMAIL_CONFIGS['alma_fraire']
     else:
         return EMAIL_CONFIGS['default']
 
@@ -42,7 +48,6 @@ def crear_cuerpo_email(data):
     Crea el HTML para el cuerpo del email y para un PDF adjunto, con el diseño
     final de fondo blanco, tarjetas oscuras y encabezado reorganizado.
     """
-    # --- Extracción de datos y funciones auxiliares (sin cambios) ---
     datos_caratula = data.get('datos_caratula', {})
     mensaje_personalizado = data.get('mensaje_personalizado', '')
     periodos = data.get('periodos', [])
