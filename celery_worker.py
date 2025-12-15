@@ -36,33 +36,43 @@ celery_app.conf.update(
 # ----------------- POOL DE CONEXIONES SMTP -----------------
 # Creamos un pool de conexiones global para reutilizar las conexiones SMTP
 smtp_pool = {}
+# Creamos un pool para guardar el usuario de email asociado a la conexión
+smtp_users = {}
 
 def get_smtp_connection(usuario):
-    """Obtiene una conexión SMTP reutilizable para un usuario."""
+    """Obtiene una conexión SMTP reutilizable para un usuario y su email."""
     global smtp_pool
-    # Primero, intentamos reutilizar la conexión si ya existe
+    global smtp_users
+    
+    # 1. Intentamos reutilizar la conexión si ya existe
     if usuario in smtp_pool:
         try:
-            # Verificamos si la conexión sigue viva
             smtp_pool[usuario].noop()
-            return smtp_pool[usuario]
+            # Retornamos el servidor y el email del remitente (guardado previamente)
+            return smtp_pool[usuario], smtp_users[usuario] 
         except (smtplib.SMTPServerDisconnected, smtplib.SMTPException):
             logging.warning(f"Conexión SMTP para {usuario} perdida. Reestableciendo...")
-            del smtp_pool[usuario] # La eliminamos si se perdió
+            del smtp_pool[usuario] 
+            if usuario in smtp_users:
+                del smtp_users[usuario]
     
-    # Si no existe o se perdió, creamos una nueva conexión
+    # 2. Si no existe o se perdió, creamos una nueva conexión
     try:
         credenciales = obtener_credenciales_por_usuario(usuario)
         gmail_user = credenciales['user']
         gmail_password = credenciales['password']
 
+        # Usamos SMTP_SSL en el puerto 465 (más robusto que 587 + starttls)
         server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
         server.login(gmail_user, gmail_password)
-        smtp_pool[usuario] = server  # Guardamos la nueva conexión en el pool
-        return server
+        
+        smtp_pool[usuario] = server   # Guardamos la nueva conexión en el pool
+        smtp_users[usuario] = gmail_user # Guardamos el email del remitente
+        
+        return server, gmail_user
     except Exception as e:
         logging.error(f"Error al establecer conexión SMTP para {usuario}: {e}")
-        return None
+        return None, None # Retorna None, None en caso de error
 # ----------------- FIN DEL POOL DE CONEXIONES SMTP -----------------
 
 @celery_app.task(name='tasks.enviar_caratula_pdf_async')
@@ -73,7 +83,6 @@ def enviar_caratula_pdf_async(data, usuario, historial_id):
         
         # --- Generar el HTML de la carátula y el PDF ---
         start_time = time.time()
-        # La función ahora retorna un diccionario con ambos HTML
         htmls = crear_cuerpo_email(data) 
         
         # Usamos el HTML de la carátula para generar el PDF
@@ -82,13 +91,16 @@ def enviar_caratula_pdf_async(data, usuario, historial_id):
         
         # --- Obtener conexión del pool y enviar el mensaje ---
         start_time = time.time()
-        server = get_smtp_connection(usuario)
-        if not server:
-            raise Exception("No se pudo obtener una conexión SMTP.")
+        # ¡CORRECCIÓN! Ahora get_smtp_connection devuelve (server, email_remitente)
+        server, email_remitente = get_smtp_connection(usuario) 
+        
+        if not server or not email_remitente:
+            raise Exception("No se pudo obtener una conexión SMTP o el email remitente.")
         logging.info(f"[{datetime.now()}] Conexión SMTP obtenida en {time.time() - start_time:.2f} segundos.")
 
         msg = MIMEMultipart()
-        msg['From'] = server.user
+        # ¡CORRECCIÓN CLAVE! Usamos el email_remitente correcto para la cabecera From
+        msg['From'] = email_remitente
         msg['To'] = data['to']
         msg['Subject'] = f"Carátula - {data['cliente_nombre']} - {datetime.now().strftime('%d/%m/%Y')}"
         
@@ -104,6 +116,7 @@ def enviar_caratula_pdf_async(data, usuario, historial_id):
         part.add_header('Content-Disposition', f'attachment; filename={filename}')
         msg.attach(part)
         
+        # Usamos send_message (más moderno y requiere solo un argumento de remitente)
         server.send_message(msg)
         logging.info(f"[{datetime.now()}] Email enviado en {time.time() - start_time:.2f} segundos.")
 
