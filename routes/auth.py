@@ -8,7 +8,6 @@ from utils.email import enviar_correo_activacion
 from datetime import datetime, timedelta
 import uuid
 
-conexion = obtener_conexion()
 auth = Blueprint('auth', __name__, url_prefix='')
 
 def campo_vacio(campo):
@@ -16,12 +15,11 @@ def campo_vacio(campo):
 
 @auth.route('/registro', methods=['POST'])
 def registrar_usuario():
+    # 1. VALIDACIONES SIN BASE DE DATOS (Hazlas primero, es gratis)
     data = request.get_json()
-
     if not data:
         return jsonify({"error": "No se proporcionaron datos"}), 400
 
-    # Obtener campos del JSON
     usuario = data.get('usuario')
     contrasena = data.get('contrasena')
     nombre = data.get('nombre')
@@ -29,311 +27,228 @@ def registrar_usuario():
     rol = data.get('rol', 'Usuario')
     cliente_id = data.get('cliente_id')
 
-    # Validaciones básicas
-    campos_requeridos = {
-        'usuario': usuario,
-        'contrasena': contrasena,
-        'nombre': nombre,
-        'correo': correo
-    }
-    
+    # Validaciones básicas de campos
+    campos_requeridos = {'usuario': usuario, 'contrasena': contrasena, 'nombre': nombre, 'correo': correo}
     for campo, valor in campos_requeridos.items():
         if not valor or (isinstance(valor, str) and valor.strip() == ''):
             return jsonify({"error": f"El campo '{campo}' es obligatorio"}), 400
 
     if not isinstance(usuario, str) or not isinstance(contrasena, str):
-        return jsonify({"error": "Usuario y contraseña deben ser cadenas de texto"}), 400
+        return jsonify({"error": "Usuario y contraseña cadenas de texto"}), 400
 
     if not re.match(r"^[a-zA-Z0-9_.-]{3,20}$", usuario):
-        return jsonify({"error": "El nombre de usuario debe tener entre 3 y 20 caracteres alfanuméricos"}), 400
+        return jsonify({"error": "Usuario: 3-20 caracteres alfanuméricos"}), 400
 
     if not re.match(r"[^@]+@[^@]+\.[^@]+", correo):
-        return jsonify({"error": "El correo electrónico no es válido"}), 400
+        return jsonify({"error": "Correo inválido"}), 400
 
     if len(contrasena) < 6:
-        return jsonify({"error": "La contraseña debe tener al menos 6 caracteres"}), 400
+        return jsonify({"error": "Contraseña mín. 6 caracteres"}), 400
 
-    # Validar y traducir el rol
     roles_validos = {"Administrador": 1, "Usuario": 2}
     if rol not in roles_validos:
-        return jsonify({"error": "Rol inválido, debe ser 'Administrador' o 'Usuario'"}), 400
-    
+        return jsonify({"error": "Rol inválido"}), 400
     rol_id = roles_validos[rol]
 
-    cursor = conexion.cursor(dictionary=True)
+    # 2. AHORA SÍ, ABRIMOS LA BASE DE DATOS
+    conexion = obtener_conexion()
+    cursor = None
 
-    # Validar cliente_id si se proporciona
-    if cliente_id not in [None, "", "null"]:
-        try:
-            cliente_id = int(cliente_id)
-            cursor.execute("SELECT id FROM clientes WHERE id = %s", (cliente_id,))
-            if not cursor.fetchone():
-                return jsonify({"error": "El cliente_id proporcionado no existe"}), 400
-        except ValueError:
-            return jsonify({"error": "El cliente_id debe ser un número válido"}), 400
-    else:
-        cliente_id = None
-
-    # Validar unicidad de usuario, correo y nombre
-    cursor.execute("SELECT id FROM usuarios WHERE usuario = %s", (usuario,))
-    if cursor.fetchone():
-        return jsonify({"error": "El nombre de usuario ya está en uso"}), 400
-
-    cursor.execute("SELECT id FROM usuarios WHERE correo = %s", (correo,))
-    if cursor.fetchone():
-        return jsonify({"error": "El correo electrónico ya está en uso"}), 400
-
-    cursor.execute("SELECT id FROM usuarios WHERE nombre = %s", (nombre,))
-    if cursor.fetchone():
-        return jsonify({"error": "El nombre ya está en uso"}), 400
-
-    # Hashear la contraseña
-    contrasena_hash = hash_password(contrasena)
-
-    # Insertar usuario
     try:
+        cursor = conexion.cursor(dictionary=True)
+
+        # Validar cliente_id (requiere BD)
+        if cliente_id not in [None, "", "null"]:
+            try:
+                cliente_id = int(cliente_id)
+                cursor.execute("SELECT id FROM clientes WHERE id = %s", (cliente_id,))
+                if not cursor.fetchone():
+                    return jsonify({"error": "El cliente_id no existe"}), 400
+            except ValueError:
+                return jsonify({"error": "cliente_id inválido"}), 400
+        else:
+            cliente_id = None
+
+        # Validar duplicados (requiere BD)
+        cursor.execute("SELECT id FROM usuarios WHERE usuario = %s", (usuario,))
+        if cursor.fetchone():
+            return jsonify({"error": "El usuario ya existe"}), 400
+
+        cursor.execute("SELECT id FROM usuarios WHERE correo = %s", (correo,))
+        if cursor.fetchone():
+            return jsonify({"error": "El correo ya existe"}), 400
+        
+        # Insertar
+        contrasena_hash = hash_password(contrasena)
         cursor.execute(
-            """
-            INSERT INTO usuarios (
-                usuario, contrasena, nombre, correo,
-                rol_id, activo, cliente_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """,
+            """INSERT INTO usuarios (usuario, contrasena, nombre, correo, rol_id, activo, cliente_id) 
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
             (usuario, contrasena_hash, nombre, correo, rol_id, True, cliente_id)
         )
         conexion.commit()
         nuevo_id = cursor.lastrowid
 
-        # Obtener datos del usuario recién creado
+        # Obtener resultado
         cursor.execute("""
-            SELECT
-                u.id,
-                u.usuario,
-                u.nombre,
-                u.correo,
-                r.nombre AS rol,
-                u.activo,
-                c.nombre_cliente AS cliente_nombre,
-                c.id AS cliente_id
+            SELECT u.id, u.usuario, u.nombre, u.correo, r.nombre AS rol, u.activo, 
+                   c.nombre_cliente, c.id AS cliente_id
             FROM usuarios u
             JOIN roles r ON u.rol_id = r.id
             LEFT JOIN clientes c ON u.cliente_id = c.id
             WHERE u.id = %s
         """, (nuevo_id,))
         usuario_creado = cursor.fetchone()
-        cursor.close()
 
-        return jsonify({
-            "mensaje": "Usuario registrado con éxito",
-            "usuario": usuario_creado
-        }), 201
+        return jsonify({"mensaje": "Registrado", "usuario": usuario_creado}), 201
 
     except Exception as e:
-        conexion.rollback()
-        return jsonify({"error": f"Error al registrar el usuario: {str(e)}"}), 500
+        if conexion.is_connected(): conexion.rollback()
+        return jsonify({"error": str(e)}), 500
     
     finally:
-        # ESTO ES OBLIGATORIO Y SE EJECUTA SIEMPRE
-        if cursor:
-            cursor.close()
-        if conexion and conexion.is_connected():
-            conexion.close()
+        # 3. CERRAMOS PASE LO QUE PASE
+        if cursor: cursor.close()
+        if conexion and conexion.is_connected(): conexion.close()
+
 
 @auth.route('/login', methods=['POST'])
 def login():
+    # Validaciones previas
     data = request.get_json()
-
-    if not data:
-        return jsonify({"error": "No se proporcionaron datos"}), 400
-
+    if not data: return jsonify({"error": "Sin datos"}), 400
     usuario = data.get('usuario')
     contrasena = data.get('contrasena')
+    if campo_vacio(usuario) or campo_vacio(contrasena): return jsonify({"error": "Faltan datos"}), 400
 
-    if campo_vacio(usuario) or campo_vacio(contrasena):
-        return jsonify({"error": "Usuario y contraseña son obligatorios"}), 400
-
+    # Abrir conexión
     conexion = obtener_conexion()
-    cursor = conexion.cursor(dictionary=True)
+    cursor = None
     try:
-        # Agregar logging para ver qué usuario se está buscando
-        print(f"Intentando login para usuario: {usuario}")
-        
-        query = """
-        SELECT u.*, c.id as cliente_id, c.clave as clave_cliente, c.nombre_cliente, c.id_grupo 
-        FROM usuarios u 
-        LEFT JOIN clientes c ON u.cliente_id = c.id 
-        WHERE u.usuario = %s AND u.activo = TRUE
-        """
-        cursor.execute(query, (usuario,))
+        cursor = conexion.cursor(dictionary=True)
+        # ... Tu lógica de login ...
+        cursor.execute("SELECT u.*, c.id as cliente_id, c.clave as clave_cliente, c.nombre_cliente, c.id_grupo FROM usuarios u LEFT JOIN clientes c ON u.cliente_id = c.id WHERE u.usuario = %s AND u.activo = TRUE", (usuario,))
         user = cursor.fetchone()
         
-        # Agregar logging para ver qué usuario se encontró
-        print(f"Usuario encontrado en BD: {user}")
-        
-        if user:
-            # Agregar logging para ver la contraseña almacenada
-            print(f"Contraseña almacenada (hash): {user['contrasena']}")
-            print(f"Intentando verificar contraseña para usuario: {usuario}")
+        if user and verificar_password(contrasena, user['contrasena']):
+            token = generar_token(user['id'], user['rol_id'], user['usuario'], user['nombre'], user['cliente_id'], user['clave_cliente'], user['nombre_cliente'], user['id_grupo'])
+            return jsonify({"token": token}), 200
             
-            # Verificar la contraseña con más logging
-            password_match = verificar_password(contrasena, user['contrasena'])
-            print(f"Resultado de verificación de contraseña: {password_match}")
-            
-            if password_match:
-                token = generar_token(
-                    user['id'],
-                    user['rol_id'],
-                    user['usuario'],
-                    user['nombre'],
-                    user['cliente_id'],          
-                    user['clave_cliente'],     
-                    user['nombre_cliente'],
-                    user['id_grupo']
-                )
-                return jsonify({
-                    "token": token
-                }), 200
-
-        return jsonify({"error": "Credenciales incorrectas. Verifica tu correo o contraseña."}), 401
-        
+        return jsonify({"error": "Credenciales incorrectas"}), 401
     except Exception as e:
-        print(f"Error durante el login: {str(e)}")
-        return jsonify({"error": f"Error en la consulta: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
     finally:
-        if cursor:
-            cursor.close()
-        if conexion and conexion.is_connected():
-            conexion.close()
+        if cursor: cursor.close()
+        if conexion and conexion.is_connected(): conexion.close()
+
 
 @auth.route('/logout', methods=['POST'])
 def logout():
+    # Validación previa
     data = request.get_json()
-
-    if not data or 'token' not in data:
-        return jsonify({"error": "Token no proporcionado"}), 400
-
+    if not data or 'token' not in data: return jsonify({"error": "Falta token"}), 400
     token = data['token']
 
-    cursor = conexion.cursor()
+    # Abrir conexión
+    conexion = obtener_conexion()
+    cursor = None
     try:
+        cursor = conexion.cursor()
         cursor.execute("UPDATE usuarios SET token = NULL WHERE token = %s", (token,))
         conexion.commit()
-        return jsonify({"mensaje": "Sesión cerrada con éxito"}), 200
+        return jsonify({"mensaje": "Sesión cerrada"}), 200
     except Exception as e:
         conexion.rollback()
-        return jsonify({"error": f"Error al cerrar sesión: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
     finally:
-        if cursor:
-            cursor.close()
-        if conexion and conexion.is_connected():
-            conexion.close()
+        if cursor: cursor.close()
+        if conexion and conexion.is_connected(): conexion.close()
+
 
 @auth.route('/enviar_codigo_activacion', methods=['POST'])
 def enviar_codigo_activacion():
     data = request.get_json()
     correo = data.get('correo')
+    if campo_vacio(correo): return jsonify({"error": "Correo obligatorio"}), 400
 
-    if campo_vacio(correo):
-        return jsonify({"error": "El correo es obligatorio"}), 400
-
-    cursor = conexion.cursor(dictionary=True)
-
-    cursor.execute("SELECT id FROM usuarios WHERE correo = %s", (correo,))
-    usuario = cursor.fetchone()
-
-    if not usuario:
-        return jsonify({"error": "No se encontró un usuario con ese correo"}), 404
-
-    codigo = str(random.randint(100000, 999999))
-
+    conexion = obtener_conexion()
+    cursor = None
     try:
+        cursor = conexion.cursor(dictionary=True)
+        cursor.execute("SELECT id FROM usuarios WHERE correo = %s", (correo,))
+        if not cursor.fetchone():
+            return jsonify({"error": "Usuario no encontrado"}), 404 # Aquí estaba el problema antes, retornabas sin cerrar
+
+        codigo = str(random.randint(100000, 999999))
         cursor.execute("UPDATE usuarios SET codigo_activacion = %s WHERE correo = %s", (codigo, correo))
         conexion.commit()
-
+        
         enviar_correo_activacion(correo, codigo)
-
-        return jsonify({"mensaje": "Código de activación enviado al correo"}), 200
+        return jsonify({"mensaje": "Código enviado"}), 200
     except Exception as e:
         conexion.rollback()
-        return jsonify({"error": f"Error al generar el código: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
     finally:
-        if cursor:
-            cursor.close()
-        if conexion and conexion.is_connected():
-            conexion.close()
+        if cursor: cursor.close()
+        if conexion and conexion.is_connected(): conexion.close()
+
 
 @auth.route('/verificar_codigo', methods=['POST'])
 def verificar_codigo():
     data = request.get_json()
-    codigo_ingresado = data.get('codigo')
+    codigo = data.get('codigo')
+    if campo_vacio(codigo): return jsonify({"error": "Código obligatorio"}), 400
 
-    if campo_vacio(codigo_ingresado):
-        return jsonify({"error": "El código es obligatorio"}), 400
-
-    cursor = conexion.cursor(dictionary=True)
-    cursor.execute("SELECT id FROM usuarios WHERE codigo_activacion = %s AND activo = TRUE", (codigo_ingresado,))
-    usuario = cursor.fetchone()
-
-    if not usuario:
-        return jsonify({"error": "Código inválido o no encontrado"}), 404
-
+    conexion = obtener_conexion()
+    cursor = None
     try:
+        cursor = conexion.cursor(dictionary=True)
+        cursor.execute("SELECT id FROM usuarios WHERE codigo_activacion = %s AND activo = TRUE", (codigo,))
+        usuario = cursor.fetchone()
+
+        if not usuario:
+            return jsonify({"error": "Código inválido"}), 404
+
         token_temp = str(uuid.uuid4())
         expiracion = datetime.utcnow() + timedelta(minutes=15)
-
-        cursor.execute(
-            "UPDATE usuarios SET codigo_activacion = NULL, token_correo = %s, token_expiracion = %s WHERE id = %s",
-            (token_temp, expiracion, usuario['id'])
-        )
+        cursor.execute("UPDATE usuarios SET codigo_activacion = NULL, token_correo = %s, token_expiracion = %s WHERE id = %s", (token_temp, expiracion, usuario['id']))
         conexion.commit()
 
-        return jsonify({"mensaje": "Código verificado con éxito", "token": token_temp}), 200
+        return jsonify({"mensaje": "Verificado", "token": token_temp}), 200
     except Exception as e:
         conexion.rollback()
-        return jsonify({"error": f"Error en el proceso: {str(e)}"}), 500  
+        return jsonify({"error": str(e)}), 500
     finally:
-        if cursor:
-            cursor.close()
-        if conexion and conexion.is_connected():
-            conexion.close()
+        if cursor: cursor.close()
+        if conexion and conexion.is_connected(): conexion.close()
+
 
 @auth.route('/cambiar_contrasena', methods=['POST'])    
 def cambiar_contrasena():
     data = request.get_json()
     token = data.get('token')
-    nueva_contrasena = data.get('nueva_contrasena')
+    nueva = data.get('nueva_contrasena')
 
-    if campo_vacio(token) or campo_vacio(nueva_contrasena):
-        return jsonify({"error": "Token y nueva contraseña son obligatorios"}), 400
+    if campo_vacio(token) or campo_vacio(nueva): return jsonify({"error": "Faltan datos"}), 400
+    if len(nueva) < 6: return jsonify({"error": "Contraseña corta"}), 400
 
-    if len(nueva_contrasena) < 6:
-        return jsonify({"error": "La nueva contraseña debe tener al menos 6 caracteres"}), 400
-
-    cursor = conexion.cursor(dictionary=True)
+    conexion = obtener_conexion()
+    cursor = None
     try:
+        cursor = conexion.cursor(dictionary=True)
         cursor.execute("SELECT id, token_expiracion FROM usuarios WHERE token_correo = %s", (token,))
         usuario = cursor.fetchone()
 
-        if not usuario:
-            return jsonify({"error": "Token inválido"}), 400
+        if not usuario: return jsonify({"error": "Token inválido"}), 400
+        if usuario['token_expiracion'] < datetime.utcnow(): return jsonify({"error": "Token expirado"}), 400
 
-        if usuario['token_expiracion'] < datetime.utcnow():
-            return jsonify({"error": "Token expirado"}), 400
-
-        nueva_contrasena_hash = hash_password(nueva_contrasena)
-
-        cursor.execute(
-            "UPDATE usuarios SET contrasena = %s, token_correo = NULL, token_expiracion = NULL WHERE id = %s",
-            (nueva_contrasena_hash, usuario['id'])
-        )
+        hash_nueva = hash_password(nueva)
+        cursor.execute("UPDATE usuarios SET contrasena = %s, token_correo = NULL, token_expiracion = NULL WHERE id = %s", (hash_nueva, usuario['id']))
         conexion.commit()
 
-        return jsonify({"mensaje": "Contraseña cambiada con éxito"}), 200
+        return jsonify({"mensaje": "Contraseña actualizada"}), 200
     except Exception as e:
         conexion.rollback()
-        return jsonify({"error": f"Error al cambiar la contraseña: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
     finally:
-        if cursor:
-            cursor.close()
-        if conexion and conexion.is_connected():
-            conexion.close()
+        if cursor: cursor.close()
+        if conexion and conexion.is_connected(): conexion.close()
