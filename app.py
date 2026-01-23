@@ -16,6 +16,12 @@ from routes.caratulas import caratulas_bp
 from routes.integrales import integrales_bp  
 from routes.email import email_bp
 
+from routes.ordenes_compra import ordenes_compra_bp
+from routes.dashboard_flujo import dashboard_flujo_bp
+from routes.logistica import logistica_bp
+from routes.gastos import gastos_bp
+from routes.ingresos import ingresos_bp
+
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": ["http://localhost:4200", "https://otro-dominio.com"]}}, supports_credentials=True)
 
@@ -33,6 +39,12 @@ app.register_blueprint(multimarcas_bp)
 app.register_blueprint(caratulas_bp)
 app.register_blueprint(integrales_bp)
 app.register_blueprint(email_bp)
+
+app.register_blueprint(ordenes_compra_bp)
+app.register_blueprint(dashboard_flujo_bp)
+app.register_blueprint(logistica_bp)
+app.register_blueprint(gastos_bp)
+app.register_blueprint(ingresos_bp)
 
 #@socketio.on('connect')
 # def handle_connect():

@@ -7,6 +7,7 @@ from datetime import datetime
 from models.monitor_odoo_model import obtener_todos_los_registros
 import re
 from zoneinfo import ZoneInfo
+import time # Importar librería de tiempo
 
 monitor_odoo_bp = Blueprint('monitor_odoo', __name__, url_prefix='')
 
@@ -51,23 +52,31 @@ def obtener_monitor():
 
 @monitor_odoo_bp.route('/ultima_actualizacion', methods=['GET'])
 def obtener_ultima_actualizacion():
+    t_inicio = time.time() # ⏱️ INICIO
+    
     conexion = None
     cursor = None
     try:
+        # Paso 1: Conexión
+        t1 = time.time()
         conexion = obtener_conexion()
+        t2 = time.time()
+        print(f"⏱️ Tiempo Conexión: {t2 - t1:.4f} seg") # ¿Aquí tarda 14s?
+
         cursor = conexion.cursor(dictionary=True)
         
-        # cursor.execute("SET time_zone = 'America/Mexico_City'")
-
-        consulta = """
-        SELECT fecha_actualizacion as ultima_fecha
-        FROM historial_actualizaciones
-        ORDER BY id DESC
-        LIMIT 1
-        """
+        # Paso 2: Ejecución
+        consulta = "SELECT ultima_fecha FROM cache_ultima_actualizacion WHERE id = 1"
+        
+        t3 = time.time()
         cursor.execute(consulta)
         resultado = cursor.fetchone()
+        t4 = time.time()
+        print(f"⏱️ Tiempo SQL: {t4 - t3:.4f} seg") # ¿O aquí?
         
+        t_total = time.time() - t_inicio
+        print(f"🚀 TIEMPO TOTAL API: {t_total:.4f} seg")
+
         if resultado and resultado['ultima_fecha']:
             return jsonify({
                 'success': True,
@@ -80,13 +89,14 @@ def obtener_ultima_actualizacion():
             })
             
     except Exception as e:
+        print(f"Error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
         
     finally:
-        if cursor:
-            cursor.close()
-        if conexion and conexion.is_connected():
-            conexion.close()
+        # IMPORTANTE: Al usar Pool, .close() no cierra, devuelve al pool.
+        # Quitamos el chequeo is_connected() que a veces añade latencia innecesaria
+        if cursor: cursor.close()
+        if conexion: conexion.close()
 
 @monitor_odoo_bp.route('/importar_facturas', methods=['POST'])
 def importar_facturas():
