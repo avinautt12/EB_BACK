@@ -2,14 +2,12 @@ from db_conexion import obtener_conexion
 from collections import defaultdict
 
 def actualizar_valor_bd(cursor, id_concepto, fecha, monto, tipo):
-    """Esta función DEBE estar definida antes de ser llamada"""
     col = 'monto_real' if tipo == 'real' else 'monto_proyectado'
     check = "SELECT id_valor FROM flujo_valores WHERE id_concepto = %s AND fecha_reporte = %s"
     cursor.execute(check, (id_concepto, fecha))
     res = cursor.fetchone()
     
     if res:
-        # Manejo para diccionarios o tuplas según la conexión
         uid = res['id_valor'] if isinstance(res, dict) else res[0]
         cursor.execute(f"UPDATE flujo_valores SET {col} = %s WHERE id_valor = %s", (monto, uid))
     else:
@@ -40,13 +38,13 @@ def recalcular_formulas_flujo_manual(conexion, anio, mes):
             val_r[r['id_concepto']] = float(r['monto_real'] or 0)
             val_p[r['id_concepto']] = float(r['monto_proyectado'] or 0)
 
-        # IDs de conceptos según tu base de datos
+        # IDs de conceptos
         ID_SALDO_INICIAL = 1
         ID_TOTAL_RECUPERACION = 4
-        IDS_OTROS_INGRESOS = list(range(5, 18)) # 5 al 17
+        IDS_OTROS_INGRESOS = list(range(5, 18))
         ID_TOTAL_OTROS_INGRESOS = 18
         ID_TOTAL_ENTRADA_EFECTIVO = 19
-        IDS_SALIDA_PROVEEDORES = [20, 21, 22, 23] + list(range(32, 40)) #
+        IDS_SALIDA_PROVEEDORES = [20, 21, 22, 23] + list(range(32, 40))
         ID_TOTAL_SALIDA_PROVEEDORES = 40
         IDS_GASTOS = [24, 25, 26, 27, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50] 
         ID_TOTAL_GASTOS = 51
@@ -60,39 +58,53 @@ def recalcular_formulas_flujo_manual(conexion, anio, mes):
             actualizar_valor_bd(cursor, id_c, fecha_actual, p, 'proyectado')
             val_r[id_c], val_p[id_c] = r, p
 
-        # 1. SALDO INICIAL (Arrastre del mes pasado)
-        sql_ant = "SELECT monto_real FROM flujo_valores WHERE id_concepto = %s AND fecha_reporte = %s"
+        # 1. SALDO INICIAL (Arrastre REAL y PROYECTADO por separado)
+        sql_ant = "SELECT monto_real, monto_proyectado FROM flujo_valores WHERE id_concepto = %s AND fecha_reporte = %s"
         cursor.execute(sql_ant, (ID_TOTAL_DISPONIBLE, fecha_anterior))
         res_prev = cursor.fetchone()
         
         si_r = float(res_prev['monto_real']) if res_prev else 0.0
-        # Excepción Enero 2026: usar el registro manual 15
+        si_p = float(res_prev['monto_proyectado']) if res_prev else 0.0
+        
+        # Caso especial Enero 2026: Tomar lo que ya existe en la BD (Registro manual 15)
         if anio == 2026 and mes == 1:
             si_r = val_r[ID_SALDO_INICIAL]
+            si_p = val_p[ID_SALDO_INICIAL]
         
-        guardar(ID_SALDO_INICIAL, si_r, si_r) # Se asume SI Proyectado = SI Real
+        guardar(ID_SALDO_INICIAL, si_r, si_p)
 
         # 2. ENTRADAS
+        # Otros Ingresos
         otros_r = sum(val_r[i] for i in IDS_OTROS_INGRESOS)
-        guardar(ID_TOTAL_OTROS_INGRESOS, otros_r, otros_r)
+        otros_p = sum(val_p[i] for i in IDS_OTROS_INGRESOS)
+        guardar(ID_TOTAL_OTROS_INGRESOS, otros_r, otros_p)
 
-        # FÓRMULA CLAVE: Saldo Inicial + Recuperación + Otros
+        # Total Entrada: Saldo Inicial + Recuperación + Otros
         ent_r = val_r[ID_SALDO_INICIAL] + val_r[ID_TOTAL_RECUPERACION] + otros_r
-        guardar(ID_TOTAL_ENTRADA_EFECTIVO, ent_r, ent_r)
+        ent_p = val_p[ID_SALDO_INICIAL] + val_p[ID_TOTAL_RECUPERACION] + otros_p
+        guardar(ID_TOTAL_ENTRADA_EFECTIVO, ent_r, ent_p)
 
         # 3. SALIDAS
         prov_r = sum(val_r[i] for i in IDS_SALIDA_PROVEEDORES)
-        guardar(ID_TOTAL_SALIDA_PROVEEDORES, prov_r, prov_r)
+        prov_p = sum(val_p[i] for i in IDS_SALIDA_PROVEEDORES)
+        guardar(ID_TOTAL_SALIDA_PROVEEDORES, prov_r, prov_p)
 
         gastos_r = sum(val_r[i] for i in IDS_GASTOS)
-        guardar(ID_TOTAL_GASTOS, gastos_r, gastos_r)
+        gastos_p = sum(val_p[i] for i in IDS_GASTOS)
+        guardar(ID_TOTAL_GASTOS, gastos_r, gastos_p)
 
-        salidas_r = prov_r + gastos_r + sum(val_r[i] for i in IDS_PAGO_CREDITOS)
-        guardar(ID_TOTAL_SALIDAS_EFECTIVO, salidas_r, salidas_r)
+        cred_r = sum(val_r[i] for i in IDS_PAGO_CREDITOS)
+        cred_p = sum(val_p[i] for i in IDS_PAGO_CREDITOS)
+        guardar(ID_TOTAL_PAGO_CREDITOS, cred_r, cred_p)
 
-        # 4. DISPONIBLE FINAL
-        disp_r = ent_r - salidas_r
-        guardar(ID_TOTAL_DISPONIBLE, disp_r, disp_r)
+        sal_r = prov_r + gastos_r + cred_r
+        sal_p = prov_p + gastos_p + cred_p
+        guardar(ID_TOTAL_SALIDAS_EFECTIVO, sal_r, sal_p)
+
+        # 4. DISPONIBLE FINAL (Calculado para ambos)
+        disp_r = ent_r - sal_r
+        disp_p = ent_p - sal_p
+        guardar(ID_TOTAL_DISPONIBLE, disp_r, disp_p)
 
     except Exception as e:
         print(f"❌ Error en cálculo mes {mes}/{anio}: {e}")
@@ -109,3 +121,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+    
