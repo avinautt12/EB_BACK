@@ -1,6 +1,7 @@
 import jwt
 import datetime
 from flask import request
+import pytz
 
 SECRET_KEY = "121221"
 
@@ -33,35 +34,49 @@ def verificar_token(token):
 
 def registrar_auditoria(cursor, accion, tabla, id_registro, descripcion):
     """
-    Extrae el usuario del token actual y guarda el log en la BD.
+    Extrae el usuario del token actual, calcula la hora de México y guarda el log.
     """
     try:
-        # 1. Obtener datos del usuario desde el Request
+        # --- A. OBTENER DATOS DEL USUARIO (Tu lógica original) ---
         auth_header = request.headers.get('Authorization')
         usuario_id = None
         usuario_nombre = 'Sistema / Desconocido'
 
         if auth_header:
             try:
-                token = auth_header.split(" ")[1]
-                # REUTILIZAMOS la función verificar_token para no repetir lógica
-                data = verificar_token(token)
-                
-                if data:
-                    usuario_id = data.get('id')
-                    usuario_nombre = data.get('nombre')
-                else:
-                    usuario_nombre = 'Token Inválido/Expirado'
+                if " " in auth_header:
+                    token = auth_header.split(" ")[1]
+                    data = verificar_token(token)
+                    
+                    if data:
+                        usuario_id = data.get('id')
+                        usuario_nombre = data.get('nombre')
+                    else:
+                        usuario_nombre = 'Token Inválido/Expirado'
             except Exception as e:
                 print(f"Error procesando token en auditoría: {e}")
 
-        # 2. Insertar en la tabla
+        # --- B. CALCULAR HORA EXACTA DE MÉXICO (El cambio nuevo) ---
+        zona_mexico = pytz.timezone('America/Mexico_City')
+        fecha_actual_mexico = datetime.datetime.now(zona_mexico)
+
+        # --- C. INSERTAR EN BD ---
+        # Nota: Agregamos 'fecha_hora' al SQL y el valor 'fecha_actual_mexico'
         sql = """
             INSERT INTO auditoria_movimientos 
-            (id_usuario, nombre_usuario, accion, tabla_afectada, id_registro_afectado, descripcion)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            (id_usuario, nombre_usuario, accion, tabla_afectada, id_registro_afectado, descripcion, fecha_hora)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
         """
-        cursor.execute(sql, (usuario_id, usuario_nombre, accion, tabla, id_registro, descripcion))
+        
+        cursor.execute(sql, (
+            usuario_id, 
+            usuario_nombre, 
+            accion, 
+            tabla, 
+            id_registro, 
+            descripcion, 
+            fecha_actual_mexico  # <--- Aquí forzamos la hora correcta
+        ))
         
         # Nota: No hacemos commit aquí, dependemos de la transacción principal.
         

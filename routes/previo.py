@@ -70,17 +70,38 @@ def actualizar_previo():
                         compromiso_jul_ago, avance_jul_ago, porcentaje_jul_ago,
                         compromiso_sep_oct, avance_sep_oct, porcentaje_sep_oct,
                         compromiso_nov_dic, avance_nov_dic, porcentaje_nov_dic,
+                        
+                        -- Nuevos bimestres Normales
+                        compromiso_ene_feb, avance_ene_feb, porcentaje_ene_feb,
+                        compromiso_mar_abr, avance_mar_abr, porcentaje_mar_abr,
+                        compromiso_may_jun, avance_may_jun, porcentaje_may_jun,
+                        
                         compromiso_apparel_syncros_vittoria, avance_global_apparel_syncros_vittoria,
-                        porcentaje_apparel_syncros_vittoria, compromiso_jul_ago_app,
-                        avance_jul_ago_app, porcentaje_jul_ago_app, compromiso_sep_oct_app,
-                        avance_sep_oct_app, porcentaje_sep_oct_app, compromiso_nov_dic_app,
-                        avance_nov_dic_app, porcentaje_nov_dic_app, acumulado_syncros,
-                        acumulado_apparel, acumulado_vittoria, acumulado_bold, es_integral,
-                        grupo_integral
+                        porcentaje_apparel_syncros_vittoria, 
+                        compromiso_jul_ago_app, avance_jul_ago_app, porcentaje_jul_ago_app,
+                        compromiso_sep_oct_app, avance_sep_oct_app, porcentaje_sep_oct_app,
+                        compromiso_nov_dic_app, avance_nov_dic_app, porcentaje_nov_dic_app,
+                        
+                        -- Nuevos bimestres App
+                        compromiso_ene_feb_app, avance_ene_feb_app, porcentaje_ene_feb_app,
+                        compromiso_mar_abr_app, avance_mar_abr_app, porcentaje_mar_abr_app,
+                        compromiso_may_jun_app, avance_may_jun_app, porcentaje_may_jun_app,
+                        
+                        acumulado_syncros, acumulado_apparel, acumulado_vittoria, 
+                        acumulado_bold, es_integral, grupo_integral
                     ) VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+                        %s, %s, %s, 
+                        %s, %s, %s, 
+                        %s, %s, %s, 
+                        %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, -- placeholders nuevos normales
+                        %s, %s, %s, 
+                        %s, %s, %s, 
+                        %s, %s, %s, 
+                        %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, -- placeholders nuevos app
+                        %s, %s, %s, %s, %s, %s
                     )
                 """, (
                     registro.get('clave'),
@@ -106,6 +127,18 @@ def actualizar_previo():
                     registro.get('compromiso_nov_dic', 0),
                     registro.get('avance_nov_dic', 0),
                     get_porcentaje('porcentaje_nov_dic'),
+                    
+                    # Nuevos campos Normales
+                    registro.get('compromiso_ene_feb', 0),
+                    registro.get('avance_ene_feb', 0),
+                    get_porcentaje('porcentaje_ene_feb'),
+                    registro.get('compromiso_mar_abr', 0),
+                    registro.get('avance_mar_abr', 0),
+                    get_porcentaje('porcentaje_mar_abr'),
+                    registro.get('compromiso_may_jun', 0),
+                    registro.get('avance_may_jun', 0),
+                    get_porcentaje('porcentaje_may_jun'),
+
                     registro.get('compromiso_apparel_syncros_vittoria', 0),
                     registro.get('avance_global_apparel_syncros_vittoria', 0),
                     get_porcentaje('porcentaje_apparel_syncros_vittoria'),
@@ -118,6 +151,18 @@ def actualizar_previo():
                     registro.get('compromiso_nov_dic_app', 0),
                     registro.get('avance_nov_dic_app', 0),
                     get_porcentaje('porcentaje_nov_dic_app'),
+                    
+                    # Nuevos campos App
+                    registro.get('compromiso_ene_feb_app', 0),
+                    registro.get('avance_ene_feb_app', 0),
+                    get_porcentaje('porcentaje_ene_feb_app'),
+                    registro.get('compromiso_mar_abr_app', 0),
+                    registro.get('avance_mar_abr_app', 0),
+                    get_porcentaje('porcentaje_mar_abr_app'),
+                    registro.get('compromiso_may_jun_app', 0),
+                    registro.get('avance_may_jun_app', 0),
+                    get_porcentaje('porcentaje_may_jun_app'),
+
                     registro.get('acumulado_syncros', 0),
                     registro.get('acumulado_apparel', 0),
                     registro.get('acumulado_vittoria', 0),
@@ -159,17 +204,25 @@ def obtener_previo():
         conexion = obtener_conexion()
         cursor = conexion.cursor(dictionary=True)
         
-        # Seleccionar todos los campos menos los últimos 2
+        # Se agregaron los nuevos campos al SELECT
         cursor.execute("""
             SELECT id, clave, evac, nombre_cliente, acumulado_anticipado, nivel, nivel_cierre_compra_inicial,
                    compra_minima_anual, porcentaje_anual, compra_minima_inicial, avance_global, porcentaje_global,
-                   compromiso_scott, avance_global_scott, porcentaje_scott, compromiso_jul_ago, avance_jul_ago,
-                   porcentaje_jul_ago, compromiso_sep_oct, avance_sep_oct, porcentaje_sep_oct, compromiso_nov_dic,
-                   avance_nov_dic, porcentaje_nov_dic, compromiso_apparel_syncros_vittoria,
+                   compromiso_scott, avance_global_scott, porcentaje_scott, 
+                   compromiso_jul_ago, avance_jul_ago, porcentaje_jul_ago, 
+                   compromiso_sep_oct, avance_sep_oct, porcentaje_sep_oct, 
+                   compromiso_nov_dic, avance_nov_dic, porcentaje_nov_dic,
+                   compromiso_ene_feb, avance_ene_feb, porcentaje_ene_feb,
+                   compromiso_mar_abr, avance_mar_abr, porcentaje_mar_abr,
+                   compromiso_may_jun, avance_may_jun, porcentaje_may_jun,
+                   compromiso_apparel_syncros_vittoria,
                    avance_global_apparel_syncros_vittoria, porcentaje_apparel_syncros_vittoria,
                    compromiso_jul_ago_app, avance_jul_ago_app, porcentaje_jul_ago_app,
                    compromiso_sep_oct_app, avance_sep_oct_app, porcentaje_sep_oct_app,
                    compromiso_nov_dic_app, avance_nov_dic_app, porcentaje_nov_dic_app,
+                   compromiso_ene_feb_app, avance_ene_feb_app, porcentaje_ene_feb_app,
+                   compromiso_mar_abr_app, avance_mar_abr_app, porcentaje_mar_abr_app,
+                   compromiso_may_jun_app, avance_may_jun_app, porcentaje_may_jun_app,
                    acumulado_syncros, acumulado_apparel, acumulado_vittoria, acumulado_bold
             FROM previo
         """)
@@ -196,17 +249,25 @@ def obtener_previo_int():
         conexion = obtener_conexion()
         cursor = conexion.cursor(dictionary=True)
         
-        # Seleccionar todos los campos menos los últimos 2, excluyendo Integrales 1, 2 y 3
+        # Se agregaron los nuevos campos al SELECT
         cursor.execute("""
             SELECT id, clave, evac, nombre_cliente, acumulado_anticipado, nivel, nivel_cierre_compra_inicial,
                    compra_minima_anual, porcentaje_anual, compra_minima_inicial, avance_global, porcentaje_global,
-                   compromiso_scott, avance_global_scott, porcentaje_scott, compromiso_jul_ago, avance_jul_ago,
-                   porcentaje_jul_ago, compromiso_sep_oct, avance_sep_oct, porcentaje_sep_oct, compromiso_nov_dic,
-                   avance_nov_dic, porcentaje_nov_dic, compromiso_apparel_syncros_vittoria,
+                   compromiso_scott, avance_global_scott, porcentaje_scott, 
+                   compromiso_jul_ago, avance_jul_ago, porcentaje_jul_ago, 
+                   compromiso_sep_oct, avance_sep_oct, porcentaje_sep_oct, 
+                   compromiso_nov_dic, avance_nov_dic, porcentaje_nov_dic,
+                   compromiso_ene_feb, avance_ene_feb, porcentaje_ene_feb,
+                   compromiso_mar_abr, avance_mar_abr, porcentaje_mar_abr,
+                   compromiso_may_jun, avance_may_jun, porcentaje_may_jun,
+                   compromiso_apparel_syncros_vittoria,
                    avance_global_apparel_syncros_vittoria, porcentaje_apparel_syncros_vittoria,
                    compromiso_jul_ago_app, avance_jul_ago_app, porcentaje_jul_ago_app,
                    compromiso_sep_oct_app, avance_sep_oct_app, porcentaje_sep_oct_app,
                    compromiso_nov_dic_app, avance_nov_dic_app, porcentaje_nov_dic_app,
+                   compromiso_ene_feb_app, avance_ene_feb_app, porcentaje_ene_feb_app,
+                   compromiso_mar_abr_app, avance_mar_abr_app, porcentaje_mar_abr_app,
+                   compromiso_may_jun_app, avance_may_jun_app, porcentaje_may_jun_app,
                    acumulado_syncros, acumulado_apparel, acumulado_vittoria, acumulado_bold
             FROM previo
             WHERE clave NOT IN ('Integral 1', 'Integral 2', 'Integral 3')
