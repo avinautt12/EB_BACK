@@ -6,6 +6,7 @@ from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
 import base64
+import requests
 
 from datetime import datetime
 from db_conexion import obtener_conexion
@@ -30,6 +31,17 @@ EMAIL_CONFIGS = {
     }
 }
 
+def obtener_imagen_base64(url):
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            content_type = response.headers.get('content-type')
+            encoded_string = base64.b64encode(response.content).decode('utf-8')
+            return f"data:{content_type};base64,{encoded_string}"
+    except Exception as e:
+        print(f"Error cargando imagen: {e}")
+    return url # Retorna la URL original como fallback
+
 def obtener_credenciales_por_usuario(usuario):
     """Obtener credenciales basado en el nombre de usuario"""
     usuario_lower = usuario.lower()
@@ -52,7 +64,7 @@ def crear_cuerpo_email(data):
     mensaje_personalizado = data.get('mensaje_personalizado', '')
     periodos = data.get('periodos', [])
     fecha_actual = datetime.now().strftime('%d/%m/%Y')
-    logo_url = "https://eb-imagenes-26.s3.us-east-2.amazonaws.com/prueba-logo-3.png"
+    logo_url = "https://eb-imagenes-26.s3.us-east-2.amazonaws.com/logo_elite_2.png"
 
     def to_currency(value):
         try: return f"${float(value):,.2f}"
@@ -75,32 +87,58 @@ def crear_cuerpo_email(data):
         except (ValueError, TypeError): return 'estado-faltante'
 
     def calcular_compromiso_acumulado_scott(d):
+        # Obtenemos el mes actual (1 para Enero, 2 para Febrero, etc.)
         mes_actual = datetime.now().month
-        total = d.get('compromiso_jul_ago', 0)
-        if mes_actual >= 9: total += d.get('compromiso_sep_oct', 0)
-        if mes_actual >= 11: total += d.get('compromiso_nov_dic', 0)
+        
+        # Siempre sumamos el primer semestre completo (Julio a Diciembre 2025)
+        total = (float(d.get('compromiso_jul_ago', 0)) + 
+                float(d.get('compromiso_sep_oct', 0)) + 
+                float(d.get('compromiso_nov_dic', 0)))
+        
+        # Lógica de activación por fechas de 2026:
+        if mes_actual >= 1: # Enero-Febrero
+            total += float(d.get('compromiso_ene_feb', 0))
+        if mes_actual >= 3: # Marzo-Abril
+            total += float(d.get('compromiso_mar_abr', 0))
+        if mes_actual >= 5: # Mayo-Junio
+            total += float(d.get('compromiso_may_jun', 0))
+            
         return total
 
     def calcular_avance_acumulado_scott(d):
-        mes_actual = datetime.now().month
-        total = d.get('avance_jul_ago', 0)
-        if mes_actual >= 9: total += d.get('avance_sep_oct', 0)
-        if mes_actual >= 11: total += d.get('avance_nov_dic', 0)
-        return total
+        # ACTIVACIÓN DEL SOBRANTE: Sumamos TODOS los avances reales de la temporada completa.
+        # Al sumar todos los periodos, si un bimestre anterior tuvo ventas de más, 
+        # ese excedente ya está en este "total" y ayuda a cubrir la meta del acumulado actual.
+        return (float(d.get('avance_jul_ago', 0)) + 
+                float(d.get('avance_sep_oct', 0)) + 
+                float(d.get('avance_nov_dic', 0)) +
+                float(d.get('avance_ene_feb', 0)) +
+                float(d.get('avance_mar_abr', 0)) +
+                float(d.get('avance_may_jun', 0)))
 
     def calcular_compromiso_acumulado_apparel(d):
         mes_actual = datetime.now().month
-        total = d.get('compromiso_jul_ago_app', 0)
-        if mes_actual >= 9: total += d.get('compromiso_sep_oct_app', 0)
-        if mes_actual >= 11: total += d.get('compromiso_nov_dic_app', 0)
+        total = (float(d.get('compromiso_jul_ago_app', 0)) + 
+                float(d.get('compromiso_sep_oct_app', 0)) + 
+                float(d.get('compromiso_nov_dic_app', 0)))
+        
+        if mes_actual >= 1:
+            total += float(d.get('compromiso_ene_feb_app', 0))
+        if mes_actual >= 3:
+            total += float(d.get('compromiso_mar_abr_app', 0))
+        if mes_actual >= 5:
+            total += float(d.get('compromiso_may_jun_app', 0))
+            
         return total
-    
+
     def calcular_avance_acumulado_apparel(d):
-        mes_actual = datetime.now().month
-        total = d.get('avance_jul_ago_app', 0)
-        if mes_actual >= 9: total += d.get('avance_sep_oct_app', 0)
-        if mes_actual >= 11: total += d.get('avance_nov_dic_app', 0)
-        return total
+        # Sumatoria total de Apparel para considerar el sobrante
+        return (float(d.get('avance_jul_ago_app', 0)) + 
+                float(d.get('avance_sep_oct_app', 0)) + 
+                float(d.get('avance_nov_dic_app', 0)) +
+                float(d.get('avance_ene_feb_app', 0)) +
+                float(d.get('avance_mar_abr_app', 0)) +
+                float(d.get('avance_may_jun_app', 0)))
         
     def get_sobrante_acumulado(compromiso, avance):
         diferencia = avance - compromiso
@@ -108,7 +146,15 @@ def crear_cuerpo_email(data):
 
     # --- HTML del correo (sin cambios) ---
     cuerpo_email_html = f"""
-    <!DOCTYPE html><html><head><meta charset="UTF-8"><style>body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }} .header {{ display: flex; align-items: flex-start; background-color: #FFFFFF; padding: 20px; border-radius: 5px; }} .logo {{ width: 80px; height: auto; margin-right: 20px; }} .header-text {{ display: flex; flex-direction: column; justify-content: flex-start; padding-top: 30px; }} .content {{ padding: 20px; }} .cliente-info {{ background-color: #e9ecef; padding: 15px; border-radius: 5px; margin-bottom: 20px; border-left: 4px solid #007bff; }}</style></head><body><div class="header"><img src="{logo_url}" alt="Logo Elite Bike" class="logo"><div class="header-text"><h2 style="margin: 0; color: #2c3e50; line-height: 1.2;">Elite Bike - Carátula</h2></div></div><div class="content"><p>Estimado distribuidor,</p><p>Se adjunta la carátula respecto a su avance en esta temporada:</p><div class="cliente-info"><h3 style="margin-top: 0;">Distribuidor:</h3><p style="font-size: 16px; font-weight: bold;">{data.get('cliente_nombre', '')}</p><p><strong>Fecha de envío:</strong> {fecha_actual}</p></div>{f'<p><strong>Comentarios adicionales:</strong><br>{mensaje_personalizado}</p>' if mensaje_personalizado else ''}<p>Si tiene alguna pregunta o necesita información adicional, no dude en contactarnos.</p><p>Atentamente,<br>Equipo de <strong>Elite Bike</strong></p></div></body></html>
+    <!DOCTYPE html><html><head><meta charset="UTF-8"><style>body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }} 
+    .header {{ display: flex; align-items: flex-start; background-color: #FFFFFF; padding: 20px; border-radius: 5px; }} 
+    .logo {{ width: 80px; height: auto; margin-right: 20px; }} .header-text {{ display: flex; flex-direction: column; justify-content: flex-start; padding-top: 30px; }} 
+    .content {{ padding: 20px; }} .cliente-info {{ background-color: #e9ecef; padding: 15px; border-radius: 5px; margin-bottom: 20px; border-left: 4px solid #007bff; }}
+    </style></head><body><div class="header"><img src="{logo_url}" alt="Logo Elite Bike" style="width: 150px; height: auto; display: block; margin: 0;"><div class="header-text"><h2 style="margin: 0; color: #2c3e50; line-height: 1.2;">
+    Elite Bike - Carátula</h2></div></div><div class="content"><p>Estimado distribuidor,</p><p>Se adjunta la carátula respecto a su avance en esta temporada:</p><div class="cliente-info">
+    <h3 style="margin-top: 0;">Distribuidor:</h3><p style="font-size: 16px; font-weight: bold;">{data.get('cliente_nombre', '')}</p><p><strong>Fecha de envío:</strong> {fecha_actual}</p>
+    </div>{f'<p><strong>Comentarios adicionales:</strong><br>{mensaje_personalizado}</p>' if mensaje_personalizado else ''}<p>Si tiene alguna pregunta o necesita información adicional, 
+    no dude en contactarnos.</p><p>Atentamente,<br>Equipo de <strong>Elite Bike</strong></p></div></body></html>
     """
 
     # =====================================================================
@@ -282,7 +328,10 @@ def crear_cuerpo_email(data):
     # --- HTML del PDF (ajustado para coincidir con la imagen) ---
     html_cliente_info = f"""
     <div class="titulo-wrapper">
-        <div class="titulo"><img src="{logo_url}" alt="Logo"><h1>Avance MY26</h1></div>
+        <div class="titulo">
+            <img src="{logo_url}" alt="Logo" width="140" height="70" style="display:block; object-fit: contain;">
+            <h1>Avance MY26</h1>
+        </div>
     </div>
     <div class="client-info">
         <div class="info-item"><span class="info-label">Clave</span><span class="info-value">{datos_caratula.get('clave','')}</span></div>
@@ -303,16 +352,17 @@ def crear_cuerpo_email(data):
     porcentaje_scott = (avance_acum_scott / compromiso_acum_scott * 100) if compromiso_acum_scott > 0 else 0
     porcentaje_apparel = (avance_acum_apparel / compromiso_acum_apparel * 100) if compromiso_acum_apparel > 0 else 0
     
+    # --- Dentro de crear_cuerpo_email, actualiza tabla_bimestral ---
     tabla_bimestral = f"""
     <div class="section">
         <h3>a) Compromiso BIMESTRAL</h3>
         {generar_headers_periodo_pdf(periodos)}
         <table>
-            <thead><tr><th></th><th>SCOTT</th><th>APPAREL, SYNCROS, VITTORIA</th></tr></thead>
+            <thead><tr><th>RESUMEN ACUMULADO</th><th>SCOTT</th><th>APPAREL, SYNCROS, VITTORIA</th></tr></thead>
             <tbody>
-                <tr><td>Compromiso</td><td>{to_currency(compromiso_acum_scott)}</td><td>{to_currency(compromiso_acum_apparel)}</td></tr>
-                <tr><td>Avance</td><td>{to_currency(avance_acum_scott)}</td><td>{to_currency(avance_acum_apparel)}</td></tr>
-                <tr><td>%</td><td>{to_percent(porcentaje_scott)}%</td><td>{to_percent(porcentaje_apparel)}%</td></tr>
+                <tr><td>Compromiso Acumulado</td><td>{to_currency(compromiso_acum_scott)}</td><td>{to_currency(compromiso_acum_apparel)}</td></tr>
+                <tr><td>Avance Real Total</td><td>{to_currency(avance_acum_scott)}</td><td>{to_currency(avance_acum_apparel)}</td></tr>
+                <tr><td>% de Cumplimiento</td><td>{to_percent(porcentaje_scott)}%</td><td>{to_percent(porcentaje_apparel)}%</td></tr>
                 <tr><td>Importe Faltante</td><td>{to_currency(faltante_scott if faltante_scott > 0 else 0)}</td><td>{to_currency(faltante_apparel if faltante_apparel > 0 else 0)}</td></tr>
                 <tr>
                     <td>Estatus Acumulado</td>
