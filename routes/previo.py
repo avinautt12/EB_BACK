@@ -21,10 +21,13 @@ def actualizar_previo():
             return jsonify({'error': 'No hay registros para actualizar'}), 400
         
         conexion = obtener_conexion()
+        # IMPORTANTE: Desactivar el autocommit para manejar la transacción manualmente
+        conexion.autocommit = False 
         cursor = conexion.cursor()
         
-        # 1. Limpiar tabla actual
-        cursor.execute("TRUNCATE TABLE previo")
+        # 1. CAMBIO CLAVE: Usar DELETE en lugar de TRUNCATE
+        # DELETE permite hacer un ROLLBACK (deshacer) si algo falla después.
+        cursor.execute("DELETE FROM previo") 
         
         registros_insertados = 0
         
@@ -33,13 +36,11 @@ def actualizar_previo():
                 if 'clave' not in registro or 'nombre_cliente' not in registro:
                     continue
                 
-                # --- AQUÍ VA LA LÓGICA DE RECALCULO ---
-                # Extraemos los valores necesarios para el cálculo
+                # --- LÓGICA DE RECALCULO ---
                 meta_inicial = float(registro.get('compra_minima_inicial', 0))
                 meta_anual = float(registro.get('compra_minima_anual', 0))
-                avance_real = float(registro.get('acumulado_anticipado', 0)) # El valor de $7.3M
+                avance_real = float(registro.get('acumulado_anticipado', 0))
 
-                # Calculamos los porcentajes reales
                 porcentaje_global_calc = 0
                 if meta_inicial > 0:
                     porcentaje_global_calc = int(round((avance_real / meta_inicial) * 100))
@@ -47,7 +48,7 @@ def actualizar_previo():
                 porcentaje_anual_calc = 0
                 if meta_anual > 0:
                     porcentaje_anual_calc = int(round((avance_real / meta_anual) * 100))
-                # ---------------------------------------
+                # ---------------------------
 
                 def get_porcentaje(key, fallback_val=0):
                     value = registro.get(key, 0)
@@ -85,72 +86,48 @@ def actualizar_previo():
                         %s, %s
                     )
                 """, (
-                    registro.get('clave'),
-                    registro.get('evac'),
-                    registro.get('nombre_cliente'),
-                    avance_real,
-                    registro.get('nivel'),
-                    meta_anual,
-                    porcentaje_anual_calc, # USAMOS EL CALCULADO
-                    meta_inicial,
-                    registro.get('avance_global', 0),
-                    porcentaje_global_calc, # USAMOS EL CALCULADO
-                    registro.get('compromiso_scott', 0),
-                    registro.get('avance_global_scott', 0),
-                    get_porcentaje('porcentaje_scott'),
-                    registro.get('compromiso_jul_ago', 0),
-                    registro.get('avance_jul_ago', 0),
-                    get_porcentaje('porcentaje_jul_ago'),
-                    registro.get('compromiso_sep_oct', 0),
-                    registro.get('avance_sep_oct', 0),
-                    get_porcentaje('porcentaje_sep_oct'),
-                    registro.get('compromiso_nov_dic', 0),
-                    registro.get('avance_nov_dic', 0),
-                    get_porcentaje('porcentaje_nov_dic'),
-                    registro.get('compromiso_ene_feb', 0),
-                    registro.get('avance_ene_feb', 0),
-                    get_porcentaje('porcentaje_ene_feb'),
-                    registro.get('compromiso_mar_abr', 0),
-                    registro.get('avance_mar_abr', 0),
-                    get_porcentaje('porcentaje_mar_abr'),
-                    registro.get('compromiso_may_jun', 0),
-                    registro.get('avance_may_jun', 0),
-                    get_porcentaje('porcentaje_may_jun'),
-                    registro.get('compromiso_apparel_syncros_vittoria', 0),
-                    registro.get('avance_global_apparel_syncros_vittoria', 0),
-                    get_porcentaje('porcentaje_apparel_syncros_vittoria'),
-                    registro.get('compromiso_jul_ago_app', 0),
-                    registro.get('avance_jul_ago_app', 0),
-                    get_porcentaje('porcentaje_jul_ago_app'),
-                    registro.get('compromiso_sep_oct_app', 0),
-                    registro.get('avance_sep_oct_app', 0),
-                    get_porcentaje('porcentaje_sep_oct_app'),
-                    registro.get('compromiso_nov_dic_app', 0),
-                    registro.get('avance_nov_dic_app', 0),
-                    get_porcentaje('porcentaje_nov_dic_app'),
-                    registro.get('compromiso_ene_feb_app', 0),
-                    registro.get('avance_ene_feb_app', 0),
-                    get_porcentaje('porcentaje_ene_feb_app'),
-                    registro.get('compromiso_mar_abr_app', 0),
-                    registro.get('avance_mar_abr_app', 0),
-                    get_porcentaje('porcentaje_mar_abr_app'),
-                    registro.get('compromiso_may_jun_app', 0),
-                    registro.get('avance_may_jun_app', 0),
-                    get_porcentaje('porcentaje_may_jun_app'),
-                    int(bool(registro.get('es_integral', False))),
-                    registro.get('grupo_integral')
+                    registro.get('clave'), registro.get('evac'), registro.get('nombre_cliente'),
+                    avance_real, registro.get('nivel'), meta_anual, porcentaje_anual_calc,
+                    meta_inicial, registro.get('avance_global', 0), porcentaje_global_calc,
+                    registro.get('compromiso_scott', 0), registro.get('avance_global_scott', 0),
+                    get_porcentaje('porcentaje_scott'), registro.get('compromiso_jul_ago', 0),
+                    registro.get('avance_jul_ago', 0), get_porcentaje('porcentaje_jul_ago'),
+                    registro.get('compromiso_sep_oct', 0), registro.get('avance_sep_oct', 0),
+                    get_porcentaje('porcentaje_sep_oct'), registro.get('compromiso_nov_dic', 0),
+                    registro.get('avance_nov_dic', 0), get_porcentaje('porcentaje_nov_dic'),
+                    registro.get('compromiso_ene_feb', 0), registro.get('avance_ene_feb', 0),
+                    get_porcentaje('porcentaje_ene_feb'), registro.get('compromiso_mar_abr', 0),
+                    registro.get('avance_mar_abr', 0), get_porcentaje('porcentaje_mar_abr'),
+                    registro.get('compromiso_may_jun', 0), registro.get('avance_may_jun', 0),
+                    get_porcentaje('porcentaje_may_jun'), registro.get('compromiso_apparel_syncros_vittoria', 0),
+                    registro.get('avance_global_apparel_syncros_vittoria', 0), get_porcentaje('porcentaje_apparel_syncros_vittoria'),
+                    registro.get('compromiso_jul_ago_app', 0), registro.get('avance_jul_ago_app', 0),
+                    get_porcentaje('porcentaje_jul_ago_app'), registro.get('compromiso_sep_oct_app', 0),
+                    registro.get('avance_sep_oct_app', 0), get_porcentaje('porcentaje_sep_oct_app'),
+                    registro.get('compromiso_nov_dic_app', 0), registro.get('avance_nov_dic_app', 0),
+                    get_porcentaje('porcentaje_nov_dic_app'), registro.get('compromiso_ene_feb_app', 0),
+                    registro.get('avance_ene_feb_app', 0), get_porcentaje('porcentaje_ene_feb_app'),
+                    registro.get('compromiso_mar_abr_app', 0), registro.get('avance_mar_abr_app', 0),
+                    get_porcentaje('porcentaje_mar_abr_app'), registro.get('compromiso_may_jun_app', 0),
+                    registro.get('avance_may_jun_app', 0), get_porcentaje('porcentaje_may_jun_app'),
+                    int(bool(registro.get('es_integral', False))), registro.get('grupo_integral')
                 ))
                 registros_insertados += 1
                 
             except Exception as e:
-                print(f"Error en registro {i}: {e}")
-                continue
+                # Si un registro individual falla, lanzamos la excepción para cancelar toda la operación
+                # y que el rollback actúe sobre el DELETE inicial.
+                raise Exception(f"Falla crítica en registro {i} (Clave {registro.get('clave')}): {e}")
         
-        conexion.commit()
-        return jsonify({'mensaje': f'Actualizados {registros_insertados} registros'}), 200
+        # Si todo el bucle terminó sin errores, guardamos cambios permanentemente
+        conexion.commit() 
+        return jsonify({'mensaje': f'Actualizados {registros_insertados} registros con éxito'}), 200
         
     except Exception as e:
-        if conexion: conexion.rollback()
+        # 2. CAMBIO CLAVE: Si algo falló, se deshace el DELETE y las inserciones parciales
+        if conexion: 
+            print(f"ROLLBACK EJECUTADO debido a: {str(e)}")
+            conexion.rollback() 
         return jsonify({'error': str(e)}), 500
     finally:
         if cursor: cursor.close()
