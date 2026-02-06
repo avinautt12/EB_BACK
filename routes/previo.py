@@ -21,12 +21,19 @@ def actualizar_previo():
             return jsonify({'error': 'No hay registros para actualizar'}), 400
         
         conexion = obtener_conexion()
-        # IMPORTANTE: Desactivar el autocommit para manejar la transacción manualmente
+        # DESACTIVAMOS el autocommit para controlar la transacción manualmente
         conexion.autocommit = False 
         cursor = conexion.cursor()
         
-        # 1. CAMBIO CLAVE: Usar DELETE en lugar de TRUNCATE
-        # DELETE permite hacer un ROLLBACK (deshacer) si algo falla después.
+        # 1. FUNCIÓN DE SEGURIDAD PARA NÚMEROS: Evita el Error 500 si vienen datos nulos
+        def seguro_float(valor):
+            try:
+                if valor is None or str(valor).strip() == '': return 0.0
+                return float(str(valor).replace(',', '').replace('$', ''))
+            except:
+                return 0.0
+
+        # 2. USAR DELETE EN LUGAR DE TRUNCATE: Permite ROLLBACK si algo falla
         cursor.execute("DELETE FROM previo") 
         
         registros_insertados = 0
@@ -36,10 +43,10 @@ def actualizar_previo():
                 if 'clave' not in registro or 'nombre_cliente' not in registro:
                     continue
                 
-                # --- LÓGICA DE RECALCULO ---
-                meta_inicial = float(registro.get('compra_minima_inicial', 0))
-                meta_anual = float(registro.get('compra_minima_anual', 0))
-                avance_real = float(registro.get('acumulado_anticipado', 0))
+                # --- LÓGICA DE RECALCULO CON VALIDACIÓN SEGURA ---
+                meta_inicial = seguro_float(registro.get('compra_minima_inicial'))
+                meta_anual = seguro_float(registro.get('compra_minima_anual'))
+                avance_real = seguro_float(registro.get('acumulado_anticipado'))
 
                 porcentaje_global_calc = 0
                 if meta_inicial > 0:
@@ -48,7 +55,7 @@ def actualizar_previo():
                 porcentaje_anual_calc = 0
                 if meta_anual > 0:
                     porcentaje_anual_calc = int(round((avance_real / meta_anual) * 100))
-                # ---------------------------
+                # -----------------------------------------------
 
                 def get_porcentaje(key, fallback_val=0):
                     value = registro.get(key, 0)
@@ -115,20 +122,20 @@ def actualizar_previo():
                 registros_insertados += 1
                 
             except Exception as e:
-                # Si un registro individual falla, lanzamos la excepción para cancelar toda la operación
-                # y que el rollback actúe sobre el DELETE inicial.
-                raise Exception(f"Falla crítica en registro {i} (Clave {registro.get('clave')}): {e}")
+                # Si falla un solo registro, lanzamos el error para ir al bloque except principal
+                print(f"Error procesando registro {i}: {str(e)}")
+                raise Exception(f"Falla en registro {registro.get('clave')}: {str(e)}")
         
-        # Si todo el bucle terminó sin errores, guardamos cambios permanentemente
+        # SI LLEGAMOS AQUÍ SIN ERRORES, APLICAMOS CAMBIOS
         conexion.commit() 
-        return jsonify({'mensaje': f'Actualizados {registros_insertados} registros con éxito'}), 200
+        return jsonify({'mensaje': f'Actualización completa. {registros_insertados} registros procesados.'}), 200
         
     except Exception as e:
-        # 2. CAMBIO CLAVE: Si algo falló, se deshace el DELETE y las inserciones parciales
-        if conexion: 
-            print(f"ROLLBACK EJECUTADO debido a: {str(e)}")
-            conexion.rollback() 
-        return jsonify({'error': str(e)}), 500
+        # SI ALGO FALLÓ, REVERTIMOS TODO (Incluso el DELETE inicial)
+        if conexion:
+            print(f"ERROR DETECTADO: {str(e)}. Aplicando ROLLBACK para proteger los datos.")
+            conexion.rollback()
+        return jsonify({'error': f'Error interno: {str(e)}'}), 500
     finally:
         if cursor: cursor.close()
         if conexion: conexion.close()
