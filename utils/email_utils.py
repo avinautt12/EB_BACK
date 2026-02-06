@@ -401,10 +401,11 @@ def obtener_nombre_usuario(usuario):
             conexion.close()
 
 def guardar_historial_inicial(usuario, nombre_usuario, correo_remitente, correo_destinatario, cliente_nombre, clave_cliente):
-    """Guarda un registro inicial con estado 'Pendiente' y retorna el ID."""
+    """Guarda un registro inicial permitiendo claves de la tabla clientes o previo."""
     try:
         conexion = obtener_conexion()
         with conexion.cursor() as cursor:
+            # Ahora clave_cliente puede ser 'Integral 1' sin problemas
             sql = """
                 INSERT INTO historial_caratulas 
                 (nombre_usuario, usuario_envio, correo_remitente, correo_destinatario, 
@@ -416,6 +417,7 @@ def guardar_historial_inicial(usuario, nombre_usuario, correo_remitente, correo_
         conexion.commit()
         return cursor.lastrowid
     except Exception as e:
+        # Si esto falla, el log nos dirá por qué, pero ya no será por la Foreign Key
         print(f"Error al guardar historial inicial: {str(e)}")
         return None
     finally:
