@@ -11,110 +11,90 @@ def actualizar_previo():
     cursor = None
     
     try:
-        # Verificar que se recibió data JSON
         if not request.is_json:
-            return jsonify({'error': 'Se esperaba un JSON en el cuerpo de la solicitud'}), 400
+            return jsonify({'error': 'Se esperaba un JSON'}), 400
         
         data = request.get_json()
+        registros = data.get('datos') if isinstance(data, dict) else data
         
-        # El frontend envía { datos: [...] }, así que extraemos el array
-        if isinstance(data, dict) and 'datos' in data:
-            registros = data['datos']
-        elif isinstance(data, list):
-            registros = data
-        else:
-            return jsonify({'error': 'Formato de datos incorrecto. Se esperaba una lista o {datos: [...]}'}), 400
-        
-        # Validar estructura básica de los datos
-        if not isinstance(registros, list):
-            return jsonify({'error': 'Los datos deben ser una lista de registros'}), 400
-            
-        if len(registros) == 0:
-            return jsonify({'error': 'No se recibieron registros para actualizar'}), 400
-        
-        print(f"Recibidos {len(registros)} registros para actualizar")
+        if not isinstance(registros, list) or len(registros) == 0:
+            return jsonify({'error': 'No hay registros para actualizar'}), 400
         
         conexion = obtener_conexion()
         cursor = conexion.cursor()
         
-        # 1. Eliminar todos los registros existentes
+        # 1. Limpiar tabla actual
         cursor.execute("TRUNCATE TABLE previo")
         
-        # 2. Insertar los nuevos registros
         registros_insertados = 0
         
         for i, registro in enumerate(registros):
             try:
-                # Validar campos obligatorios
                 if 'clave' not in registro or 'nombre_cliente' not in registro:
-                    print(f"Registro {i} omitido: falta clave o nombre_cliente")
                     continue
                 
-                # Asegurar que los porcentajes sean enteros
-                def get_porcentaje(key):
+                # --- AQUÍ VA LA LÓGICA DE RECALCULO ---
+                # Extraemos los valores necesarios para el cálculo
+                meta_inicial = float(registro.get('compra_minima_inicial', 0))
+                meta_anual = float(registro.get('compra_minima_anual', 0))
+                avance_real = float(registro.get('acumulado_anticipado', 0)) # El valor de $7.3M
+
+                # Calculamos los porcentajes reales
+                porcentaje_global_calc = 0
+                if meta_inicial > 0:
+                    porcentaje_global_calc = int(round((avance_real / meta_inicial) * 100))
+
+                porcentaje_anual_calc = 0
+                if meta_anual > 0:
+                    porcentaje_anual_calc = int(round((avance_real / meta_anual) * 100))
+                # ---------------------------------------
+
+                def get_porcentaje(key, fallback_val=0):
                     value = registro.get(key, 0)
-                    # Si es string con %, eliminar el % y convertir a int
-                    if isinstance(value, str) and '%' in value:
-                        return int(float(value.replace('%', '').strip()))
-                    # Si es float o decimal, redondear y convertir a int
                     if isinstance(value, (float, Decimal)):
                         return int(round(value))
-                    return int(value or 0)
+                    return int(value or fallback_val)
                 
                 cursor.execute("""
                     INSERT INTO previo (
                         clave, evac, nombre_cliente, acumulado_anticipado, nivel,
-                        nivel_cierre_compra_inicial, compra_minima_anual, porcentaje_anual,
+                        compra_minima_anual, porcentaje_anual,
                         compra_minima_inicial, avance_global, porcentaje_global,
                         compromiso_scott, avance_global_scott, porcentaje_scott,
                         compromiso_jul_ago, avance_jul_ago, porcentaje_jul_ago,
                         compromiso_sep_oct, avance_sep_oct, porcentaje_sep_oct,
                         compromiso_nov_dic, avance_nov_dic, porcentaje_nov_dic,
-                        
-                        -- Nuevos bimestres Normales
                         compromiso_ene_feb, avance_ene_feb, porcentaje_ene_feb,
                         compromiso_mar_abr, avance_mar_abr, porcentaje_mar_abr,
                         compromiso_may_jun, avance_may_jun, porcentaje_may_jun,
-                        
                         compromiso_apparel_syncros_vittoria, avance_global_apparel_syncros_vittoria,
                         porcentaje_apparel_syncros_vittoria, 
                         compromiso_jul_ago_app, avance_jul_ago_app, porcentaje_jul_ago_app,
                         compromiso_sep_oct_app, avance_sep_oct_app, porcentaje_sep_oct_app,
                         compromiso_nov_dic_app, avance_nov_dic_app, porcentaje_nov_dic_app,
-                        
-                        -- Nuevos bimestres App
                         compromiso_ene_feb_app, avance_ene_feb_app, porcentaje_ene_feb_app,
                         compromiso_mar_abr_app, avance_mar_abr_app, porcentaje_mar_abr_app,
                         compromiso_may_jun_app, avance_may_jun_app, porcentaje_may_jun_app,
-                        
-                        acumulado_syncros, acumulado_apparel, acumulado_vittoria, 
-                        acumulado_bold, es_integral, grupo_integral
+                        es_integral, grupo_integral
                     ) VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
-                        %s, %s, %s, 
-                        %s, %s, %s, 
-                        %s, %s, %s, 
-                        %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, -- placeholders nuevos normales
-                        %s, %s, %s, 
-                        %s, %s, %s, 
-                        %s, %s, %s, 
-                        %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, -- placeholders nuevos app
-                        %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+                        %s, %s
                     )
                 """, (
                     registro.get('clave'),
                     registro.get('evac'),
                     registro.get('nombre_cliente'),
-                    registro.get('acumulado_anticipado', 0),
+                    avance_real,
                     registro.get('nivel'),
-                    registro.get('nivel_cierre_compra_inicial'),
-                    registro.get('compra_minima_anual', 0),
-                    get_porcentaje('porcentaje_anual'),
-                    registro.get('compra_minima_inicial', 0),
+                    meta_anual,
+                    porcentaje_anual_calc, # USAMOS EL CALCULADO
+                    meta_inicial,
                     registro.get('avance_global', 0),
-                    get_porcentaje('porcentaje_global'),
+                    porcentaje_global_calc, # USAMOS EL CALCULADO
                     registro.get('compromiso_scott', 0),
                     registro.get('avance_global_scott', 0),
                     get_porcentaje('porcentaje_scott'),
@@ -127,8 +107,6 @@ def actualizar_previo():
                     registro.get('compromiso_nov_dic', 0),
                     registro.get('avance_nov_dic', 0),
                     get_porcentaje('porcentaje_nov_dic'),
-                    
-                    # Nuevos campos Normales
                     registro.get('compromiso_ene_feb', 0),
                     registro.get('avance_ene_feb', 0),
                     get_porcentaje('porcentaje_ene_feb'),
@@ -138,7 +116,6 @@ def actualizar_previo():
                     registro.get('compromiso_may_jun', 0),
                     registro.get('avance_may_jun', 0),
                     get_porcentaje('porcentaje_may_jun'),
-
                     registro.get('compromiso_apparel_syncros_vittoria', 0),
                     registro.get('avance_global_apparel_syncros_vittoria', 0),
                     get_porcentaje('porcentaje_apparel_syncros_vittoria'),
@@ -151,8 +128,6 @@ def actualizar_previo():
                     registro.get('compromiso_nov_dic_app', 0),
                     registro.get('avance_nov_dic_app', 0),
                     get_porcentaje('porcentaje_nov_dic_app'),
-                    
-                    # Nuevos campos App
                     registro.get('compromiso_ene_feb_app', 0),
                     registro.get('avance_ene_feb_app', 0),
                     get_porcentaje('porcentaje_ene_feb_app'),
@@ -162,38 +137,24 @@ def actualizar_previo():
                     registro.get('compromiso_may_jun_app', 0),
                     registro.get('avance_may_jun_app', 0),
                     get_porcentaje('porcentaje_may_jun_app'),
-
-                    registro.get('acumulado_syncros', 0),
-                    registro.get('acumulado_apparel', 0),
-                    registro.get('acumulado_vittoria', 0),
-                    registro.get('acumulado_bold', 0),
                     int(bool(registro.get('es_integral', False))),
                     registro.get('grupo_integral')
                 ))
-                
                 registros_insertados += 1
                 
-            except Exception as insert_error:
-                print(f"Error insertando registro {i} (clave: {registro.get('clave', 'N/A')}): {insert_error}")
-                # Continuamos con el siguiente registro en lugar de fallar completamente
+            except Exception as e:
+                print(f"Error en registro {i}: {e}")
                 continue
         
         conexion.commit()
-        return jsonify({
-            'mensaje': f'Datos actualizados correctamente. {registros_insertados} de {len(registros)} registros insertados.'
-        }), 200
-    
+        return jsonify({'mensaje': f'Actualizados {registros_insertados} registros'}), 200
+        
     except Exception as e:
-        print(f"Error general: {str(e)}")
-        if conexion:
-            conexion.rollback()
+        if conexion: conexion.rollback()
         return jsonify({'error': str(e)}), 500
-    
     finally:
-        if cursor:
-            cursor.close()
-        if conexion:
-            conexion.close()
+        if cursor: cursor.close()
+        if conexion: conexion.close()
 
 @previo_bp.route('/obtener_previo', methods=['GET'])
 def obtener_previo():
