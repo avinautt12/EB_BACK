@@ -42,6 +42,7 @@ def create_app():
     # Configuración CORS
     allowed_origins = [
         "http://localhost:4200",
+        "http://127.0.0.1:4200",
         "http://3.128.54.77",
         "http://3.146.204.64",
         "https://app.elite-bike.com",
@@ -52,7 +53,8 @@ def create_app():
         r"/*": {
             "origins": allowed_origins,
             "supports_credentials": True,
-            "expose_headers": ["Content-Disposition"]
+            "expose_headers": ["Content-Disposition", "Content-Type"],
+            "allow_headers": ["Authorization", "Content-Type"]
         }
     })
 

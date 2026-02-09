@@ -7,17 +7,9 @@ ODOO_DB = 'ebik-prod-15375115'
 ODOO_USER = 'sistemas@elitebike-mx.com'
 ODOO_PASSWORD = 'bb36fdae62c3c113fb91de0143eba06da199672d'
 
-# --- CONFIGURACIÓN DE ESTRATEGIAS ---
-# Aquí defines qué cuentas se calculan por BALANZA (Contable) y cuáles por FLUJO (Pagos)
-# Si la cuenta empieza con alguno de estos números, usará el Motor de Balanza.
-PREFIJOS_MODO_BALANZA = ['6', '5', '7'] 
-# Ejemplo: 
-# '6' = Gastos (Se provisionan en balanza)
-# '5' = Costos
-# '7' = Otros Gastos
+PREFIJOS_MODO_BALANZA = ['6', '5', '7', '2'] 
 
 def get_odoo_models():
-    """Establece la conexión con Odoo y devuelve (uid, models)"""
     try:
         context = ssl._create_unverified_context()
         common = xmlrpc.client.ServerProxy('{}/xmlrpc/2/common'.format(ODOO_URL), context=context)
@@ -29,106 +21,98 @@ def get_odoo_models():
         return None, None
 
 def obtener_saldo_cuenta_odoo(codigo_cuenta, fecha_inicio, fecha_fin, es_ingreso=True):
-    """
-    Función Maestra: Decide qué motor usar basándose en el código de cuenta.
-    """
     uid, models = get_odoo_models()
     if not uid: return 0.0
 
-    # 1. DECIDIR ESTRATEGIA
-    # Si el código empieza con 6, 5 o 7, usamos Balanza. Si no, usamos Flujo.
-    usar_balanza = any(codigo_cuenta.startswith(p) for p in PREFIJOS_MODO_BALANZA)
+    # LÓGICA ESCALABLE:
+    # 1. Si la clave es 'TODAS_VENTAS', traemos la cobranza global (los 15M)
+    if codigo_cuenta == 'TODAS_VENTAS':
+        return _motor_flujo_global_clientes(models, uid, fecha_inicio, fecha_fin)
 
+    # 2. Si no, usamos la lógica de cuentas específica
+    usar_balanza = any(codigo_cuenta.startswith(p) for p in PREFIJOS_MODO_BALANZA)
     if usar_balanza:
         return _motor_balanza(models, uid, codigo_cuenta, fecha_inicio, fecha_fin)
     else:
         return _motor_flujo(models, uid, codigo_cuenta, fecha_inicio, fecha_fin, es_ingreso)
 
 # ==============================================================================
-# MOTOR A: BALANZA DE COMPROBACIÓN (Apuntes Contables)
-# Ideal para: Gastos (600), Costos (500), Impuestos devengados
+# MOTOR GLOBAL: PARA TRAER TODA LA COBRANZA SIN IMPORTAR EL BANCO (ESCALABLE)
 # ==============================================================================
-def _motor_balanza(models, uid, codigo_cuenta, fecha_inicio, fecha_fin):
-    print(f"   📊 [Motor Balanza] Consultando cuenta {codigo_cuenta}...")
-    
-    # Busca todas las cuentas que empiecen con el código (ej. 601 -> 601.01, 601.05)
-    domain = [
-        ('date', '>=', fecha_inicio),
-        ('date', '<=', fecha_fin),
-        ('parent_state', '=', 'posted'),      # Solo asientos confirmados
-        ('account_id.code', '=like', codigo_cuenta + '%'), # Búsqueda jerárquica
-        # ('company_id', '=', 1)              # <--- DESCOMENTAR SI ES NECESARIO FILTRAR EMPRESA
-    ]
-
-    try:
-        # Consultamos el detalle contable (account.move.line)
-        apuntes = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, 
-            'account.move.line', 'search_read', 
-            [domain], 
-            {'fields': ['debit', 'credit']} # Traemos debe y haber
-        )
-        
-        # Para gastos (cuentas deudoras), nos interesa el DEBE (debit)
-        # Si quisieras ingresos contables, sería el HABER (credit)
-        total = sum(a['debit'] - a['credit'] for a in apuntes)
-        
-        # Si el resultado es negativo (raro en gastos), lo devolvemos tal cual
-        return total
-
-    except Exception as e:
-        print(f"   ❌ Error en Motor Balanza: {e}")
-        return 0.0
-
-# ==============================================================================
-# MOTOR B: FLUJO DE EFECTIVO (Pagos Reales)
-# Ideal para: Ventas cobradas, Créditos pagados, Bancos
-# ==============================================================================
-def _motor_flujo(models, uid, codigo_cuenta, fecha_inicio, fecha_fin, es_ingreso):
-    print(f"   💸 [Motor Flujo] Consultando cuenta {codigo_cuenta}...")
-
-    # 1. Configurar búsqueda de cuenta
-    if len(codigo_cuenta) <= 4:
-        operador = '=like'
-        valor_busqueda = codigo_cuenta + '%'
-    else:
-        operador = '='
-        valor_busqueda = codigo_cuenta
-
-    # 2. Obtener IDs de las cuentas
-    account_ids = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, 'account.account', 'search', 
-        [[('code', operador, valor_busqueda)]]
-    )
-    
-    if not account_ids:
-        print(f"   ⚠️ Cuenta {codigo_cuenta} no encontrada en plan contable.")
-        return 0.0
-
-    # 3. Obtener Diarios vinculados (para filtrar pagos)
-    journal_ids = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, 'account.journal', 'search', 
-        [[('default_account_id', 'in', account_ids)]]
-    )
-
-    # 4. Configurar Filtros
-    tipo_partner = 'customer' if es_ingreso else 'supplier'
-    tipo_pago = 'inbound' if es_ingreso else 'outbound'
-
+def _motor_flujo_global_clientes(models, uid, fecha_inicio, fecha_fin):
+    print(f"🌍 [Motor Global] Trayendo todos los pagos de clientes...")
     domain = [
         ('date', '>=', fecha_inicio),
         ('date', '<=', fecha_fin),
         ('state', '=', 'posted'),
-        ('partner_type', '=', tipo_partner),
+        ('payment_type', '=', 'inbound'),
+        ('partner_type', '=', 'customer')
+    ]
+    try:
+        pagos = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, 'account.payment', 'search_read', [domain], {'fields': ['amount']})
+        return sum(p['amount'] for p in pagos)
+    except Exception as e:
+        print(f"❌ Error Motor Global: {e}")
+        return 0.0
+
+# ==============================================================================
+# MOTOR A: BALANZA (Gastos, Nóminas, Impuestos)
+# ==============================================================================
+def _motor_balanza(models, uid, codigo_cuenta, fecha_inicio, fecha_fin):
+    domain = [
+        ('date', '>=', fecha_inicio),
+        ('date', '<=', fecha_fin),
+        ('parent_state', '=', 'posted'),
+        ('account_id.code', '=like', codigo_cuenta + '%'), 
+    ]
+    try:
+        # Traemos Debe y Haber
+        apuntes = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, 'account.move.line', 'search_read', [domain], {'fields': ['debit', 'credit']})
+        
+        # Cálculo: Cargos (Debe) - Abonos (Haber)
+        neto = sum(a['debit'] - a['credit'] for a in apuntes)
+        
+        # Para cuentas de Pasivo (Victor 205, Scott 201), el pago es la disminución del saldo
+        # Invertimos el signo si es necesario para que el egreso sea positivo en el tablero
+        if codigo_cuenta.startswith('2'):
+            return abs(neto) if neto < 0 else neto
+            
+        return neto
+    except Exception:
+        return 0.0
+   
+# ==============================================================================
+# MOTOR B: FLUJO ESPECÍFICO (Bancos o Proveedores por Diario)
+# ==============================================================================
+def _motor_flujo(models, uid, codigo_cuenta, fecha_inicio, fecha_fin, es_ingreso):
+    print(f"💸 [Motor Flujo] Cuenta específica {codigo_cuenta}...")
+    
+    # Buscamos la cuenta
+    operador = '=like' if len(codigo_cuenta) <= 4 else '='
+    account_ids = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, 'account.account', 'search', [[('code', operador, codigo_cuenta + ('%' if operador == '=like' else ''))]])
+    
+    if not account_ids: return 0.0
+
+    # Buscamos sus diarios (Para que sea específico y no mezcle)
+    journal_ids = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, 'account.journal', 'search', [[('default_account_id', 'in', account_ids)]])
+
+    tipo_pago = 'inbound' if es_ingreso else 'outbound'
+    domain = [
+        ('date', '>=', fecha_inicio),
+        ('date', '<=', fecha_fin),
+        ('state', '=', 'posted'),
         ('payment_type', '=', tipo_pago),
-        # ('company_id', '=', 1) # <--- DESCOMENTAR SI ES NECESARIO FILTRAR EMPRESA
     ]
     
+    # AQUÍ ESTÁ LA ESCALABILIDAD: Si pediste una cuenta, filtramos por su diario obligatoriamente
     if journal_ids:
-            domain.append(('journal_id', 'in', journal_ids))
+        domain.append(('journal_id', 'in', journal_ids))
+    else:
+        # Si no tiene diario, es un gasto o pasivo, usamos balanza
+        return _motor_balanza(models, uid, codigo_cuenta, fecha_inicio, fecha_fin)
 
     try:
         pagos = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, 'account.payment', 'search_read', [domain], {'fields': ['amount']})
-        total = sum(p['amount'] for p in pagos)
-        return total
-
+        return sum(p['amount'] for p in pagos)
     except Exception as e:
-        print(f"   ❌ Error en Motor Flujo: {e}")
         return 0.0

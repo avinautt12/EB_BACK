@@ -4,20 +4,23 @@ from decimal import Decimal
 from datetime import date, datetime
 from collections import defaultdict
 import calendar
+import pandas as pd
+from io import BytesIO
+from flask import send_file
+from openpyxl.utils import get_column_letter
 
-# Importamos utilidades (Asegúrate de que existan y funcionen)
+# Importamos utilidades
 from utils.jwt_utils import registrar_auditoria, verificar_token
 
 try:
     from utils.odoo_utils import obtener_saldo_cuenta_odoo
 except ImportError:
-    # Fallback por si la ruta de importación cambia
     from utils.odoo_utils import obtener_saldo_cuenta_odoo
 
 dashboard_flujo_bp = Blueprint('dashboard_flujo_bp', __name__, url_prefix='/flujo')
 
 # ==============================================================================
-# 1. LECTURA: TABLERO MENSUAL
+# 1. LECTURA: TABLERO MENSUAL (USANDO TABLAS UNIFICADAS)
 # ==============================================================================
 @dashboard_flujo_bp.route('/tablero-mensual', methods=['GET'])
 def obtener_tablero_mensual():
@@ -28,6 +31,7 @@ def obtener_tablero_mensual():
         conexion = obtener_conexion()
         cursor = conexion.cursor(dictionary=True)
         
+        # CAMBIO: Usamos cat_conceptos_unificados y flujo_valores_unificados
         sql = """
             SELECT 
                 c.id_concepto,
@@ -36,8 +40,8 @@ def obtener_tablero_mensual():
                 c.orden_reporte,
                 COALESCE(v.monto_proyectado, 0) as proyectado,
                 COALESCE(v.monto_real, 0) as real_val
-            FROM cat_conceptos c
-            LEFT JOIN flujo_valores v 
+            FROM cat_conceptos_unificados c
+            LEFT JOIN flujo_valores_unificados v 
                 ON c.id_concepto = v.id_concepto 
                 AND v.fecha_reporte = %s
             ORDER BY c.orden_reporte ASC
@@ -61,7 +65,8 @@ def obtener_tablero_mensual():
                 "col_proyectado": proyectado,
                 "col_real": real_val,
                 "col_diferencia": diferencia,
-                "alerta": "negativa" if diferencia < 0 and row['categoria'] == 'Ingresos' else "normal"
+                # Alerta visual simple: Negativo en Ingresos es malo
+                "alerta": "negativa" if diferencia < 0 and 'Ingresos' in row['categoria'] else "normal"
             })
 
         return jsonify({
@@ -78,7 +83,7 @@ def obtener_tablero_mensual():
             conexion.close()
 
 # ==============================================================================
-# 2. LECTURA: PROYECCIÓN ANUAL
+# 2. LECTURA: PROYECCIÓN ANUAL (USANDO TABLAS UNIFICADAS)
 # ==============================================================================
 @dashboard_flujo_bp.route('/proyeccion-anual', methods=['GET'])
 def obtener_proyeccion_anual():
@@ -87,10 +92,12 @@ def obtener_proyeccion_anual():
         conexion = obtener_conexion()
         cursor = conexion.cursor(dictionary=True)
 
-        cursor.execute("SELECT DISTINCT fecha_reporte FROM flujo_valores ORDER BY fecha_reporte ASC")
+        # CAMBIO: Tabla unificada
+        cursor.execute("SELECT DISTINCT fecha_reporte FROM flujo_valores_unificados ORDER BY fecha_reporte ASC")
         fechas_db = cursor.fetchall()
         columnas_fechas = [f['fecha_reporte'].isoformat() for f in fechas_db]
 
+        # CAMBIO: Tablas unificadas
         sql = """
             SELECT 
                 c.id_concepto, 
@@ -100,8 +107,8 @@ def obtener_proyeccion_anual():
                 v.fecha_reporte,
                 v.monto_proyectado,
                 v.monto_real
-            FROM cat_conceptos c
-            LEFT JOIN flujo_valores v ON c.id_concepto = v.id_concepto
+            FROM cat_conceptos_unificados c
+            LEFT JOIN flujo_valores_unificados v ON c.id_concepto = v.id_concepto
             ORDER BY c.orden_reporte ASC, v.fecha_reporte ASC
         """
         cursor.execute(sql)
@@ -155,7 +162,7 @@ def obtener_proyeccion_anual():
         if conexion: conexion.close()
 
 # ==============================================================================
-# 3. y 4. ESCRITURA (GUARDAR VALOR / CREAR CONCEPTO)
+# 3. ESCRITURA: GUARDAR VALOR (EN TABLAS UNIFICADAS)
 # ==============================================================================
 @dashboard_flujo_bp.route('/guardar-valor', methods=['POST'])
 def guardar_valor():
@@ -176,27 +183,19 @@ def guardar_valor():
         monto = data['monto']
         tipo = data.get('tipo', 'real') 
 
-        # 1. Guardar el valor
+        # 1. Guardar el valor en la tabla UNIFICADA
         actualizar_valor_bd(cursor, id_concepto, fecha, monto, tipo)
         
-        # 2. OBTENER EL NOMBRE DEL CONCEPTO (Para que la auditoría sea legible)
-        cursor.execute("SELECT nombre_concepto FROM cat_conceptos WHERE id_concepto = %s", (id_concepto,))
+        # 2. Auditoría (busca nombre en la tabla UNIFICADA)
+        cursor.execute("SELECT nombre_concepto FROM cat_conceptos_unificados WHERE id_concepto = %s", (id_concepto,))
         res_nombre = cursor.fetchone()
         
-        # Si el cursor es diccionario o tupla, manejamos ambos casos por seguridad
-        if res_nombre:
-            if isinstance(res_nombre, dict):
-                nombre_concepto = res_nombre['nombre_concepto']
-            else:
-                nombre_concepto = res_nombre[0]
-        else:
-            nombre_concepto = f"Concepto {id_concepto}"
+        nombre_concepto = res_nombre[0] if res_nombre else f"Concepto {id_concepto}"
 
-        # 3. Registrar auditoría con nombre bonito
         desc = f"Editó {nombre_concepto} ({tipo}) a ${monto}"
-        registrar_auditoria(cursor, 'EDICION_CELDA', 'flujo_valores', id_concepto, desc)
+        registrar_auditoria(cursor, 'EDICION_CELDA', 'flujo_valores_unificados', id_concepto, desc)
 
-        # 4. Recalcular Fórmulas
+        # 3. Recalcular Fórmulas UNIFICADAS
         f_obj = datetime.strptime(fecha, "%Y-%m-%d")
         recalcular_formulas_flujo(conexion, f_obj.year, f_obj.month)
 
@@ -211,7 +210,7 @@ def guardar_valor():
         if conexion: conexion.close()
 
 # ==============================================================================
-# 5. SINCRONIZACIÓN CON ODOO
+# 5. SINCRONIZACIÓN CON ODOO (CORREGIDO: CONVERSIÓN A ENTEROS)
 # ==============================================================================
 @dashboard_flujo_bp.route('/sincronizar-odoo', methods=['POST'])
 def sincronizar_odoo():
@@ -221,15 +220,22 @@ def sincronizar_odoo():
     if not token or not verificar_token(token):
         return jsonify({'error': 'Tu sesión ha expirado.'}), 401
 
-    print("🔵 INICIANDO SINCRONIZACIÓN CON ODOO...")
+    print("🔵 INICIANDO SINCRONIZACIÓN CON ODOO (MODO UNIFICADO)...")
     data = request.get_json()
-    anio = data.get('anio')
-    mes = data.get('mes')
+    
+    # --- CORRECCIÓN AQUÍ: Convertimos a int() para evitar el error ---
+    try:
+        anio = int(data.get('anio'))
+        mes = int(data.get('mes'))
+    except (ValueError, TypeError):
+        return jsonify({"mensaje": "El año y el mes deben ser números válidos"}), 400
     
     if not anio or not mes:
         return jsonify({"mensaje": "Faltan datos de año o mes"}), 400
 
+    # Ahora sí funcionará porque son enteros
     ultimo_dia = calendar.monthrange(anio, mes)[1]
+    
     fecha_inicio = f"{anio}-{mes:02d}-01"
     fecha_fin = f"{anio}-{mes:02d}-{ultimo_dia}"
     
@@ -241,10 +247,10 @@ def sincronizar_odoo():
         conexion = obtener_conexion()
         cursor = conexion.cursor(dictionary=True)
         
-        # 1. Traer conceptos configurados con cuenta Odoo
+        # 1. Traer conceptos configurados DESDE LA TABLA UNIFICADA
         cursor.execute("""
             SELECT id_concepto, nombre_concepto, categoria, codigo_cuenta_odoo 
-            FROM cat_conceptos 
+            FROM cat_conceptos_unificados
             WHERE codigo_cuenta_odoo IS NOT NULL AND codigo_cuenta_odoo != ''
         """)
         conceptos_mapeados = cursor.fetchall()
@@ -255,18 +261,16 @@ def sincronizar_odoo():
             codigo = c['codigo_cuenta_odoo']
             cat_lower = c['categoria'].lower() if c['categoria'] else ''
             
-            # Inteligencia: Ingreso vs Egreso
             es_ingreso = True
             if any(x in cat_lower for x in ['egreso', 'gasto', 'costo', 'pasivo', 'proveedor']):
                 es_ingreso = False
             
             print(f"   -> Sincronizando '{c['nombre_concepto']}'...")
             
-            # Consultar Odoo
             saldo_real = obtener_saldo_cuenta_odoo(codigo, fecha_inicio, fecha_fin, es_ingreso=es_ingreso)
             
             try:
-                # Guardar en BD (Usando la función corregida)
+                # Guardar en flujo_valores_unificados
                 actualizar_valor_bd(cursor_update, c['id_concepto'], fecha_inicio, saldo_real, 'real')
                 actualizados += 1
             except Exception as e_sql:
@@ -275,9 +279,9 @@ def sincronizar_odoo():
 
         if actualizados > 0:
             desc = f"Sync Odoo {fecha_inicio}: {actualizados} actualizados."
-            registrar_auditoria(cursor_update, 'SYNC_ODOO', 'flujo_valores', 0, desc)
+            registrar_auditoria(cursor_update, 'SYNC_ODOO', 'flujo_valores_unificados', 0, desc)
 
-        # 2. RECALCULAR FÓRMULAS
+        # 2. Recalcular Fórmulas
         recalcular_formulas_flujo(conexion, anio, mes)
 
         conexion.commit()
@@ -291,57 +295,18 @@ def sincronizar_odoo():
         if conexion: conexion.close()
 
 # ==============================================================================
-# 6. AUDITORÍA (LECTURA) - ¡ESTA ES LA QUE FALTABA!
-# ==============================================================================
-@dashboard_flujo_bp.route('/auditoria', methods=['GET'])
-def obtener_historial_auditoria():
-    conexion = None
-    try:
-        conexion = obtener_conexion()
-        cursor = conexion.cursor(dictionary=True)
-        
-        sql = """
-            SELECT 
-                id_auditoria,
-                id_usuario,
-                nombre_usuario,
-                accion,
-                tabla_afectada,
-                descripcion,
-                fecha_hora
-            FROM auditoria_movimientos
-            ORDER BY fecha_hora DESC
-            LIMIT 500
-        """
-        cursor.execute(sql)
-        registros = cursor.fetchall()
-        
-        for row in registros:
-            if row['fecha_hora']:
-                row['fecha_hora'] = row['fecha_hora'].isoformat()
-        
-        return jsonify(registros), 200
-
-    except Exception as e:
-        print(f"Error auditoria: {e}")
-        return jsonify({'error': str(e)}), 500
-    finally:
-        if conexion: conexion.close()
-
-# ==============================================================================
-# LÓGICA DE CÁLCULO DE FÓRMULAS (ACTUALIZADO: ARRASTRE UNIFICADO Y DOBLE CÁLCULO)
+# LÓGICA DE CÁLCULO DE FÓRMULAS (EN TABLAS UNIFICADAS)
 # ==============================================================================
 def recalcular_formulas_flujo(conexion, anio, mes):
     """
-    Realiza las sumas y restas automáticas. 
-    REGLA NUEVA: El Disponible Final Real anterior es el Saldo Inicial (Real y Proy) actual.
+    Realiza las sumas y restas automáticas en las TABLAS UNIFICADAS.
+    Estructura de IDs (1-99)
     """
-    print(f"🧮 Recalculando fórmulas para {mes}/{anio}...")
+    print(f"🧮 Recalculando fórmulas UNIFICADAS para {mes}/{anio}...")
     cursor = conexion.cursor(dictionary=True)
     
     fecha_actual = f"{anio}-{mes:02d}-01"
     
-    # Calcular mes anterior para el arrastre
     if mes == 1:
         mes_anterior, anio_anterior = 12, anio - 1
     else:
@@ -350,8 +315,25 @@ def recalcular_formulas_flujo(conexion, anio, mes):
     fecha_anterior = f"{anio_anterior}-{mes_anterior:02d}-01"
 
     try:
-        # 1. Traer valores actuales a memoria (para no perder cambios manuales)
-        sql_fetch = "SELECT id_concepto, monto_real, monto_proyectado FROM flujo_valores WHERE fecha_reporte = %s"
+        # --- DEFINICIÓN DE IDs (Tabla Unificada) ---
+        ID_SALDO_INICIAL = 1
+        ID_SALDO_FINAL = 99
+
+        ID_VENTAS = 2
+        ID_TOTAL_RECUPERACION = 3
+        IDS_OTROS_INGRESOS = [4, 5, 6, 7] 
+        ID_TOTAL_ENTRADAS = 8
+
+        IDS_PROVEEDORES = [20, 21, 22, 23, 24, 25]
+        IDS_OPERATIVOS = [40, 41, 42, 43]
+        IDS_FINANCIEROS = [50, 51, 52]
+        IDS_MOVIMIENTOS = [60]
+        ID_TOTAL_SALIDAS = 90
+
+        # ------------------------------------------------------------------
+
+        # 1. TRAER VALORES ACTUALES (De la tabla unificada)
+        sql_fetch = "SELECT id_concepto, monto_real, monto_proyectado FROM flujo_valores_unificados WHERE fecha_reporte = %s"
         cursor.execute(sql_fetch, (fecha_actual,))
         rows = cursor.fetchall()
         
@@ -360,99 +342,59 @@ def recalcular_formulas_flujo(conexion, anio, mes):
             valores[r['id_concepto']]['real'] = float(r['monto_real'] or 0)
             valores[r['id_concepto']]['proy'] = float(r['monto_proyectado'] or 0)
 
-        # MAPEO DE IDs
-        ID_SALDO_INICIAL = 1
-        ID_VENTAS = 2
-        ID_TOTAL_RECUPERACION = 4
-        IDS_OTROS_INGRESOS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
-        ID_TOTAL_OTROS_INGRESOS = 18
-        ID_TOTAL_ENTRADA_EFECTIVO = 19
-        IDS_SALIDA_PROVEEDORES = [20, 21, 22, 23, 32, 33, 34, 35, 36, 37, 38, 39]
-        ID_TOTAL_SALIDA_PROVEEDORES = 40
-        IDS_GASTOS = [24, 25, 26, 27, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50] 
-        ID_TOTAL_GASTOS = 51
-        IDS_PAGO_CREDITOS = [52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62]
-        ID_TOTAL_PAGO_CREDITOS = 63
-        ID_TOTAL_SALIDAS_EFECTIVO = 64
-        ID_TOTAL_DISPONIBLE = 66
-
-        # 1. ARRASTRE DE SALDOS (LA REGLA DE ORO)
-        # Obtenemos el DISPONIBLE REAL del mes pasado
-        sql_ant = "SELECT monto_real FROM flujo_valores WHERE id_concepto = 66 AND fecha_reporte = %s"
-        cursor.execute(sql_ant, (fecha_anterior,))
+        # A. ARRASTRE DE SALDOS (Desde tabla unificada)
+        sql_ant = "SELECT monto_real FROM flujo_valores_unificados WHERE id_concepto = %s AND fecha_reporte = %s"
+        cursor.execute(sql_ant, (ID_SALDO_FINAL, fecha_anterior))
         res_prev = cursor.fetchone()
         
-        # El monto REAL anterior es el que define el INICIO del mes actual
-        saldo_final_real_anterior = float(res_prev['monto_real']) if res_prev else 0.0
+        saldo_anterior = float(res_prev['monto_real']) if res_prev else 0.0
         
-        # CASO ESPECIAL: Enero 2026 (El inicio de la historia)
-        if anio == 2026 and mes == 1:
-            # Aquí respetamos lo que ya tiene la base de datos (tus $276,765)
-            si_unificado = valores[ID_SALDO_INICIAL]['real']
-        else:
-            # Para todos los demás meses, el REAL ANTERIOR manda
-            si_unificado = saldo_final_real_anterior
+        if not (anio == 2026 and mes == 1):
+            actualizar_valor_bd(cursor, ID_SALDO_INICIAL, fecha_actual, saldo_anterior, 'real')
+            actualizar_valor_bd(cursor, ID_SALDO_INICIAL, fecha_actual, saldo_anterior, 'proyectado')
+            valores[ID_SALDO_INICIAL]['real'] = saldo_anterior
+            valores[ID_SALDO_INICIAL]['proy'] = saldo_anterior
 
-        # ACTUALIZACIÓN CRÍTICA: Guardamos el mismo valor en REAL y PROYECTADO
-        actualizar_valor_bd(cursor, ID_SALDO_INICIAL, fecha_actual, si_unificado, 'real')
-        actualizar_valor_bd(cursor, ID_SALDO_INICIAL, fecha_actual, si_unificado, 'proyectado')
-        
-        # Actualizamos la memoria para los cálculos siguientes del mismo mes
-        valores[ID_SALDO_INICIAL]['real'] = si_unificado
-        valores[ID_SALDO_INICIAL]['proy'] = si_unificado
-
-        # --- B. CÁLCULO DE ENTRADAS (REAL Y PROY) ---
-        # Recuperación = Ventas
+        # B. CÁLCULO DE ENTRADAS
         for tipo in ['real', 'proy']:
-            v = valores[ID_VENTAS][tipo]
-            actualizar_valor_bd(cursor, ID_TOTAL_RECUPERACION, fecha_actual, v, tipo)
-            valores[ID_TOTAL_RECUPERACION][tipo] = v
+            v_ventas = valores[ID_VENTAS][tipo]
+            actualizar_valor_bd(cursor, ID_TOTAL_RECUPERACION, fecha_actual, v_ventas, tipo)
+            valores[ID_TOTAL_RECUPERACION][tipo] = v_ventas
 
-            # Suma Otros Ingresos
             s_otros = sum(valores[uid][tipo] for uid in IDS_OTROS_INGRESOS)
-            actualizar_valor_bd(cursor, ID_TOTAL_OTROS_INGRESOS, fecha_actual, s_otros, tipo)
-            valores[ID_TOTAL_OTROS_INGRESOS][tipo] = s_otros
+            
+            t_entradas = valores[ID_SALDO_INICIAL][tipo] + v_ventas + s_otros
+            actualizar_valor_bd(cursor, ID_TOTAL_ENTRADAS, fecha_actual, t_entradas, tipo)
+            valores[ID_TOTAL_ENTRADAS][tipo] = t_entradas
 
-            # Total Entradas = Saldo Inicial + Recuperación + Otros
-            t_ent = valores[ID_SALDO_INICIAL][tipo] + valores[ID_TOTAL_RECUPERACION][tipo] + s_otros
-            actualizar_valor_bd(cursor, ID_TOTAL_ENTRADA_EFECTIVO, fecha_actual, t_ent, tipo)
-            valores[ID_TOTAL_ENTRADA_EFECTIVO][tipo] = t_ent
-
-        # --- C. CÁLCULO DE SALIDAS (REAL Y PROY) ---
+        # C. CÁLCULO DE SALIDAS
         for tipo in ['real', 'proy']:
-            s_prov = sum(valores[uid][tipo] for uid in IDS_SALIDA_PROVEEDORES)
-            actualizar_valor_bd(cursor, ID_TOTAL_SALIDA_PROVEEDORES, fecha_actual, s_prov, tipo)
-            valores[ID_TOTAL_SALIDA_PROVEEDORES][tipo] = s_prov
+            s_proveedores = sum(valores[uid][tipo] for uid in IDS_PROVEEDORES)
+            s_operativos = sum(valores[uid][tipo] for uid in IDS_OPERATIVOS)
+            s_financieros = sum(valores[uid][tipo] for uid in IDS_FINANCIEROS)
+            s_movimientos = sum(valores[uid][tipo] for uid in IDS_MOVIMIENTOS)
 
-            s_gastos = sum(valores[uid][tipo] for uid in IDS_GASTOS)
-            actualizar_valor_bd(cursor, ID_TOTAL_GASTOS, fecha_actual, s_gastos, tipo)
-            valores[ID_TOTAL_GASTOS][tipo] = s_gastos
+            t_salidas = s_proveedores + s_operativos + s_financieros + s_movimientos
+            actualizar_valor_bd(cursor, ID_TOTAL_SALIDAS, fecha_actual, t_salidas, tipo)
+            valores[ID_TOTAL_SALIDAS][tipo] = t_salidas
 
-            s_cred = sum(valores[uid][tipo] for uid in IDS_PAGO_CREDITOS)
-            actualizar_valor_bd(cursor, ID_TOTAL_PAGO_CREDITOS, fecha_actual, s_cred, tipo)
-            valores[ID_TOTAL_PAGO_CREDITOS][tipo] = s_cred
-
-            # Total Salidas Global
-            t_sal = s_prov + s_gastos + s_cred
-            actualizar_valor_bd(cursor, ID_TOTAL_SALIDAS_EFECTIVO, fecha_actual, t_sal, tipo)
-            valores[ID_TOTAL_SALIDAS_EFECTIVO][tipo] = t_sal
-
-        # --- D. DISPONIBLE FINAL (REAL Y PROY) ---
+        # D. SALDO FINAL DISPONIBLE
         for tipo in ['real', 'proy']:
-            disp_final = valores[ID_TOTAL_ENTRADA_EFECTIVO][tipo] - valores[ID_TOTAL_SALIDAS_EFECTIVO][tipo]
-            actualizar_valor_bd(cursor, ID_TOTAL_DISPONIBLE, fecha_actual, disp_final, tipo)
-            valores[ID_TOTAL_DISPONIBLE][tipo] = disp_final
+            saldo_final = valores[ID_TOTAL_ENTRADAS][tipo] - valores[ID_TOTAL_SALIDAS][tipo]
+            actualizar_valor_bd(cursor, ID_SALDO_FINAL, fecha_actual, saldo_final, tipo)
+            valores[ID_SALDO_FINAL][tipo] = saldo_final
 
-        print(f"✅ Cálculos terminados para {mes}/{anio}.")
+        print(f"✅ Cálculos UNIFICADOS terminados para {mes}/{anio}.")
 
     except Exception as e:
         print(f"❌ Error calculando fórmulas: {e}")
 
-# RECUERDA: La función actualizar_valor_bd debe permitir 'proyectado'
+# HELPER: Actualizar Valor en BD (UNIFICADA)
 def actualizar_valor_bd(cursor, id_concepto, fecha, monto, tipo='real'):
     columna = 'monto_real' if tipo == 'real' else 'monto_proyectado'
     
-    check_sql = "SELECT id_valor FROM flujo_valores WHERE id_concepto = %s AND fecha_reporte = %s"
+    # CAMBIO: Apuntamos a la tabla unificada
+    check_sql = "SELECT id_valor FROM flujo_valores_unificados WHERE id_concepto = %s AND fecha_reporte = %s"
     cursor.execute(check_sql, (id_concepto, fecha))
     registro = cursor.fetchone()
     
@@ -460,12 +402,101 @@ def actualizar_valor_bd(cursor, id_concepto, fecha, monto, tipo='real'):
         if isinstance(registro, dict): id_valor = registro['id_valor']
         else: id_valor = registro[0]
         
-        sql_up = f"UPDATE flujo_valores SET {columna} = %s WHERE id_valor = %s"
+        sql_up = f"UPDATE flujo_valores_unificados SET {columna} = %s WHERE id_valor = %s"
         cursor.execute(sql_up, (monto, id_valor))
     else:
-        # Si no existe, creamos el registro con el valor en la columna correspondiente y 0 en la otra
         if tipo == 'real':
-            sql_in = "INSERT INTO flujo_valores (id_concepto, fecha_reporte, monto_real, monto_proyectado) VALUES (%s, %s, %s, 0)"
+            sql_in = "INSERT INTO flujo_valores_unificados (id_concepto, fecha_reporte, monto_real, monto_proyectado) VALUES (%s, %s, %s, 0)"
         else:
-            sql_in = "INSERT INTO flujo_valores (id_concepto, fecha_reporte, monto_real, monto_proyectado) VALUES (%s, %s, 0, %s)"
+            sql_in = "INSERT INTO flujo_valores_unificados (id_concepto, fecha_reporte, monto_real, monto_proyectado) VALUES (%s, %s, 0, %s)"
         cursor.execute(sql_in, (id_concepto, fecha, monto))
+
+# ==============================================================================
+# 6. GENERACIÓN DE REPORTES EN EXCEL (FLUJO UNIFICADO)
+# ==============================================================================
+@dashboard_flujo_bp.route('/reporte-excel', methods=['GET'])
+def exportar_excel():
+    conexion = None
+    try:
+        fecha_inicio = request.args.get('inicio')
+        fecha_fin = request.args.get('fin')
+
+        conexion = obtener_conexion()
+        cursor = conexion.cursor(dictionary=True)
+        
+        # SQL MEJORADO: Usamos LEFT JOIN para que salgan todos los conceptos
+        # y filtramos la fecha dentro del JOIN para evitar duplicados
+        sql = """
+            SELECT 
+                COALESCE(DATE_FORMAT(v.fecha_reporte, '%Y-%m-%d'), %s) AS Fecha,
+                c.categoria AS Categoria,
+                c.nombre_concepto AS Concepto,
+                CAST(COALESCE(v.monto_proyectado, 0) AS DECIMAL(15,2)) AS Proyectado,
+                CAST(COALESCE(v.monto_real, 0) AS DECIMAL(15,2)) AS Monto_Real,
+                CAST((COALESCE(v.monto_real, 0) - COALESCE(v.monto_proyectado, 0)) AS DECIMAL(15,2)) AS Diferencia
+            FROM cat_conceptos_unificados c
+            LEFT JOIN flujo_valores_unificados v 
+                ON c.id_concepto = v.id_concepto 
+                AND v.fecha_reporte BETWEEN %s AND %s
+            ORDER BY v.fecha_reporte DESC, c.orden_reporte ASC
+        """
+        
+        cursor.execute(sql, (fecha_inicio, fecha_inicio, fecha_fin))
+        data = cursor.fetchall()
+        
+        if not data:
+            return jsonify({'error': 'No hay datos'}), 404
+
+        df = pd.DataFrame(data)
+
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Flujo de Efectivo')
+            worksheet = writer.sheets['Flujo de Efectivo']
+
+            # Formato de Moneda exacto: $#,##0.00
+            currency_format = '$#,##0.00'
+            
+            for row in range(2, len(df) + 2):
+                # Aplicamos a Proyectado (D), Real (E) y Diferencia (F)
+                for col in ['D', 'E', 'F']:
+                    cell = worksheet[f'{col}{row}']
+                    cell.number_format = currency_format
+
+            # Ajuste de columnas
+            for idx, col in enumerate(df.columns):
+                max_len = max(df[col].astype(str).map(len).max(), len(col)) + 2
+                worksheet.column_dimensions[get_column_letter(idx + 1)].width = max_len
+
+        output.seek(0)
+        return send_file(output, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                         as_attachment=True, download_name=f"Reporte_Flujo_{fecha_inicio}.xlsx")
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conexion: conexion.close()
+
+@dashboard_flujo_bp.route('/verificar-permiso/<int:id_usuario>', methods=['GET'])
+def verificar_permiso_joker(id_usuario):
+    conexion = None
+    try:
+        conexion = obtener_conexion()
+        cursor = conexion.cursor(dictionary=True)
+        
+        # Consultamos el campo flujo que agregamos a la tabla usuarios
+        sql = "SELECT flujo FROM usuarios WHERE id = %s"
+        cursor.execute(sql, (id_usuario,))
+        usuario = cursor.fetchone()
+        
+        if not usuario:
+            return jsonify({"permiso": 0, "error": "Usuario no encontrado"}), 404
+            
+        # Retorna 1 si es Joker, 0 si es captura limitada
+        return jsonify({"permiso": usuario['flujo']}), 200
+
+    except Exception as e:
+        print(f"Error verificando permiso: {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conexion: conexion.close()

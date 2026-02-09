@@ -113,28 +113,44 @@ def registrar_usuario():
 
 @auth.route('/login', methods=['POST'])
 def login():
-    # Validaciones previas
     data = request.get_json()
     if not data: return jsonify({"error": "Sin datos"}), 400
     usuario = data.get('usuario')
     contrasena = data.get('contrasena')
     if campo_vacio(usuario) or campo_vacio(contrasena): return jsonify({"error": "Faltan datos"}), 400
 
-    # Abrir conexión
     conexion = obtener_conexion()
     cursor = None
     try:
         cursor = conexion.cursor(dictionary=True)
-        # ... Tu lógica de login ...
-        cursor.execute("SELECT u.*, c.id as cliente_id, c.clave as clave_cliente, c.nombre_cliente, c.id_grupo FROM usuarios u LEFT JOIN clientes c ON u.cliente_id = c.id WHERE u.usuario = %s AND u.activo = TRUE", (usuario,))
+        # Traemos todos los campos necesarios, incluido el nuevo campo 'flujo'
+        cursor.execute("""
+            SELECT u.*, c.id as cliente_id, c.clave as clave_cliente, 
+                   c.nombre_cliente, c.id_grupo, u.flujo 
+            FROM usuarios u 
+            LEFT JOIN clientes c ON u.cliente_id = c.id 
+            WHERE u.usuario = %s AND u.activo = TRUE
+        """, (usuario,))
         user = cursor.fetchone()
         
         if user and verificar_password(contrasena, user['contrasena']):
-            token = generar_token(user['id'], user['rol_id'], user['usuario'], user['nombre'], user['cliente_id'], user['clave_cliente'], user['nombre_cliente'], user['id_grupo'])
+            # Llamada corregida con exactamente 9 argumentos
+            token = generar_token(
+                user['id'],             # 1
+                user['rol_id'],         # 2
+                user['usuario'],        # 3
+                user['nombre'],          # 4
+                user['cliente_id'],     # 5
+                user['clave_cliente'],  # 6
+                user['nombre_cliente'], # 7
+                user['id_grupo'],       # 8
+                user['flujo']           # 9
+            )
             return jsonify({"token": token}), 200
             
         return jsonify({"error": "Credenciales incorrectas"}), 401
     except Exception as e:
+        print(f"Error en login: {e}")
         return jsonify({"error": str(e)}), 500
     finally:
         if cursor: cursor.close()

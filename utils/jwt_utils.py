@@ -5,13 +5,14 @@ import pytz
 
 SECRET_KEY = "121221"
 
-def generar_token(id_usuario, rol, usuario, nombre, cliente_id, clave_cliente, nombre_cliente, id_grupo):
+def generar_token(id_usuario, rol, usuario, nombre, cliente_id, clave_cliente, nombre_cliente, id_grupo, flujo):
     payload = {
         # Datos del usuario
         'id': id_usuario,
         'rol': rol,
         'usuario': usuario,
         'nombre': nombre,
+        'flujo': flujo,  
         
         # Datos del cliente
         'cliente_id': cliente_id,
