@@ -187,27 +187,23 @@ def guardar_valor():
         # 1. Guardar el valor en la tabla UNIFICADA
         actualizar_valor_bd(cursor, id_concepto, fecha, monto, tipo)
         
-        # 2. Auditoría (busca nombre en la tabla UNIFICADA)
+        # 2. Obtener nombre para auditoría
         cursor.execute("SELECT nombre_concepto FROM cat_conceptos_unificados WHERE id_concepto = %s", (id_concepto,))
         res_nombre = cursor.fetchone()
-        
         nombre_concepto = res_nombre[0] if res_nombre else f"Concepto {id_concepto}"
+        registrar_auditoria(cursor, 'EDICION_CELDA', 'flujo_valores_unificados', id_concepto, f"Editó {nombre_concepto} a ${monto}")
 
-        desc = f"Editó {nombre_concepto} ({tipo}) a ${monto}"
-        registrar_auditoria(cursor, 'EDICION_CELDA', 'flujo_valores_unificados', id_concepto, desc)
-
-        # 3. Recalcular Fórmulas UNIFICADAS
+        # 3. CORRECCIÓN: Automatización del recálculo propagado
         f_obj = datetime.strptime(fecha, "%Y-%m-%d")
-
+        # Recalcula desde el mes editado hasta diciembre para propagar saldos iniciales
         for m in range(f_obj.month, 13):
             recalcular_formulas_flujo(conexion, f_obj.year, m)
 
         conexion.commit()
-        return jsonify({"mensaje": "Valor actualizado y fórmulas recalculadas"}), 200
+        return jsonify({"mensaje": "Valor actualizado y saldos propagados correctamente"}), 200
 
     except Exception as e:
         if conexion: conexion.rollback()
-        print(f"Error guardar valor: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         if conexion: conexion.close()
@@ -217,82 +213,43 @@ def guardar_valor():
 # ==============================================================================
 @dashboard_flujo_bp.route('/sincronizar-odoo', methods=['POST'])
 def sincronizar_odoo():
-    auth_header = request.headers.get('Authorization')
-    token = auth_header.split(" ")[1] if auth_header and " " in auth_header else None
-    
-    if not token or not verificar_token(token):
-        return jsonify({'error': 'Tu sesión ha expirado.'}), 401
-
-    print("🔵 INICIANDO SINCRONIZACIÓN CON ODOO (MODO UNIFICADO)...")
     data = request.get_json()
-    
-    # --- CORRECCIÓN AQUÍ: Convertimos a int() para evitar el error ---
     try:
         anio = int(data.get('anio'))
         mes = int(data.get('mes'))
-    except (ValueError, TypeError):
-        return jsonify({"mensaje": "El año y el mes deben ser números válidos"}), 400
-    
-    if not anio or not mes:
-        return jsonify({"mensaje": "Faltan datos de año o mes"}), 400
+    except:
+        return jsonify({"mensaje": "Año o mes inválidos"}), 400
 
-    # Ahora sí funcionará porque son enteros
-    ultimo_dia = calendar.monthrange(anio, mes)[1]
-    
     fecha_inicio = f"{anio}-{mes:02d}-01"
+    ultimo_dia = calendar.monthrange(anio, mes)[1]
     fecha_fin = f"{anio}-{mes:02d}-{ultimo_dia}"
     
     conexion = None
-    actualizados = 0
-    errores = 0
-    
     try:
         conexion = obtener_conexion()
         cursor = conexion.cursor(dictionary=True)
         
-        # 1. Traer conceptos configurados DESDE LA TABLA UNIFICADA
-        cursor.execute("""
-            SELECT id_concepto, nombre_concepto, categoria, codigo_cuenta_odoo 
-            FROM cat_conceptos_unificados
-            WHERE codigo_cuenta_odoo IS NOT NULL AND codigo_cuenta_odoo != ''
-        """)
-        conceptos_mapeados = cursor.fetchall()
+        # 1. Traer conceptos con mapeo Odoo
+        cursor.execute("SELECT id_concepto, categoria, codigo_cuenta_odoo FROM cat_conceptos_unificados WHERE codigo_cuenta_odoo > ''")
+        conceptos = cursor.fetchall()
         
-        cursor_update = conexion.cursor()
-        
-        for c in conceptos_mapeados:
-            codigo = c['codigo_cuenta_odoo']
-            cat_lower = c['categoria'].lower() if c['categoria'] else ''
+        cursor_up = conexion.cursor()
+        for c in conceptos:
+            # Determinamos si es ingreso por categoría
+            es_ingreso = not any(x in c['categoria'].lower() for x in ['egreso', 'gasto', 'costo', 'pasivo'])
+            saldo = obtener_saldo_cuenta_odoo(c['codigo_cuenta_odoo'], fecha_inicio, fecha_fin, es_ingreso=es_ingreso)
             
-            es_ingreso = True
-            if any(x in cat_lower for x in ['egreso', 'gasto', 'costo', 'pasivo', 'proveedor']):
-                es_ingreso = False
-            
-            print(f"   -> Sincronizando '{c['nombre_concepto']}'...")
-            
-            saldo_real = obtener_saldo_cuenta_odoo(codigo, fecha_inicio, fecha_fin, es_ingreso=es_ingreso)
-            
-            try:
-                # Guardar en flujo_valores_unificados
-                actualizar_valor_bd(cursor_update, c['id_concepto'], fecha_inicio, saldo_real, 'real')
-                actualizados += 1
-            except Exception as e_sql:
-                print(f"❌ Error SQL ID {c['id_concepto']}: {e_sql}")
-                errores += 1
+            # Actualizamos sin borrar (Update if exists, else Insert)
+            actualizar_valor_bd(cursor_up, c['id_concepto'], fecha_inicio, saldo, 'real')
 
-        if actualizados > 0:
-            desc = f"Sync Odoo {fecha_inicio}: {actualizados} actualizados."
-            registrar_auditoria(cursor_update, 'SYNC_ODOO', 'flujo_valores_unificados', 0, desc)
-
-        # 2. Recalcular Fórmulas
-        recalcular_formulas_flujo(conexion, anio, mes)
+        # 2. AUTOMATIZACIÓN: Propagar recálculo al resto del año tras el Sync
+        for m in range(mes, 13):
+            recalcular_formulas_flujo(conexion, anio, m)
 
         conexion.commit()
-        return jsonify({"mensaje": f"Sincronización finalizada. {actualizados} conceptos actualizados."}), 200
-
+        return jsonify({"mensaje": "Sincronización y recálculo anual finalizado"}), 200
     except Exception as e:
         if conexion: conexion.rollback()
-        print(f"❌ Error CRÍTICO Sync: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         if conexion: conexion.close()
@@ -301,96 +258,65 @@ def sincronizar_odoo():
 # LÓGICA DE CÁLCULO DE FÓRMULAS (EN TABLAS UNIFICADAS)
 # ==============================================================================
 def recalcular_formulas_flujo(conexion, anio, mes):
-    """
-    Realiza las sumas y restas automáticas en las TABLAS UNIFICADAS.
-    Estructura de IDs (1-99)
-    """
-    print(f"🧮 Recalculando fórmulas UNIFICADAS para {mes}/{anio}...")
     cursor = conexion.cursor(dictionary=True)
-    
     fecha_actual = f"{anio}-{mes:02d}-01"
     
-    if mes == 1:
-        mes_anterior, anio_anterior = 12, anio - 1
-    else:
-        mes_anterior, anio_anterior = mes - 1, anio
-        
-    fecha_anterior = f"{anio_anterior}-{mes_anterior:02d}-01"
+    # Cálculos de fecha anterior para arrastre de saldo
+    if mes == 1: mes_ant, anio_ant = 12, anio - 1
+    else: mes_ant, anio_ant = mes - 1, anio
+    fecha_anterior = f"{anio_ant}-{mes_ant:02d}-01"
 
     try:
-        # --- DEFINICIÓN DE IDs (Tabla Unificada) ---
-        ID_SALDO_INICIAL = 1
-        ID_SALDO_FINAL = 99
-
-        ID_VENTAS = 2
-        ID_TOTAL_RECUPERACION = 3
-        IDS_OTROS_INGRESOS = [4, 5, 6, 7] 
-        ID_TOTAL_ENTRADAS = 8
-
+        # Definición de IDs Maestro
+        ID_SALDO_INICIAL, ID_SALDO_FINAL = 1, 99
+        ID_VENTAS, ID_RECUPERACION, ID_TOTAL_ENTRADAS = 2, 3, 8
+        IDS_OTROS = [4, 5, 6, 7]
         IDS_PROVEEDORES = [20, 21, 22, 23, 24, 25]
         IDS_OPERATIVOS = [40, 41, 42, 43]
-        IDS_FINANCIEROS = [50, 51, 52]
-        IDS_MOVIMIENTOS = [60]
+        ID_TOTAL_GASTOS_OPER = 49 # Subtotal solicitado
         ID_TOTAL_SALIDAS = 90
 
-        # ------------------------------------------------------------------
+        # A. Obtener saldo final del mes anterior (Arrastre)
+        cursor.execute("SELECT monto_real FROM flujo_valores_unificados WHERE id_concepto = %s AND fecha_reporte = %s", (ID_SALDO_FINAL, fecha_anterior))
+        res_prev = cursor.fetchone()
+        saldo_arrastre = float(res_prev['monto_real']) if res_prev else 0.0
 
-        # 1. TRAER VALORES ACTUALES (De la tabla unificada)
-        sql_fetch = "SELECT id_concepto, monto_real, monto_proyectado FROM flujo_valores_unificados WHERE fecha_reporte = %s"
-        cursor.execute(sql_fetch, (fecha_actual,))
-        rows = cursor.fetchall()
-        
+        # Actualizar Saldo Inicial del mes actual
+        actualizar_valor_bd(cursor, ID_SALDO_INICIAL, fecha_actual, saldo_arrastre, 'real')
+        actualizar_valor_bd(cursor, ID_SALDO_INICIAL, fecha_actual, saldo_arrastre, 'proyectado')
+
+        # B. Cargar valores del mes para cálculos
+        cursor.execute("SELECT id_concepto, monto_real, monto_proyectado FROM flujo_valores_unificados WHERE fecha_reporte = %s", (fecha_actual,))
         valores = defaultdict(lambda: {'real': 0.0, 'proy': 0.0})
-        for r in rows:
+        for r in cursor.fetchall():
             valores[r['id_concepto']]['real'] = float(r['monto_real'] or 0)
             valores[r['id_concepto']]['proy'] = float(r['monto_proyectado'] or 0)
 
-        # A. ARRASTRE DE SALDOS (Desde tabla unificada)
-        sql_ant = "SELECT monto_real FROM flujo_valores_unificados WHERE id_concepto = %s AND fecha_reporte = %s"
-        cursor.execute(sql_ant, (ID_SALDO_FINAL, fecha_anterior))
-        res_prev = cursor.fetchone()
-        
-        saldo_anterior = float(res_prev['monto_real']) if res_prev else 0.0
-        
-        if not (anio == 2026 and mes == 1):
-            actualizar_valor_bd(cursor, ID_SALDO_INICIAL, fecha_actual, saldo_anterior, 'real')
-            actualizar_valor_bd(cursor, ID_SALDO_INICIAL, fecha_actual, saldo_anterior, 'proyectado')
-            valores[ID_SALDO_INICIAL]['real'] = saldo_anterior
-            valores[ID_SALDO_INICIAL]['proy'] = saldo_anterior
-
-        # B. CÁLCULO DE ENTRADAS
         for tipo in ['real', 'proy']:
+            # C. Cálculo Entradas
             v_ventas = valores[ID_VENTAS][tipo]
-            actualizar_valor_bd(cursor, ID_TOTAL_RECUPERACION, fecha_actual, v_ventas, tipo)
-            valores[ID_TOTAL_RECUPERACION][tipo] = v_ventas
-
-            s_otros = sum(valores[uid][tipo] for uid in IDS_OTROS_INGRESOS)
+            actualizar_valor_bd(cursor, ID_RECUPERACION, fecha_actual, v_ventas, tipo)
             
-            t_entradas = valores[ID_SALDO_INICIAL][tipo] + v_ventas + s_otros
+            s_otros = sum(valores[uid][tipo] for uid in IDS_OTROS)
+            t_entradas = round(saldo_arrastre + v_ventas + s_otros, 2)
             actualizar_valor_bd(cursor, ID_TOTAL_ENTRADAS, fecha_actual, t_entradas, tipo)
-            valores[ID_TOTAL_ENTRADAS][tipo] = t_entradas
 
-        # C. CÁLCULO DE SALIDAS
-        for tipo in ['real', 'proy']:
-            s_proveedores = sum(valores[uid][tipo] for uid in IDS_PROVEEDORES)
-            s_operativos = sum(valores[uid][tipo] for uid in IDS_OPERATIVOS)
-            s_financieros = sum(valores[uid][tipo] for uid in IDS_FINANCIEROS)
-            s_movimientos = sum(valores[uid][tipo] for uid in IDS_MOVIMIENTOS)
-
-            t_salidas = s_proveedores + s_operativos + s_financieros + s_movimientos
+            # D. Cálculo Salidas con Subtotal 49
+            s_prov = sum(valores[uid][tipo] for uid in IDS_PROVEEDORES)
+            s_oper = round(sum(valores[uid][tipo] for uid in IDS_OPERATIVOS), 2)
+            
+            # Guardamos Subtotal de Gastos (ID 49)
+            actualizar_valor_bd(cursor, ID_TOTAL_GASTOS_OPER, fecha_actual, s_oper, tipo)
+            
+            t_salidas = round(s_prov + s_oper + sum(valores[uid][tipo] for uid in [50, 51, 52, 60]), 2)
             actualizar_valor_bd(cursor, ID_TOTAL_SALIDAS, fecha_actual, t_salidas, tipo)
-            valores[ID_TOTAL_SALIDAS][tipo] = t_salidas
 
-        # D. SALDO FINAL DISPONIBLE
-        for tipo in ['real', 'proy']:
-            # Redondeamos a 2 decimales para evitar errores de punto flotante
-            saldo_final = round(valores[ID_TOTAL_ENTRADAS][tipo] - valores[ID_TOTAL_SALIDAS][tipo], 2)
-            actualizar_valor_bd(cursor, ID_SALDO_FINAL, fecha_actual, saldo_final, tipo)
-            valores[ID_SALDO_FINAL][tipo] = saldo_final
+            # E. Saldo Final (ID 99)
+            disp = round(t_entradas - t_salidas, 2)
+            actualizar_valor_bd(cursor, ID_SALDO_FINAL, fecha_actual, disp, tipo)
 
-        print(f"✅ Cálculos UNIFICADOS terminados para {mes}/{anio}.")
     except Exception as e:
-        print(f"❌ Error calculando fórmulas: {e}")
+        print(f"Error en fórmulas {mes}/{anio}: {e}")
 
 # HELPER: Actualizar Valor en BD (UNIFICADA)
 def actualizar_valor_bd(cursor, id_concepto, fecha, monto, tipo='real'):
