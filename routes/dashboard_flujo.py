@@ -11,6 +11,7 @@ from openpyxl.utils import get_column_letter
 
 # Importamos utilidades
 from utils.jwt_utils import registrar_auditoria, verificar_token
+from fix_totales_2026 import recalcular_formulas_flujo
 
 try:
     from utils.odoo_utils import obtener_saldo_cuenta_odoo
@@ -197,7 +198,9 @@ def guardar_valor():
 
         # 3. Recalcular Fórmulas UNIFICADAS
         f_obj = datetime.strptime(fecha, "%Y-%m-%d")
-        recalcular_formulas_flujo(conexion, f_obj.year, f_obj.month)
+
+        for m in range(f_obj.month, 13):
+            recalcular_formulas_flujo(conexion, f_obj.year, m)
 
         conexion.commit()
         return jsonify({"mensaje": "Valor actualizado y fórmulas recalculadas"}), 200
@@ -380,12 +383,12 @@ def recalcular_formulas_flujo(conexion, anio, mes):
 
         # D. SALDO FINAL DISPONIBLE
         for tipo in ['real', 'proy']:
-            saldo_final = valores[ID_TOTAL_ENTRADAS][tipo] - valores[ID_TOTAL_SALIDAS][tipo]
+            # Redondeamos a 2 decimales para evitar errores de punto flotante
+            saldo_final = round(valores[ID_TOTAL_ENTRADAS][tipo] - valores[ID_TOTAL_SALIDAS][tipo], 2)
             actualizar_valor_bd(cursor, ID_SALDO_FINAL, fecha_actual, saldo_final, tipo)
             valores[ID_SALDO_FINAL][tipo] = saldo_final
 
         print(f"✅ Cálculos UNIFICADOS terminados para {mes}/{anio}.")
-
     except Exception as e:
         print(f"❌ Error calculando fórmulas: {e}")
 
