@@ -60,8 +60,8 @@ def recalcular_formulas_flujo(conexion, anio, mes):
         IDS_PROVEEDORES = [20, 21, 22, 23, 25] 
         
         # Operativos (Incluye Importaciones ID 24 para que sume al Total Gastos ID 49)
-        IDS_OPERATIVOS = [24, 40, 50, 52, 41, 42, 43] 
-        ID_TOTAL_GASTOS = 49 # El ID del Subtotal de Gastos
+        IDS_OPERATIVOS = [24, 40, 41, 42, 43]
+        ID_TOTAL_GASTOS = 49 
 
         IDS_FINANCIEROS = [51]
         IDS_MOVIMIENTOS = [60]
