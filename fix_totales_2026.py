@@ -44,29 +44,38 @@ def recalcular_formulas_flujo(conexion, anio, mes):
 
     try:
         # ==========================================
-        # 1. DEFINICIÓN DE GRUPOS (IDs NUEVOS)
+        # 1. DEFINICIÓN DE GRUPOS (ACTUALIZADO SEGÚN TU BD)
         # ==========================================
+        
+        # --- CONCEPTOS DE SALDO Y ENTRADAS ---
         ID_SALDO_INICIAL = 1
         ID_SALDO_FINAL = 99
-
-        # --- ENTRADAS ---
-        ID_VENTAS = 2
-        ID_RECUPERACION = 3
-        IDS_OTROS = [4, 5, 6, 7] # Deudores, Compra USD, Creditos, Otros
-        ID_TOTAL_ENTRADAS = 8
-
-        # --- SALIDAS ---
-        # Proveedores (Sin el 24, porque lo movimos a Gastos)
-        IDS_PROVEEDORES = [20, 21, 22, 23, 25] 
         
-        # Operativos (Incluye Importaciones ID 24 para que sume al Total Gastos ID 49)
-        IDS_OPERATIVOS = [24, 40, 41, 42, 43]
-        ID_TOTAL_GASTOS = 49 
+        ID_VENTAS = 2
+        ID_RECUPERACION = 3  # Espejo de ventas
+        
+        # Otros Ingresos: Deudores(4), Compra USD(5), Creditos(6), Otros(7)
+        IDS_OTROS_INGRESOS = [4, 5, 6, 7] 
+        
+        ID_TOTAL_ENTRADAS = 8 # Suma de Saldo Inicial + Recuperacion + Otros
 
-        IDS_FINANCIEROS = [51]
+        # --- CONCEPTOS DE SALIDAS (AGRUPACIÓN SOLICITADA) ---
+        
+        # GRUPO 1: GASTOS OPERATIVOS (ID 49)
+        # Incluye: Proveedores (20-23), Importaciones(24), Anticipos(25),
+        # Gastos Fijos(40), Nomina(41), PTU(42), Impuestos(43)
+        IDS_PARA_GASTOS_OPERATIVOS = [20, 21, 22, 23, 24, 25, 40, 41, 42, 43]
+        ID_RESUMEN_GASTOS_OP = 49
+
+        # GRUPO 2: FINANCIEROS Y OTROS
+        # Incluye: Creditos Bancarios(50), Comisiones(51), Particulares(52), Devoluciones(100)
+        IDS_FINANCIEROS = [50, 51, 52, 100]
+
+        # GRUPO 3: MOVIMIENTOS / INVERSIONES
+        # Incluye: Inversiones enviados a BBVA/Monex (60)
         IDS_MOVIMIENTOS = [60]
         
-        ID_TOTAL_SALIDAS = 90
+        ID_TOTAL_SALIDAS = 90 # Suma de todo lo anterior
 
         # ==========================================
         # 2. CARGA DE DATOS
@@ -98,40 +107,43 @@ def recalcular_formulas_flujo(conexion, anio, mes):
         # ==========================================
         # 3. CÁLCULOS MATEMÁTICOS
         # ==========================================
-        for tipo in ['real', 'proy']:
+        for tipo in ['real', 'proyectado']:
             v_map = val_r if tipo == 'real' else val_p
             
-            # --- INGRESOS ---
-            # 1. Total Recuperacion (Es espejo de Ventas)
+            # --- A. INGRESOS ---
+            # 1. Total Recuperacion (Es espejo de Ventas ID 2)
             actualizar_valor_bd(cursor, ID_RECUPERACION, fecha_actual, v_map[ID_VENTAS], tipo)
             v_map[ID_RECUPERACION] = v_map[ID_VENTAS]
             
-            # 2. Total Entradas (Saldo Inicial + Ventas + Otros)
-            s_otros = sum(v_map[i] for i in IDS_OTROS)
-            ent = v_map[ID_SALDO_INICIAL] + v_map[ID_RECUPERACION] + s_otros
+            # 2. Total Entradas (Saldo Inicial + Recuperacion + Otros)
+            s_otros = sum(v_map[i] for i in IDS_OTROS_INGRESOS)
+            total_entradas = v_map[ID_SALDO_INICIAL] + v_map[ID_RECUPERACION] + s_otros
             
-            actualizar_valor_bd(cursor, ID_TOTAL_ENTRADAS, fecha_actual, ent, tipo)
-            v_map[ID_TOTAL_ENTRADAS] = ent
+            actualizar_valor_bd(cursor, ID_TOTAL_ENTRADAS, fecha_actual, total_entradas, tipo)
+            v_map[ID_TOTAL_ENTRADAS] = total_entradas
             
-            # --- SALIDAS ---
-            # 1. Suma de Grupos
-            prov = sum(v_map[i] for i in IDS_PROVEEDORES)
-            oper = sum(v_map[i] for i in IDS_OPERATIVOS) # Aquí ya incluye el 24 (Importaciones)
-            fin  = sum(v_map[i] for i in IDS_FINANCIEROS)
-            mov  = sum(v_map[i] for i in IDS_MOVIMIENTOS)
+            # --- B. SALIDAS ---
             
-            # 2. Guardar Subtotal de Gastos (ID 49)
-            actualizar_valor_bd(cursor, ID_TOTAL_GASTOS, fecha_actual, oper, tipo)
+            # 1. Calcular TOTAL GASTOS OPERATIVOS (ID 49)
+            # Suma de Proveedores + Nomina + Impuestos + Gastos Fijos
+            suma_operativos = sum(v_map[i] for i in IDS_PARA_GASTOS_OPERATIVOS)
+            actualizar_valor_bd(cursor, ID_RESUMEN_GASTOS_OP, fecha_actual, suma_operativos, tipo)
+            v_map[ID_RESUMEN_GASTOS_OP] = suma_operativos
 
-            # 3. Gran Total Salidas (ID 90)
-            tot_sal = prov + oper + fin + mov
-            actualizar_valor_bd(cursor, ID_TOTAL_SALIDAS, fecha_actual, tot_sal, tipo)
-            v_map[ID_TOTAL_SALIDAS] = tot_sal
+            # 2. Calcular Financieros y Movimientos
+            suma_financieros = sum(v_map[i] for i in IDS_FINANCIEROS)
+            suma_movimientos = sum(v_map[i] for i in IDS_MOVIMIENTOS)
             
-            # --- SALDO FINAL (ID 99) ---
-            # Disponible = Total Entradas (que ya trae saldo inicial) - Total Salidas
-            disp = ent - tot_sal
-            actualizar_valor_bd(cursor, ID_SALDO_FINAL, fecha_actual, disp, tipo)
+            # 3. Calcular TOTAL SALIDAS (ID 90)
+            # Suma de (Gastos Operativos) + (Financieros) + (Movimientos)
+            gran_total_salidas = suma_operativos + suma_financieros + suma_movimientos
+            actualizar_valor_bd(cursor, ID_TOTAL_SALIDAS, fecha_actual, gran_total_salidas, tipo)
+            v_map[ID_TOTAL_SALIDAS] = gran_total_salidas
+            
+            # --- C. SALDO FINAL (ID 99) ---
+            # Disponible = Total Entradas - Total Salidas
+            disponible_final = total_entradas - gran_total_salidas
+            actualizar_valor_bd(cursor, ID_SALDO_FINAL, fecha_actual, disponible_final, tipo)
 
     except Exception as e:
         print(f"❌ Error mes {mes}/{anio}: {e}")
