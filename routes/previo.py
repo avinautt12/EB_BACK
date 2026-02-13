@@ -5,11 +5,28 @@ from decimal import Decimal
 
 previo_bp = Blueprint('previo', __name__, url_prefix='')
 
+@previo_bp.route('/obtener_previo', methods=['GET'])
+def obtener_previo():
+    conexion = None
+    cursor = None
+    try:
+        conexion = obtener_conexion()
+        cursor = conexion.cursor(dictionary=True)
+        # Seleccionamos todos los campos necesarios
+        cursor.execute("SELECT * FROM previo") 
+        registros = cursor.fetchall()
+        return jsonify(registros), 200
+    except Exception as e:
+        print(f"Error obteniendo previo: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conexion: conexion.close()
+
 @previo_bp.route('/actualizar_previo', methods=['POST'])
 def actualizar_previo():
     conexion = None
     cursor = None
-    
     try:
         if not request.is_json:
             return jsonify({'error': 'Se esperaba un JSON'}), 400
@@ -38,50 +55,47 @@ def actualizar_previo():
             return int(value or fallback_val)
 
         cursor.execute("DELETE FROM previo") 
-        
         registros_insertados = 0
         
         for i, registro in enumerate(registros):
             try:
-                if 'clave' not in registro or 'nombre_cliente' not in registro:
-                    continue
+                if 'clave' not in registro: continue
                 
                 # --- VALORES BASE ---
                 meta_inicial = seguro_float(registro.get('compra_minima_inicial'))
                 meta_anual = seguro_float(registro.get('compra_minima_anual'))
                 avance_real = seguro_float(registro.get('acumulado_anticipado'))
 
-                # --- RECALCULO DE PORCENTAJES GLOBALES ---
                 p_global_calc = int(round((avance_real / meta_inicial) * 100)) if meta_inicial > 0 else 0
                 p_anual_calc = int(round((avance_real / meta_anual) * 100)) if meta_anual > 0 else 0
 
-                # --- EXTRACCIÓN DE CAMPOS 2026 (Lo que faltaba) ---
-                # Scott 2026
+                # --- CORRECCIÓN 2: LECTURA CORRECTA DE VARIABLES (CAMELCASE) ---
+                # En Angular envías 'esIntegral', pero aquí buscabas 'es_integral'. Corregido:
+                es_integral_val = int(bool(registro.get('esIntegral', False)))
+                grupo_integral_val = registro.get('grupoIntegral')
+
+                # Variables temporales para limpieza visual
                 c_ene_feb = seguro_float(registro.get('compromiso_ene_feb'))
                 a_ene_feb = seguro_float(registro.get('avance_ene_feb'))
                 p_ene_feb = get_porcentaje(registro, 'porcentaje_ene_feb')
-
                 c_mar_abr = seguro_float(registro.get('compromiso_mar_abr'))
                 a_mar_abr = seguro_float(registro.get('avance_mar_abr'))
                 p_mar_abr = get_porcentaje(registro, 'porcentaje_mar_abr')
-
                 c_may_jun = seguro_float(registro.get('compromiso_may_jun'))
                 a_may_jun = seguro_float(registro.get('avance_may_jun'))
                 p_may_jun = get_porcentaje(registro, 'porcentaje_may_jun')
 
-                # Apparel 2026
                 c_ene_feb_app = seguro_float(registro.get('compromiso_ene_feb_app'))
                 a_ene_feb_app = seguro_float(registro.get('avance_ene_feb_app'))
                 p_ene_feb_app = get_porcentaje(registro, 'porcentaje_ene_feb_app')
-
                 c_mar_abr_app = seguro_float(registro.get('compromiso_mar_abr_app'))
                 a_mar_abr_app = seguro_float(registro.get('avance_mar_abr_app'))
                 p_mar_abr_app = get_porcentaje(registro, 'porcentaje_mar_abr_app')
-
                 c_may_jun_app = seguro_float(registro.get('compromiso_may_jun_app'))
                 a_may_jun_app = seguro_float(registro.get('avance_may_jun_app'))
                 p_may_jun_app = get_porcentaje(registro, 'porcentaje_may_jun_app')
 
+                # --- CORRECCIÓN 3: SQL EXACTO (QUITÉ EL %s QUE SOBRABA) ---
                 cursor.execute("""
                     INSERT INTO previo (
                         clave, evac, nombre_cliente, acumulado_anticipado, nivel,
@@ -92,7 +106,6 @@ def actualizar_previo():
                         compromiso_sep_oct, avance_sep_oct, porcentaje_sep_oct,
                         compromiso_nov_dic, avance_nov_dic, porcentaje_nov_dic,
                         
-                        -- NUEVOS CAMPOS 2026 --
                         compromiso_ene_feb, avance_ene_feb, porcentaje_ene_feb,
                         compromiso_mar_abr, avance_mar_abr, porcentaje_mar_abr,
                         compromiso_may_jun, avance_may_jun, porcentaje_may_jun,
@@ -103,7 +116,6 @@ def actualizar_previo():
                         compromiso_sep_oct_app, avance_sep_oct_app, porcentaje_sep_oct_app,
                         compromiso_nov_dic_app, avance_nov_dic_app, porcentaje_nov_dic_app,
                         
-                        -- NUEVOS CAMPOS APP 2026 --
                         compromiso_ene_feb_app, avance_ene_feb_app, porcentaje_ene_feb_app,
                         compromiso_mar_abr_app, avance_mar_abr_app, porcentaje_mar_abr_app,
                         compromiso_may_jun_app, avance_may_jun_app, porcentaje_may_jun_app,
@@ -112,11 +124,10 @@ def actualizar_previo():
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
-                        %s, %s, %s, 
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, -- 2026 Scott
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
-                        %s, %s, %s, 
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, -- 2026 App
+                        %s, %s, 
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, 
                         %s, %s
                     )
                 """, (
@@ -147,7 +158,7 @@ def actualizar_previo():
                     c_mar_abr_app, a_mar_abr_app, p_mar_abr_app,
                     c_may_jun_app, a_may_jun_app, p_may_jun_app,
 
-                    int(bool(registro.get('es_integral', False))), registro.get('grupo_integral')
+                    es_integral_val, grupo_integral_val
                 ))
                 registros_insertados += 1
                 
