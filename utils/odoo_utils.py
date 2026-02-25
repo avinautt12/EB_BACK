@@ -1,5 +1,7 @@
 import xmlrpc.client
 import ssl
+import time
+import logging
 
 # --- CONFIGURACIÓN Y CREDENCIALES ---
 ODOO_URL = 'https://ebik.odoo.com'
@@ -9,20 +11,45 @@ ODOO_PASSWORD = 'bb36fdae62c3c113fb91de0143eba06da199672d'
 
 PREFIJOS_MODO_BALANZA = ['6', '5', '7', '2'] 
 
-def get_odoo_models():
+def get_odoo_models(retries: int = 3, delay: float = 1.0):
+    """Attempt to connect and authenticate to Odoo XML-RPC.
+
+    Retries a few times in case of transient network/errors. Returns (uid, models)
+    or (None, None) on failure. Uses logging instead of print so server logs capture failures.
+    """
+    context = ssl._create_unverified_context()
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common", context=context)
+            models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object", context=context)
+            uid = common.authenticate(ODOO_DB, ODOO_USER, ODOO_PASSWORD, {})
+            if uid:
+                return uid, models, None
+            else:
+                logging.warning("Odoo authenticate returned falsy uid on attempt %d", attempt)
+                last_exc = RuntimeError("Odoo authentication failed (falsy uid)")
+        except Exception as e:
+            last_exc = e
+            logging.exception("Error conexión Odoo (attempt %d): %s", attempt, e)
+
+        # backoff before next attempt
+        time.sleep(delay * attempt)
+
+    tb = None
     try:
-        context = ssl._create_unverified_context()
-        common = xmlrpc.client.ServerProxy('{}/xmlrpc/2/common'.format(ODOO_URL), context=context)
-        models = xmlrpc.client.ServerProxy('{}/xmlrpc/2/object'.format(ODOO_URL), context=context)
-        uid = common.authenticate(ODOO_DB, ODOO_USER, ODOO_PASSWORD, {})
-        return uid, models
-    except Exception as e:
-        print(f"❌ Error conexión Odoo: {e}")
-        return None, None
+        import traceback as _tb
+        tb = _tb.format_exception(type(last_exc), last_exc, last_exc.__traceback__)
+        tb = ''.join(tb)
+    except Exception:
+        tb = str(last_exc)
+    logging.error("Could not connect to Odoo after %d attempts: %s", retries, last_exc)
+    return None, None, tb
 
 def obtener_saldo_cuenta_odoo(codigo_cuenta, fecha_inicio, fecha_fin, es_ingreso=True):
-    uid, models = get_odoo_models()
-    if not uid: return 0.0
+    uid, models, _ = get_odoo_models()
+    if not uid:
+        return 0.0
 
     # LÓGICA ESCALABLE:
     # 1. Si la clave es 'TODAS_VENTAS', traemos la cobranza global (los 15M)

@@ -1,5 +1,6 @@
 import eventlet
-eventlet.monkey_patch()  # Debe estar al inicio del archivo
+# Temporarily disable eventlet monkey-patching to avoid possible XML-RPC issues
+# eventlet.monkey_patch()  # Debe estar al inicio del archivo
 
 from flask import Flask
 from flask_cors import CORS
@@ -43,12 +44,17 @@ def create_app():
     allowed_origins = [
         "http://localhost:4200",
         "http://127.0.0.1:4200",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+        "http://localhost:63012",
+        "http://127.0.0.1:63012",
         "http://3.128.54.77",
         "http://3.146.204.64",
         "https://app.elite-bike.com",
         "https://api.elite-bike.com"
     ]
 
+    # Inicialmente registramos Flask-CORS para los orígenes conocidos.
     CORS(app, resources={
         r"/*": {
             "origins": allowed_origins,
@@ -58,11 +64,32 @@ def create_app():
         }
     })
 
+    # Además, añadimos un handler que refleja dinámicamente orígenes localhost/127.0.0.1 con cualquier puerto.
+    # Esto permite desarrollar con el servidor Angular en puertos aleatorios sin romper CORS.
+    from flask import request
+
+    @app.after_request
+    def _apply_cors_headers(response):
+        origin = request.headers.get('Origin')
+        if not origin:
+            return response
+
+        # Allow explicit allowed_origins or localhosts with any port
+        if origin in allowed_origins or origin.startswith('http://localhost:') or origin.startswith('http://127.0.0.1:'):
+            response.headers['Access-Control-Allow-Origin'] = origin
+            response.headers['Vary'] = 'Origin'
+            response.headers['Access-Control-Allow-Credentials'] = 'true'
+            response.headers['Access-Control-Expose-Headers'] = 'Content-Disposition, Content-Type'
+            response.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
+            response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,DELETE,OPTIONS'
+
+        return response
+
      # Configuración Socket.IO con async_mode explícito
     socketio.init_app(
         app,
         cors_allowed_origins=allowed_origins,
-        async_mode='eventlet',
+        async_mode='threading',  # use threading temporarily for debugging
         logger=True,
         engineio_logger=True,
         path='/socket.io/'
@@ -100,7 +127,7 @@ if __name__ == '__main__':
     socketio.run(
         app,
         host='0.0.0.0',
-        port=5000,
+        port=5001,
         debug=True,
         use_reloader=False,  # Importante para eventlet
         log_output=True

@@ -11,6 +11,7 @@ from openpyxl.utils import get_column_letter
 
 # Importamos utilidades
 from utils.jwt_utils import registrar_auditoria, verificar_token
+import logging
 
 try:
     from utils.odoo_utils import obtener_saldo_cuenta_odoo
@@ -75,7 +76,7 @@ def obtener_tablero_mensual():
         }), 200
 
     except Exception as e:
-        print(f"Error en tablero mensual: {e}")
+        logging.exception("Error en tablero mensual")
         return jsonify({'error': str(e)}), 500
     finally:
         if conexion:
@@ -156,7 +157,7 @@ def obtener_proyeccion_anual():
         }), 200
 
     except Exception as e:
-        print(f"Error en proyeccion anual: {e}")
+        logging.exception("Error en proyeccion anual")
         return jsonify({'error': str(e)}), 500
     finally:
         if conexion: conexion.close()
@@ -334,7 +335,7 @@ def verificar_permiso_joker(id_usuario):
         return jsonify({"permiso": usuario['flujo']}), 200
 
     except Exception as e:
-        print(f"Error verificando permiso: {e}")
+        logging.exception("Error verificando permiso")
         return jsonify({"error": str(e)}), 500
     finally:
         if cursor: cursor.close()
@@ -363,7 +364,7 @@ def actualizar_valor_bd(cursor, id_concepto, fecha, monto, tipo='real'):
         cursor.execute(sql_in, (id_concepto, fecha, v_r, v_p))
 
 def recalcular_formulas_flujo(conexion, anio, mes):
-    print(f"🧮 Recalculando UNIFICADO (Versión Integrada) para {mes}/{anio}...")
+    logging.info("Recalculando UNIFICADO para %s/%s", mes, anio)
     cursor = conexion.cursor(dictionary=True)
     
     fecha_actual = f"{anio}-{mes:02d}-01"
@@ -479,4 +480,4 @@ def recalcular_formulas_flujo(conexion, anio, mes):
             actualizar_valor_bd(cursor, ID_SALDO_FINAL, fecha_actual, disponible_final, tipo)
 
     except Exception as e:
-        print(f"❌ Error mes {mes}/{anio}: {e}")
+        logging.exception("Error en recalcular_formulas_flujo para %s/%s", mes, anio)

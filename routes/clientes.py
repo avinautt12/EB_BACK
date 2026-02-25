@@ -62,6 +62,7 @@ def obtener_nombres_clientes():
     try:
         cursor.execute("""
             SELECT 
+                c.id,
                 COALESCE(g.nombre_grupo, c.clave) AS clave,
                 c.nombre_cliente
             FROM clientes c
@@ -70,7 +71,7 @@ def obtener_nombres_clientes():
         """)
         resultados = cursor.fetchall()
         return jsonify([
-            {"clave": row["clave"], "nombre_cliente": row["nombre_cliente"]}
+            {"id": row["id"], "clave": row["clave"], "nombre_cliente": row["nombre_cliente"]}
             for row in resultados
         ]), 200
     except Exception as e:
@@ -81,7 +82,28 @@ def obtener_nombres_clientes():
             cursor.close()
         if conexion and conexion.is_connected():
             conexion.close()
-        
+
+@clientes_bp.route('/clientes/por-grupo/<int:id_grupo>', methods=['GET'])
+def obtener_clientes_por_grupo(id_grupo):
+    """Devuelve los clientes que pertenecen a un grupo integral específico."""
+    conexion = obtener_conexion()
+    cursor = conexion.cursor(dictionary=True)
+    try:
+        cursor.execute("""
+            SELECT c.id, c.clave, c.nombre_cliente
+            FROM clientes c
+            WHERE c.id_grupo = %s
+            ORDER BY c.nombre_cliente
+        """, (id_grupo,))
+        resultados = cursor.fetchall()
+        return jsonify(resultados), 200
+    except Exception as e:
+        print("Error al obtener clientes por grupo:", str(e))
+        return jsonify({"error": "Error en la consulta"}), 500
+    finally:
+        if cursor: cursor.close()
+        if conexion and conexion.is_connected(): conexion.close()
+
 @clientes_bp.route('/clientes/buscar', methods=['POST'])
 def buscar_cliente():
     data = request.get_json()

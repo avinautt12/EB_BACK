@@ -1,4 +1,5 @@
 from flask import Blueprint, jsonify, request
+import logging
 from db_conexion import obtener_conexion
 import jwt
 from datetime import date, datetime
@@ -20,7 +21,7 @@ def obtener_grupos():
         grupos = cursor.fetchall()
         return jsonify(grupos), 200
     except Exception as e:
-        print("Error al obtener grupos:", str(e))
+        logging.exception("Error al obtener grupos")
         return jsonify({"error": "Error al obtener grupos"}), 500
     finally:
         if cursor:
@@ -55,7 +56,7 @@ def agregar_grupo():
 
         return jsonify({"mensaje": "Grupo agregado exitosamente", "id": cursor.lastrowid}), 201
     except Exception as e:
-        print("Error al agregar grupo:", str(e))
+        logging.exception("Error al agregar grupo")
         return jsonify({"error": "Error al agregar grupo"}), 500
     finally:
         if cursor:
@@ -93,7 +94,7 @@ def editar_grupo(id_grupo):
 
         return jsonify({"mensaje": "Grupo actualizado exitosamente"}), 200
     except Exception as e:
-        print("Error al editar grupo:", str(e))
+        logging.exception("Error al editar grupo")
         return jsonify({"error": "Error al editar grupo"}), 500
     finally:
         if cursor:
@@ -124,7 +125,7 @@ def eliminar_grupo(id_grupo):
 
         return jsonify({"mensaje": "Grupo eliminado correctamente"}), 200
     except Exception as e:
-        print("Error al eliminar grupo:", str(e))
+        logging.exception("Error al eliminar grupo")
         return jsonify({"error": "Error al eliminar grupo"}), 500
     finally:
         if cursor:
@@ -174,7 +175,7 @@ def obtener_clientes_por_grupo(id_grupo):
             "clientes": clientes
         }), 200
     except Exception as e:
-        print("Error al obtener clientes del grupo:", str(e))
+        logging.exception("Error al obtener clientes del grupo")
         return jsonify({"error": "Error al obtener clientes del grupo"}), 500
     finally:
         if cursor:
@@ -220,7 +221,7 @@ def asignar_grupo_cliente():
 
         return jsonify({"mensaje": "Grupo asignado al cliente exitosamente"}), 200
     except Exception as e:
-        print("Error al asignar grupo al cliente:", str(e))
+        logging.exception("Error al asignar grupo al cliente")
         return jsonify({"error": "Error al asignar grupo al cliente"}), 500
     finally:
         if cursor:

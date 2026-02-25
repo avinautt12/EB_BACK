@@ -10,8 +10,7 @@ from datetime import datetime
 import time
 import logging
 
-# Importa la librería para generar PDFs
-from weasyprint import HTML
+# Importa la librería para generar PDFs cuando sea necesario (import dinámico)
 
 # Importa las funciones auxiliares de tu módulo de utilidades
 from utils.email_utils import (
@@ -86,6 +85,13 @@ def enviar_caratula_pdf_async(data, usuario, historial_id):
         htmls = crear_cuerpo_email(data) 
         
         # Usamos el HTML de la carátula para generar el PDF
+        try:
+            from weasyprint import HTML
+        except Exception as e:
+            logging.error(f"WeasyPrint no disponible: {e}")
+            actualizar_estado_historial(historial_id, 'Fallido')
+            return {"status": "error", "mensaje": f"WeasyPrint no disponible: {str(e)}"}
+
         pdf_file = HTML(string=htmls['html_caratula_pdf']).write_pdf()
         logging.info(f"[{datetime.now()}] PDF generado en el backend en {time.time() - start_time:.2f} segundos.")
         

@@ -1,4 +1,5 @@
 from flask import Blueprint, jsonify, request
+import logging
 from models.monitor_odoo_model import obtener_todos_los_registros
 from db_conexion import obtener_conexion
 from decimal import Decimal
@@ -17,7 +18,7 @@ def obtener_previo():
         registros = cursor.fetchall()
         return jsonify(registros), 200
     except Exception as e:
-        print(f"Error obteniendo previo: {str(e)}")
+        logging.exception("Error obteniendo previo")
         return jsonify({'error': str(e)}), 500
     finally:
         if cursor: cursor.close()
@@ -163,7 +164,7 @@ def actualizar_previo():
                 registros_insertados += 1
                 
             except Exception as e:
-                print(f"Error procesando registro {i}: {str(e)}")
+                logging.exception("Error procesando registro %s", i)
                 raise Exception(f"Falla en registro {registro.get('clave')}: {str(e)}")
         
         conexion.commit() 
@@ -213,7 +214,7 @@ def obtener_previo_int():
         return jsonify(registros), 200
         
     except Exception as e:
-        print(f"Error obteniendo datos (excluyendo integrales): {str(e)}")
+        logging.exception("Error obteniendo datos (excluyendo integrales)")
         return jsonify({'error': str(e)}), 500
         
     finally:
