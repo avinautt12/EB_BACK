@@ -1,3 +1,4 @@
+from __future__ import annotations
 from flask import Blueprint, jsonify, request, Response
 from db_conexion import obtener_conexion
 from decimal import Decimal
