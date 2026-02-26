@@ -2,7 +2,7 @@ from flask import Blueprint, jsonify, request
 import logging
 from models.monitor_odoo_model import obtener_todos_los_registros
 from db_conexion import obtener_conexion
-from decimal import Decimal
+import decimal
 
 previo_bp = Blueprint('previo', __name__, url_prefix='')
 
@@ -51,10 +51,11 @@ def actualizar_previo():
 
         def get_porcentaje(reg, key, fallback_val=0):
             value = reg.get(key, 0)
-            if isinstance(value, (float, Decimal)):
+            if isinstance(value, (float, decimal.Decimal)): # Asegúrate de importar decimal si usas Decimal
                 return int(round(value))
             return int(value or fallback_val)
 
+        # Limpiamos la tabla antes de insertar lo nuevo
         cursor.execute("DELETE FROM previo") 
         registros_insertados = 0
         
@@ -70,12 +71,17 @@ def actualizar_previo():
                 p_global_calc = int(round((avance_real / meta_inicial) * 100)) if meta_inicial > 0 else 0
                 p_anual_calc = int(round((avance_real / meta_anual) * 100)) if meta_anual > 0 else 0
 
-                # --- CORRECCIÓN 2: LECTURA CORRECTA DE VARIABLES (CAMELCASE) ---
-                # En Angular envías 'esIntegral', pero aquí buscabas 'es_integral'. Corregido:
                 es_integral_val = int(bool(registro.get('esIntegral', False)))
                 grupo_integral_val = registro.get('grupoIntegral')
 
-                # Variables temporales para limpieza visual
+                # --- NUEVOS VALORES ACUMULADOS (Incluyendo BOLD) ---
+                # Es vital obtener estos para pasarlos al INSERT
+                ac_syncros = seguro_float(registro.get('acumulado_syncros'))
+                ac_apparel = seguro_float(registro.get('acumulado_apparel'))
+                ac_vittoria = seguro_float(registro.get('acumulado_vittoria'))
+                ac_bold = seguro_float(registro.get('acumulado_bold')) # <--- AQUÍ ESTÁ EL DE BOLD
+
+                # Variables temporales para 2026
                 c_ene_feb = seguro_float(registro.get('compromiso_ene_feb'))
                 a_ene_feb = seguro_float(registro.get('avance_ene_feb'))
                 p_ene_feb = get_porcentaje(registro, 'porcentaje_ene_feb')
@@ -96,7 +102,6 @@ def actualizar_previo():
                 a_may_jun_app = seguro_float(registro.get('avance_may_jun_app'))
                 p_may_jun_app = get_porcentaje(registro, 'porcentaje_may_jun_app')
 
-                # --- CORRECCIÓN 3: SQL EXACTO (QUITÉ EL %s QUE SOBRABA) ---
                 cursor.execute("""
                     INSERT INTO previo (
                         clave, evac, nombre_cliente, acumulado_anticipado, nivel,
@@ -121,6 +126,9 @@ def actualizar_previo():
                         compromiso_mar_abr_app, avance_mar_abr_app, porcentaje_mar_abr_app,
                         compromiso_may_jun_app, avance_may_jun_app, porcentaje_may_jun_app,
 
+                        -- AQUÍ AGREGAMOS LAS COLUMNAS FALTANTES --
+                        acumulado_syncros, acumulado_apparel, acumulado_vittoria, acumulado_bold,
+
                         es_integral, grupo_integral
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
@@ -129,6 +137,10 @@ def actualizar_previo():
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, 
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+                        
+                        -- PLACEHOLDERS PARA LOS ACUMULADOS --
+                        %s, %s, %s, %s,
+
                         %s, %s
                     )
                 """, (
@@ -158,6 +170,9 @@ def actualizar_previo():
                     c_ene_feb_app, a_ene_feb_app, p_ene_feb_app,
                     c_mar_abr_app, a_mar_abr_app, p_mar_abr_app,
                     c_may_jun_app, a_may_jun_app, p_may_jun_app,
+
+                    # --- VALORES ACUMULADOS AL FINAL ---
+                    ac_syncros, ac_apparel, ac_vittoria, ac_bold,
 
                     es_integral_val, grupo_integral_val
                 ))

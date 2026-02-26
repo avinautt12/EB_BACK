@@ -46,20 +46,19 @@ def get_odoo_models(retries: int = 3, delay: float = 1.0):
     logging.error("Could not connect to Odoo after %d attempts: %s", retries, last_exc)
     return None, None, tb
 
-def obtener_saldo_cuenta_odoo(codigo_cuenta, fecha_inicio, fecha_fin, es_ingreso=True):
-    uid, models, _ = get_odoo_models()
-    if not uid:
-        return 0.0
+# 1. Agregamos el parámetro columna_saldo (por defecto 'Debe')
+def obtener_saldo_cuenta_odoo(codigo_cuenta, fecha_inicio, fecha_fin, es_ingreso=True, columna_saldo='Debe', excluir_txt=None):
+    uid, models = get_odoo_models()
+    if not uid: return 0.0
 
-    # LÓGICA ESCALABLE:
-    # 1. Si la clave es 'TODAS_VENTAS', traemos la cobranza global (los 15M)
     if codigo_cuenta == 'TODAS_VENTAS':
         return _motor_flujo_global_clientes(models, uid, fecha_inicio, fecha_fin)
 
-    # 2. Si no, usamos la lógica de cuentas específica
     usar_balanza = any(codigo_cuenta.startswith(p) for p in PREFIJOS_MODO_BALANZA)
+    
     if usar_balanza:
-        return _motor_balanza(models, uid, codigo_cuenta, fecha_inicio, fecha_fin)
+        # Pasamos el filtro al motor
+        return _motor_balanza(models, uid, codigo_cuenta, fecha_inicio, fecha_fin, columna_saldo, excluir_txt)
     else:
         return _motor_flujo(models, uid, codigo_cuenta, fecha_inicio, fecha_fin, es_ingreso)
 
@@ -85,7 +84,8 @@ def _motor_flujo_global_clientes(models, uid, fecha_inicio, fecha_fin):
 # ==============================================================================
 # MOTOR A: BALANZA (Gastos, Nóminas, Impuestos)
 # ==============================================================================
-def _motor_balanza(models, uid, codigo_cuenta, fecha_inicio, fecha_fin):
+# 2. Actualizamos el motor de balanza para hacer la resta correcta
+def _motor_balanza(models, uid, codigo_cuenta, fecha_inicio, fecha_fin, columna_saldo='Debe', excluir_txt=None):
     domain = [
         ('date', '>=', fecha_inicio),
         ('date', '<=', fecha_fin),
@@ -93,19 +93,42 @@ def _motor_balanza(models, uid, codigo_cuenta, fecha_inicio, fecha_fin):
         ('account_id.code', '=like', codigo_cuenta + '%'), 
     ]
     try:
-        # Traemos Debe y Haber
-        apuntes = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, 'account.move.line', 'search_read', [domain], {'fields': ['debit', 'credit']})
+        # Traemos 'name' y 'ref' para buscar las palabras prohibidas
+        apuntes = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, 'account.move.line', 'search_read', [domain], {'fields': ['debit', 'credit', 'name', 'ref']})
         
-        # Cálculo: Cargos (Debe) - Abonos (Haber)
-        neto = sum(a['debit'] - a['credit'] for a in apuntes)
+        # Preparamos la lista de palabras a excluir (si existen)
+        lista_exclusion = []
+        if excluir_txt:
+            # Convierte 'TRASPASO,DEVOLUCION' en ['TRASPASO', 'DEVOLUCION']
+            lista_exclusion = [x.strip().upper() for x in excluir_txt.split(',')]
+
+        neto = 0.0
         
-        # Para cuentas de Pasivo (Victor 205, Scott 201), el pago es la disminución del saldo
-        # Invertimos el signo si es necesario para que el egreso sea positivo en el tablero
-        if codigo_cuenta.startswith('2'):
-            return abs(neto) if neto < 0 else neto
+        for a in apuntes:
+            # Unimos la etiqueta y la referencia para buscar ahí
+            texto_linea = (str(a['name'] or '') + ' ' + str(a['ref'] or '')).upper()
+            
+            # --- FILTRO DE EXCLUSIÓN ---
+            # Si alguna palabra prohibida está en el texto, saltamos este movimiento
+            if any(palabra in texto_linea for palabra in lista_exclusion):
+                # print(f"🚫 Ignorando movimiento: {texto_linea}") # Descomentar para debug
+                continue 
+            
+            # Cálculo normal
+            if columna_saldo == 'Solo_Debe':
+                val = a['debit']
+            elif columna_saldo == 'Solo_Haber':
+                val = a['credit']
+            elif columna_saldo == 'Haber':
+                val = a['credit'] - a['debit']
+            else: # Debe (Default)
+                val = a['debit'] - a['credit']
+            
+            neto += val
             
         return neto
-    except Exception:
+    except Exception as e:
+        print(f"Error Balanza: {e}")
         return 0.0
    
 # ==============================================================================
