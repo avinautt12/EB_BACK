@@ -11,7 +11,9 @@ retroactivos_bp = Blueprint('retroactivos', __name__, url_prefix='')
 # 1. FUNCIÓN MAESTRA: OBTENER DEDUCCIONES (MOTOR BLINDADO)
 # ==============================================================================
 def obtener_deducciones_odoo(claves_db):
-    uid, models = get_odoo_models()
+    resultado_odoo = get_odoo_models()
+    uid = resultado_odoo[0]     # Tomamos el primer valor (UID)
+    models = resultado_odoo[1]
     if not uid: return {}
 
     # FECHAS OFICIALES DE TEMPORADA MY26
