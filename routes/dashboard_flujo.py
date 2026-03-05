@@ -248,8 +248,9 @@ def sincronizar_odoo():
             # -----------------------------------------------------------
             # PASO A: Buscar configuración en la NUEVA TABLA (Prioridad)
             # -----------------------------------------------------------
+            # 🚨 AQUI ESTÁ LA MAGIA: Le pedimos a MySQL la nueva columna
             cursor_read.execute("""
-                SELECT codigo_cuenta_odoo, columna_saldo, palabras_excluidas 
+                SELECT codigo_cuenta_odoo, columna_saldo, palabras_excluidas, nomenclatura_ref, palabras_incluidas 
                 FROM detalles_cuentas_odoo 
                 WHERE id_concepto = %s
             """, (id_concepto,))
@@ -257,17 +258,23 @@ def sincronizar_odoo():
             detalles = cursor_read.fetchall()
 
             if detalles:
+                se_proceso_informacion = True 
+                
                 for det in detalles:
                     codigo = det['codigo_cuenta_odoo']
                     columna = det['columna_saldo']
-                    excluir = det['palabras_excluidas'] # <--- NUEVO CAMPO
+                    excluir = det['palabras_excluidas']
+                    incluir = det['nomenclatura_ref'] 
+                    palabras_req = det.get('palabras_incluidas') # <--- 🚨 JALAMOS LA NUEVA COLUMNA DE LA BD
                     
                     saldo_parcial = obtener_saldo_cuenta_odoo(
                         codigo_cuenta=codigo, 
                         fecha_inicio=fecha_inicio, 
                         fecha_fin=fecha_fin, 
                         columna_saldo=columna,
-                        excluir_txt=excluir # <--- LO ENVIAMOS AQUÍ
+                        excluir_txt=excluir,
+                        incluir_txt=incluir,
+                        palabras_incluidas=palabras_req # <--- 🚨 Y SE LA MANDAMOS AL MOTOR DE PYTHON
                     )
                     total_real_concepto += saldo_parcial
 
@@ -276,8 +283,10 @@ def sincronizar_odoo():
             # -----------------------------------------------------------
             elif codigo_viejo and codigo_viejo.strip() != '':
                 se_proceso_informacion = True
-                # Lógica heurística anterior (adivinar si es ingreso/egreso)
-                es_ingreso = not any(x in categoria.lower() for x in ['egreso', 'gasto', 'costo', 'pasivo'])
+                
+                # 🛑 LA CORRECCIÓN ESTÁ AQUÍ 🛑
+                # Le enseñamos a Python a identificar correctamente los egresos, incluyendo tus importaciones
+                es_ingreso = not any(x in categoria.lower() for x in ['egreso', 'gasto', 'costo', 'pasivo', 'proveedor', 'importacion'])
                 
                 total_real_concepto = obtener_saldo_cuenta_odoo(
                     codigo_cuenta=codigo_viejo, 
@@ -437,7 +446,7 @@ def recalcular_formulas_flujo(conexion, anio, mes):
         ID_RECUPERACION = 3  # Espejo de ventas
         
         # Otros Ingresos: Deudores(4), Compra USD(5), Creditos(6), Otros(7)
-        IDS_OTROS_INGRESOS = [4, 5, 6, 7] 
+        IDS_OTROS_INGRESOS = [4, 6, 7] 
         
         ID_TOTAL_ENTRADAS = 8 # Suma de Saldo Inicial + Recuperacion + Otros
 
@@ -446,7 +455,7 @@ def recalcular_formulas_flujo(conexion, anio, mes):
         # GRUPO 1: GASTOS OPERATIVOS (ID 49)
         # Incluye: Proveedores (20-23), Importaciones(24), Anticipos(25),
         # Gastos Fijos(40), Nomina(41), PTU(42), Impuestos(43)
-        IDS_PARA_GASTOS_OPERATIVOS = [20, 21, 22, 23, 24, 25, 40, 41, 42, 43]
+        IDS_PARA_GASTOS_OPERATIVOS = [20, 24, 25, 40, 41, 42, 43]
         ID_RESUMEN_GASTOS_OP = 49
 
         # GRUPO 2: FINANCIEROS Y OTROS
