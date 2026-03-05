@@ -515,7 +515,7 @@ def detalle_compras_odoo():
 
     def map_estado_picking(state):
         if state == 'assigned':
-            return 'En inventario'
+            return 'Almacén EB'
         if state == 'done':
             return 'Entregado'
         if state == 'waiting':
@@ -796,7 +796,7 @@ def detalle_compras_odoo():
             estados = info['estados']
             qty   = info['qty']
             done  = info['done']
-            # Prioridad: Entregado > Entregado Parcial > En inventario > Falta de confirmación > En tránsito > Cancelado
+            # Prioridad: Entregado > Entregado Parcial > Almacén EB > Falta de confirmación > En tránsito > Cancelado
             if 'done' in estados:
                 if qty > 0 and done >= qty:
                     return 'Entregado'
@@ -804,7 +804,7 @@ def detalle_compras_odoo():
                     return 'Entregado Parcial'
                 return 'Entregado'
             if 'assigned' in estados:
-                return 'En inventario'
+                return 'Almacén EB'
             if 'waiting' in estados:
                 return 'Falta de confirmación'
             if estados & {'confirmed', 'partially_available'}:
