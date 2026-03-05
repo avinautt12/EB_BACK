@@ -127,7 +127,7 @@ if __name__ == '__main__':
     socketio.run(
         app,
         host='0.0.0.0',
-        port=5001,
+        port=5000,
         debug=True,
         use_reloader=False,  # Importante para eventlet
         log_output=True
