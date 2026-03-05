@@ -211,7 +211,7 @@ def guardar_valor():
         if conexion: conexion.close()
 
 # ==============================================================================
-# 4. SINCRONIZACIÓN CON ODOO
+# 4. SINCRONIZACIÓN CON ODOO (ACTUALIZADA MULTI-CÓDIGO)
 # ==============================================================================
 @dashboard_flujo_bp.route('/sincronizar-odoo', methods=['POST'])
 def sincronizar_odoo():
@@ -222,6 +222,7 @@ def sincronizar_odoo():
     except:
         return jsonify({"mensaje": "Año o mes inválidos"}), 400
 
+    # Configuración de fechas
     fecha_inicio = f"{anio}-{mes:02d}-01"
     ultimo_dia = calendar.monthrange(anio, mes)[1]
     fecha_fin = f"{anio}-{mes:02d}-{ultimo_dia}"
@@ -229,32 +230,88 @@ def sincronizar_odoo():
     conexion = None
     try:
         conexion = obtener_conexion()
-        # Usamos un cursor para lecturas
         cursor_read = conexion.cursor(dictionary=True)
-        
-        # 1. Traer conceptos con mapeo Odoo
-        cursor_read.execute("SELECT id_concepto, categoria, codigo_cuenta_odoo FROM cat_conceptos_unificados WHERE codigo_cuenta_odoo > ''")
-        conceptos = cursor_read.fetchall()
-        
-        # Usamos otro cursor para actualizaciones dentro de la función helper
         cursor_update = conexion.cursor()
         
+        # 1. Traemos TODOS los conceptos (tengan o no código viejo)
+        cursor_read.execute("SELECT id_concepto, categoria, codigo_cuenta_odoo FROM cat_conceptos_unificados")
+        conceptos = cursor_read.fetchall()
+        
         for c in conceptos:
-            # Determinamos si es ingreso por categoría
-            es_ingreso = not any(x in c['categoria'].lower() for x in ['egreso', 'gasto', 'costo', 'pasivo'])
-            saldo = obtener_saldo_cuenta_odoo(c['codigo_cuenta_odoo'], fecha_inicio, fecha_fin, es_ingreso=es_ingreso)
+            id_concepto = c['id_concepto']
+            categoria = c['categoria']
+            codigo_viejo = c['codigo_cuenta_odoo'] # Por si acaso
             
-            # Actualizamos sin borrar
-            actualizar_valor_bd(cursor_update, c['id_concepto'], fecha_inicio, saldo, 'real')
+            total_real_concepto = 0.0
+            se_proceso_informacion = False
 
-        # 2. AUTOMATIZACIÓN: Propagar recálculo al resto del año tras el Sync
+            # -----------------------------------------------------------
+            # PASO A: Buscar configuración en la NUEVA TABLA (Prioridad)
+            # -----------------------------------------------------------
+            # 🚨 AQUI ESTÁ LA MAGIA: Le pedimos a MySQL la nueva columna
+            cursor_read.execute("""
+                SELECT codigo_cuenta_odoo, columna_saldo, palabras_excluidas, nomenclatura_ref, palabras_incluidas 
+                FROM detalles_cuentas_odoo 
+                WHERE id_concepto = %s
+            """, (id_concepto,))
+            
+            detalles = cursor_read.fetchall()
+
+            if detalles:
+                se_proceso_informacion = True 
+                
+                for det in detalles:
+                    codigo = det['codigo_cuenta_odoo']
+                    columna = det['columna_saldo']
+                    excluir = det['palabras_excluidas']
+                    incluir = det['nomenclatura_ref'] 
+                    palabras_req = det.get('palabras_incluidas') # <--- 🚨 JALAMOS LA NUEVA COLUMNA DE LA BD
+                    
+                    saldo_parcial = obtener_saldo_cuenta_odoo(
+                        codigo_cuenta=codigo, 
+                        fecha_inicio=fecha_inicio, 
+                        fecha_fin=fecha_fin, 
+                        columna_saldo=columna,
+                        excluir_txt=excluir,
+                        incluir_txt=incluir,
+                        palabras_incluidas=palabras_req # <--- 🚨 Y SE LA MANDAMOS AL MOTOR DE PYTHON
+                    )
+                    total_real_concepto += saldo_parcial
+
+            # -----------------------------------------------------------
+            # PASO B: Fallback (Lógica Vieja) si no hay tabla nueva
+            # -----------------------------------------------------------
+            elif codigo_viejo and codigo_viejo.strip() != '':
+                se_proceso_informacion = True
+                
+                # 🛑 LA CORRECCIÓN ESTÁ AQUÍ 🛑
+                # Le enseñamos a Python a identificar correctamente los egresos, incluyendo tus importaciones
+                es_ingreso = not any(x in categoria.lower() for x in ['egreso', 'gasto', 'costo', 'pasivo', 'proveedor', 'importacion'])
+                
+                total_real_concepto = obtener_saldo_cuenta_odoo(
+                    codigo_cuenta=codigo_viejo, 
+                    fecha_inicio=fecha_inicio, 
+                    fecha_fin=fecha_fin, 
+                    es_ingreso=es_ingreso,
+                    columna_saldo='Debe' # Por defecto usamos Debe si no está especificado
+                )
+
+            # -----------------------------------------------------------
+            # PASO C: Guardar en Base de Datos
+            # -----------------------------------------------------------
+            if se_proceso_informacion:
+                actualizar_valor_bd(cursor_update, id_concepto, fecha_inicio, total_real_concepto, 'real')
+
+        # 2. AUTOMATIZACIÓN: Propagar recálculo
         for m in range(mes, 13):
             recalcular_formulas_flujo(conexion, anio, m)
 
         conexion.commit()
-        return jsonify({"mensaje": "Sincronización y recálculo anual finalizado"}), 200
+        return jsonify({"mensaje": "Sincronización Multi-Código finalizada correctamente"}), 200
+
     except Exception as e:
         if conexion: conexion.rollback()
+        print(f"Error en sync: {e}") # Importante para debug
         return jsonify({'error': str(e)}), 500
     finally:
         if conexion: conexion.close()
@@ -389,7 +446,7 @@ def recalcular_formulas_flujo(conexion, anio, mes):
         ID_RECUPERACION = 3  # Espejo de ventas
         
         # Otros Ingresos: Deudores(4), Compra USD(5), Creditos(6), Otros(7)
-        IDS_OTROS_INGRESOS = [4, 5, 6, 7] 
+        IDS_OTROS_INGRESOS = [4, 6, 7] 
         
         ID_TOTAL_ENTRADAS = 8 # Suma de Saldo Inicial + Recuperacion + Otros
 
@@ -398,7 +455,7 @@ def recalcular_formulas_flujo(conexion, anio, mes):
         # GRUPO 1: GASTOS OPERATIVOS (ID 49)
         # Incluye: Proveedores (20-23), Importaciones(24), Anticipos(25),
         # Gastos Fijos(40), Nomina(41), PTU(42), Impuestos(43)
-        IDS_PARA_GASTOS_OPERATIVOS = [20, 21, 22, 23, 24, 25, 40, 41, 42, 43]
+        IDS_PARA_GASTOS_OPERATIVOS = [20, 24, 25, 40, 41, 42, 43]
         ID_RESUMEN_GASTOS_OP = 49
 
         # GRUPO 2: FINANCIEROS Y OTROS

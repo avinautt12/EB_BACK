@@ -27,6 +27,8 @@ from routes.logistica import logistica_bp
 from routes.gastos import gastos_bp
 from routes.ingresos import ingresos_bp
 
+from routes.retroactivos import retroactivos_bp
+
 # Importamos la instancia de Celery desde celery_worker
 from celery_worker import celery_app as celery
 
@@ -118,6 +120,7 @@ def create_app():
     app.register_blueprint(gastos_bp)
     app.register_blueprint(ingresos_bp)
 
+    app.register_blueprint(retroactivos_bp)  
     return app
 
 app = create_app()

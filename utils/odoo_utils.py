@@ -46,20 +46,26 @@ def get_odoo_models(retries: int = 3, delay: float = 1.0):
     logging.error("Could not connect to Odoo after %d attempts: %s", retries, last_exc)
     return None, None, tb
 
-def obtener_saldo_cuenta_odoo(codigo_cuenta, fecha_inicio, fecha_fin, es_ingreso=True):
+def obtener_saldo_cuenta_odoo(codigo_cuenta, fecha_inicio, fecha_fin, es_ingreso=True, columna_saldo='Debe', excluir_txt=None, incluir_txt=None, palabras_incluidas=None):
     uid, models, _ = get_odoo_models()
-    if not uid:
-        return 0.0
+    
+    if not uid: return 0.0
 
-    # LÓGICA ESCALABLE:
-    # 1. Si la clave es 'TODAS_VENTAS', traemos la cobranza global (los 15M)
     if codigo_cuenta == 'TODAS_VENTAS':
         return _motor_flujo_global_clientes(models, uid, fecha_inicio, fecha_fin)
 
-    # 2. Si no, usamos la lógica de cuentas específica
-    usar_balanza = any(codigo_cuenta.startswith(p) for p in PREFIJOS_MODO_BALANZA)
+    # 🚨 LA MAGIA CORREGIDA: 
+    # Forzamos el uso de balanza si:
+    # 1. Tiene filtros de texto (como tu CREDB)
+    # 2. La regla es un acumulado (como tu Acumulado_Debe)
+    # 3. La cuenta empieza con los prefijos configurados (como el '2' de tu crédito)
+    
+    reglas_especiales = ['Acumulado_Haber', 'Acumulado_Debe', 'Solo_Haber', 'Solo_Debe', 'Haber']
+    forzar_balanza = bool(incluir_txt or excluir_txt or palabras_incluidas or columna_saldo in reglas_especiales)
+    usar_balanza = forzar_balanza or any(codigo_cuenta.startswith(p) for p in PREFIJOS_MODO_BALANZA)
+    
     if usar_balanza:
-        return _motor_balanza(models, uid, codigo_cuenta, fecha_inicio, fecha_fin)
+        return _motor_balanza(models, uid, codigo_cuenta, fecha_inicio, fecha_fin, columna_saldo, excluir_txt, incluir_txt, palabras_incluidas)
     else:
         return _motor_flujo(models, uid, codigo_cuenta, fecha_inicio, fecha_fin, es_ingreso)
 
@@ -83,29 +89,95 @@ def _motor_flujo_global_clientes(models, uid, fecha_inicio, fecha_fin):
         return 0.0
 
 # ==============================================================================
-# MOTOR A: BALANZA (Gastos, Nóminas, Impuestos)
+# MOTOR A: BALANZA (Gastos, Nóminas, Impuestos, Proveedores)
 # ==============================================================================
-def _motor_balanza(models, uid, codigo_cuenta, fecha_inicio, fecha_fin):
-    domain = [
-        ('date', '>=', fecha_inicio),
+def _motor_balanza(models, uid, codigo_cuenta, fecha_inicio, fecha_fin, columna_saldo='Debe', excluir_txt=None, incluir_txt=None, palabras_incluidas=None):
+    
+    # BLINDAJE EXTRA: Quitamos espacios accidentales
+    codigo_cuenta = str(codigo_cuenta).strip()
+
+    # 🚀 LÓGICA INTELIGENTE DE CUENTAS
+    operador = '=' if len(codigo_cuenta) >= 8 else '=like'
+    valor_busqueda = codigo_cuenta if operador == '=' else f"{codigo_cuenta}%"
+
+    # 1. DOMINIO BASE
+    domain_base = [
         ('date', '<=', fecha_fin),
         ('parent_state', '=', 'posted'),
-        ('account_id.code', '=like', codigo_cuenta + '%'), 
+        ('account_id.code', operador, valor_busqueda), 
     ]
+
+    # 🚨 LA MAGIA: Liberamos las fechas si es un acumulado (Debe o Haber)
+    # Esto permite que 'Acumulado_Haber' y 'Acumulado_Debe' traigan el histórico completo
+    reglas_acumuladas = ['Acumulado_Haber', 'Acumulado_Debe']
+    if columna_saldo not in reglas_acumuladas:
+        domain_base.append(('date', '>=', fecha_inicio))
+
+    # 2. DOMINIO ESTRICTO (Con Nomenclatura para Odoo)
+    domain_estricto = list(domain_base)
+    nomenclatura = None
+    
+    if incluir_txt and str(incluir_txt).strip():
+        nomenclatura = str(incluir_txt).strip()
+        domain_estricto.extend([
+            '|', '|', 
+            ('name', 'ilike', nomenclatura), 
+            ('ref', 'ilike', nomenclatura),
+            ('move_id.name', 'ilike', nomenclatura)
+        ])
+
     try:
-        # Traemos Debe y Haber
-        apuntes = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, 'account.move.line', 'search_read', [domain], {'fields': ['debit', 'credit']})
+        # AÑADIMOS 'partner_id' (Contacto) y 'account_id' a la lista de campos solicitados
+        apuntes = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, 'account.move.line', 'search_read', [domain_estricto], {'fields': ['debit', 'credit', 'name', 'ref', 'partner_id', 'account_id']})
         
-        # Cálculo: Cargos (Debe) - Abonos (Haber)
-        neto = sum(a['debit'] - a['credit'] for a in apuntes)
+        # VALIDACIÓN (FALLBACK SEGURO) - Aplicamos el respaldo histórico si es una regla acumulada
+        if len(apuntes) == 0 and nomenclatura and columna_saldo in reglas_acumuladas:
+            print(f"⚠️ Sin resultados para '{nomenclatura}' en cuenta {codigo_cuenta}. Ejecutando respaldo acumulado...")
+            apuntes = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, 'account.move.line', 'search_read', [domain_base], {'fields': ['debit', 'credit', 'name', 'ref', 'partner_id', 'account_id']})
+
+        # Preparamos listas de Python
+        lista_exclusion = [x.strip().upper() for x in str(excluir_txt).split(',')] if excluir_txt else []
+        lista_inclusion = [x.strip().upper() for x in str(palabras_incluidas).split(',')] if palabras_incluidas else []
+
+        neto = 0.0
         
-        # Para cuentas de Pasivo (Victor 205, Scott 201), el pago es la disminución del saldo
-        # Invertimos el signo si es necesario para que el egreso sea positivo en el tablero
-        if codigo_cuenta.startswith('2'):
-            return abs(neto) if neto < 0 else neto
+        for a in apuntes:
+            # 🛑 ESCUDO FINAL DE SEGURIDAD 🛑
+            account_data = a.get('account_id')
+            account_name = account_data[1] if account_data else ''
+            codigo_real = account_name.split(' ')[0] if account_name else ''
+
+            if operador == '=' and codigo_real != codigo_cuenta:
+                continue
+
+            # EXTRAEMOS EL CONTACTO DE ODOO
+            contacto = str(a.get('partner_id')[1]) if a.get('partner_id') else ''
+            
+            # UNIMOS TODO: Asiento + Referencia + Contacto
+            texto_linea = (str(a['name'] or '') + ' ' + str(a['ref'] or '') + ' ' + contacto).upper()
+            
+            # --- FILTROS DE EXCLUSIÓN E INCLUSIÓN ---
+            if any(palabra in texto_linea for palabra in lista_exclusion):
+                continue 
+            if lista_inclusion and not any(palabra in texto_linea for palabra in lista_inclusion):
+                continue
+            
+            # 🧮 CÁLCULO DE COLUMNAS ACTUALIZADO 🧮
+            if columna_saldo in ['Solo_Debe', 'Acumulado_Debe']: # <--- Ambas reglas suman puro Debe
+                val = a['debit']
+            elif columna_saldo in ['Solo_Haber', 'Acumulado_Haber']: # <--- Ambas reglas suman puro Haber
+                val = a['credit']
+            elif columna_saldo == 'Haber':
+                val = a['credit'] - a['debit']
+            else: # Debe (Default)
+                val = a['debit'] - a['credit']
+            
+            neto += val
             
         return neto
-    except Exception:
+    
+    except Exception as e:
+        print(f"❌ Error Balanza (Cuenta {codigo_cuenta}): {e}")
         return 0.0
    
 # ==============================================================================

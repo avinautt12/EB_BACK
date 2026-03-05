@@ -302,7 +302,6 @@ def login():
         if cursor: cursor.close()
         if conexion and conexion.is_connected(): conexion.close()
 
-
 @auth.route('/logout', methods=['POST'])
 def logout():
     # Validación previa

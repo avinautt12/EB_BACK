@@ -5,7 +5,7 @@ from mysql.connector import pooling
 db_config = {
     'host': "127.0.0.1",
     'user': "root",
-    'password': "tu_nueva_clave",
+    'password': "1234",
     'database': "elite_bike_db",
     'port': 3306
 }
