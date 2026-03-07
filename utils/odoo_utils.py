@@ -108,7 +108,6 @@ def _motor_balanza(models, uid, codigo_cuenta, fecha_inicio, fecha_fin, columna_
     ]
 
     # 🚨 LA MAGIA: Liberamos las fechas si es un acumulado (Debe o Haber)
-    # Esto permite que 'Acumulado_Haber' y 'Acumulado_Debe' traigan el histórico completo
     reglas_acumuladas = ['Acumulado_Haber', 'Acumulado_Debe']
     if columna_saldo not in reglas_acumuladas:
         domain_base.append(('date', '>=', fecha_inicio))
@@ -127,17 +126,17 @@ def _motor_balanza(models, uid, codigo_cuenta, fecha_inicio, fecha_fin, columna_
         ])
 
     try:
-        # AÑADIMOS 'partner_id' (Contacto) y 'account_id' a la lista de campos solicitados
-        apuntes = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, 'account.move.line', 'search_read', [domain_estricto], {'fields': ['debit', 'credit', 'name', 'ref', 'partner_id', 'account_id']})
+        # ✅ CORRECCIÓN AQUÍ: Agregamos 'move_id' a la lista de campos solicitados a Odoo
+        apuntes = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, 'account.move.line', 'search_read', [domain_estricto], {'fields': ['debit', 'credit', 'name', 'ref', 'partner_id', 'account_id', 'move_id']})
         
-        # VALIDACIÓN (FALLBACK SEGURO) - Aplicamos el respaldo histórico si es una regla acumulada
+        # VALIDACIÓN (FALLBACK SEGURO)
         if len(apuntes) == 0 and nomenclatura and columna_saldo in reglas_acumuladas:
             print(f"⚠️ Sin resultados para '{nomenclatura}' en cuenta {codigo_cuenta}. Ejecutando respaldo acumulado...")
-            apuntes = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, 'account.move.line', 'search_read', [domain_base], {'fields': ['debit', 'credit', 'name', 'ref', 'partner_id', 'account_id']})
+            apuntes = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, 'account.move.line', 'search_read', [domain_base], {'fields': ['debit', 'credit', 'name', 'ref', 'partner_id', 'account_id', 'move_id']})
 
         # Preparamos listas de Python
-        lista_exclusion = [x.strip().upper() for x in str(excluir_txt).split(',')] if excluir_txt else []
-        lista_inclusion = [x.strip().upper() for x in str(palabras_incluidas).split(',')] if palabras_incluidas else []
+        lista_exclusion = [x.strip().upper() for x in str(excluir_txt).split(',')] if excluir_txt and str(excluir_txt).strip().upper() != 'NONE' else []
+        lista_inclusion = [x.strip().upper() for x in str(palabras_incluidas).split(',')] if palabras_incluidas and str(palabras_incluidas).strip().upper() != 'NONE' else []
 
         neto = 0.0
         
@@ -150,11 +149,12 @@ def _motor_balanza(models, uid, codigo_cuenta, fecha_inicio, fecha_fin, columna_
             if operador == '=' and codigo_real != codigo_cuenta:
                 continue
 
-            # EXTRAEMOS EL CONTACTO DE ODOO
+            # ✅ CORRECCIÓN AQUÍ: Extraemos el Asiento Padre para leer palabras ocultas (como ANTICIPO)
+            asiento = str(a.get('move_id')[1]) if a.get('move_id') else ''
             contacto = str(a.get('partner_id')[1]) if a.get('partner_id') else ''
             
-            # UNIMOS TODO: Asiento + Referencia + Contacto
-            texto_linea = (str(a['name'] or '') + ' ' + str(a['ref'] or '') + ' ' + contacto).upper()
+            # UNIMOS TODO: Nombre + Referencia + Contacto + Asiento Padre
+            texto_linea = (str(a['name'] or '') + ' ' + str(a['ref'] or '') + ' ' + contacto + ' ' + asiento).upper()
             
             # --- FILTROS DE EXCLUSIÓN E INCLUSIÓN ---
             if any(palabra in texto_linea for palabra in lista_exclusion):
@@ -163,9 +163,9 @@ def _motor_balanza(models, uid, codigo_cuenta, fecha_inicio, fecha_fin, columna_
                 continue
             
             # 🧮 CÁLCULO DE COLUMNAS ACTUALIZADO 🧮
-            if columna_saldo in ['Solo_Debe', 'Acumulado_Debe']: # <--- Ambas reglas suman puro Debe
+            if columna_saldo in ['Solo_Debe', 'Acumulado_Debe']: 
                 val = a['debit']
-            elif columna_saldo in ['Solo_Haber', 'Acumulado_Haber']: # <--- Ambas reglas suman puro Haber
+            elif columna_saldo in ['Solo_Haber', 'Acumulado_Haber']: 
                 val = a['credit']
             elif columna_saldo == 'Haber':
                 val = a['credit'] - a['debit']

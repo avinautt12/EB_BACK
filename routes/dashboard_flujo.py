@@ -460,7 +460,7 @@ def recalcular_formulas_flujo(conexion, anio, mes):
 
         # GRUPO 2: FINANCIEROS Y OTROS
         # Incluye: Creditos Bancarios(50), Comisiones(51), Particulares(52), Devoluciones(100)
-        IDS_FINANCIEROS = [50, 51, 52, 100]
+        IDS_FINANCIEROS = [50, 52, 100]
 
         # GRUPO 3: MOVIMIENTOS / INVERSIONES
         # Incluye: Inversiones enviados a BBVA/Monex (60)

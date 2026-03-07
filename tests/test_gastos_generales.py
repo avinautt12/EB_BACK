@@ -33,15 +33,11 @@ def test_gastos_generales():
     # --- TUS REGLAS DE FILTRADO AVANZADO ---
     # Ponemos también versiones con acento por si el contador lo escribió así
     frases_incluidas = [
-        'TRASPASO A BAJIO', 'TRASPASO A BAJÍO',
-        'TRASPASO A BBVA',
-        'PAGO DE PROVEEDOR',
-        'ENTEROS A CREDITOS FONACOT', 'ENTEROS A CRÉDITOS FONACOT',
-        'VIATICOS', 'VIÁTICOS'
+        ''
     ]
     
     frases_excluidas = [
-        'INVERSION', 'INVERSIÓN'
+        'INVERSION', 'INVERSIÓN', 'ANTICIPO', 'DEVOLUCION', 'DEVOLUCIÓN', 'NOMINA', 'SATPP', 'COMP/', 'IMPORTACIONES'
     ]
 
     print(f"📊 PROBANDO CONCEPTO: GASTOS GENERALES")

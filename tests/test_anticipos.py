@@ -29,15 +29,19 @@ def test_anticipo_proveedores():
 
     # --- PARÁMETROS DE PRUEBA: ANTICIPO A PROVEEDORES ---
     cuenta = '120.01.01'
-    nomenclatura = 'PANTPV/'
+    nomenclatura = 'PANTPV'
     regla = 'Solo_Debe'
     fecha_inicio = '2026-02-01'
     fecha_fin = '2026-02-28'
+    
+    # 🚀 LA PALABRA QUE QUEREMOS EXCLUIR
+    palabras_excluidas = [''] 
 
     print(f"📊 BUSCANDO EN EL LIBRO MAYOR (account.move.line)")
     print(f"▶ Cuenta: {cuenta} (Anticipo a Proveedores)")
     print(f"▶ Filtro Odoo: Contiene '{nomenclatura}'")
     print(f"▶ Regla de cálculo: {regla}")
+    print(f"▶ 🚫 EXCLUYENDO palabra(s): {', '.join(palabras_excluidas)}")
     print(f"▶ Fechas: {fecha_inicio} al {fecha_fin}")
     print("=" * 100)
 
@@ -69,6 +73,7 @@ def test_anticipo_proveedores():
         total_debe = 0.0
         total_haber = 0.0
         movimientos_validos = 0
+        movimientos_excluidos = 0
 
         print(f"{'FECHA':<12} | {'CUENTA REAL':<12} | {'ASIENTO / REF':<35} | {'DEBE (+)':>12} | {'HABER (-)':>12}")
         print("-" * 100)
@@ -82,7 +87,29 @@ def test_anticipo_proveedores():
                 continue
 
             fecha = a.get('date', '')
-            asiento = a['move_id'][1] if a.get('move_id') else str(a.get('name', ''))
+            asiento = a['move_id'][1] if a.get('move_id') else ''
+            
+            # El campo "Comunicación" en Odoo es 'name'
+            comunicacion = str(a.get('name', '')).upper()
+            referencia = str(a.get('ref', '')).upper()
+            asiento_str = str(asiento).upper()
+
+            # --- ESCUDO DE EXCLUSIÓN ---
+            # Unimos los textos por si acaso la palabra se esconde en otro lado
+            texto_linea = f"{comunicacion} {referencia} {asiento_str}"
+            
+            debe_excluirse = False
+            for palabra in palabras_excluidas:
+                if palabra in texto_linea:
+                    debe_excluirse = True
+                    break
+            
+            if debe_excluirse:
+                movimientos_excluidos += 1
+                # Descomenta esta línea si quieres ver qué registros está ignorando:
+                # print(f"🚫 EXCLUIDO: {asiento} / {comunicacion}")
+                continue # Saltamos este registro y pasamos al siguiente
+            # ---------------------------
 
             debe = float(a.get('debit', 0.0))
             haber = float(a.get('credit', 0.0))
@@ -91,10 +118,13 @@ def test_anticipo_proveedores():
             total_haber += haber
             movimientos_validos += 1
 
-            print(f"{fecha:<12} | {codigo_real:<12} | {asiento[:35]:<35} | ${debe:>10,.2f} | ${haber:>10,.2f}")
+            # Imprimimos lo que era el Asiento + Comunicación para que lo veas claro
+            texto_impresion = f"{asiento} ({a.get('name', '')})"
+            print(f"{fecha:<12} | {codigo_real:<12} | {texto_impresion[:35]:<35} | ${debe:>10,.2f} | ${haber:>10,.2f}")
 
         print("=" * 100)
-        print(f"📈 TOTAL MOVIMIENTOS ENCONTRADOS: {movimientos_validos}")
+        print(f"📉 Movimientos excluidos por la palabra '{palabras_excluidas[0]}': {movimientos_excluidos}")
+        print(f"📈 TOTAL MOVIMIENTOS VALIDOS: {movimientos_validos}")
         print("-" * 100)
         print(f"💰 TOTAL DEBE:                    ${total_debe:,.2f}")
         print(f"💸 TOTAL HABER:                   ${total_haber:,.2f}")
