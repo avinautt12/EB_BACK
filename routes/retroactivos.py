@@ -57,10 +57,7 @@ def obtener_deducciones_odoo(claves_db):
         return resultados_por_clave
 
     try:
-        # ---------------------------------------------------------
-        # A. GARANTÍAS (Ahora con 'ilike' para mayor seguridad)
-        # ---------------------------------------------------------
-        print(f"🔎 Buscando Garantías para las {len(lista_ids_validos)} sucursales autorizadas...")
+        # A. GARANTÍAS 
         domain_garantia = [
             ('move_id.move_type', '=', 'out_refund'),
             ('move_id.state', '=', 'posted'),
@@ -78,10 +75,7 @@ def obtener_deducciones_odoo(claves_db):
             if linea['partner_id']:
                 agregar_valor(linea['partner_id'][0], 'garantia', float(linea['price_subtotal']))
 
-        # ---------------------------------------------------------
-        # B. PRODUCTOS OFERTADOS (Filtro Flexible 'ilike' para evitar errores de espacios en Odoo)
-        # ---------------------------------------------------------
-        print(f"🔎 Buscando Productos Ofertados para las {len(lista_ids_validos)} sucursales autorizadas...")
+        # B. PRODUCTOS OFERTADOS 
         domain_ofertado = [
             ('move_id.move_type', '=', 'out_invoice'), 
             ('move_id.state', '=', 'posted'),
@@ -89,7 +83,7 @@ def obtener_deducciones_odoo(claves_db):
             ('move_id.invoice_date', '<=', fecha_fin),
             ('quantity', '!=', 0),
             ('partner_id', 'in', lista_ids_validos),
-            ('product_id.product_tmpl_id.product_tag_ids.name', 'ilike', 'Producto Ofertado') # <--- SOLUCIÓN AL CASCO FALTANTE
+            ('product_id.product_tmpl_id.product_tag_ids.name', 'ilike', 'Producto Ofertado') 
         ]
         lineas_ofertado = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, 'account.move.line', 'search_read', 
             [domain_ofertado], {'fields': ['partner_id', 'price_subtotal']})
@@ -98,10 +92,7 @@ def obtener_deducciones_odoo(claves_db):
             if linea['partner_id']:
                 agregar_valor(linea['partner_id'][0], 'ofertado', float(linea['price_subtotal']))
 
-        # ---------------------------------------------------------
-        # C. NOTAS DE CRÉDITO (CON LOS FILTROS EXACTOS DEL EXCEL)
-        # ---------------------------------------------------------
-        print("🔎 Buscando NC Generales (Filtrando DESC, DESCESPECIAL, DESCPAGO)...")
+        # C. NOTAS DE CRÉDITO 
         domain_nc = [
             ('move_id.move_type', '=', 'out_refund'),
             ('move_id.state', '=', 'posted'),
@@ -122,7 +113,6 @@ def obtener_deducciones_odoo(claves_db):
             es_garantia = 'GARANTIA' in nombre_producto or 'DESCGARANTIA' in nombre_producto
             es_aplant = 'APLANT' in nombre_producto or 'ANTICIPO' in nombre_producto
             
-            # FILTRO MÁGICO
             es_descuento_valido = 'DESC' in nombre_producto or 'DESCESPECIAL' in nombre_producto or 'DESCPAGO' in nombre_producto
             
             if not es_garantia and not es_aplant and es_descuento_valido:
@@ -136,7 +126,7 @@ def obtener_deducciones_odoo(claves_db):
         return {}
     
 # ==============================================================================
-# 2. ENDPOINT GET GLOBALES
+# 2. ENDPOINT GET GLOBALES (Con matemáticas en Python)
 # ==============================================================================
 @retroactivos_bp.route('/retroactivos', methods=['GET'])
 def obtener_retroactivos():
@@ -149,29 +139,14 @@ def obtener_retroactivos():
                 COMPRA_MINIMA_ANUAL, COMPRA_MINIMA_APPAREL,
                 COMPRAS_TOTALES_CRUDO, META_MY26_CUMPLIDA,
                 COMPRA_GLOBAL_SCOTT, COMPRA_GLOBAL_APPAREL, COMPRA_GLOBAL_BOLD,
-                TOTAL_ACUMULADO,
-                compra_anual_crudo, compra_adicional,
+                TOTAL_ACUMULADO, compra_anual_crudo, compra_adicional,
                 notas_credito, garantias, productos_ofertados,
                 bicicleta_demo, bicicletas_bold, importe_final,
-                
-                porcentaje_retroactivo,
-                porcentaje_retroactivo_apparel,
-                retroactivo_total,
-                importe,
-                estatus,
-                fecha_aplicacion,
-                NC,
-                FACT
-
+                porcentaje_retroactivo, porcentaje_retroactivo_apparel,
+                retroactivo_total, importe, estatus, fecha_aplicacion, NC, FACT
             FROM tabla_retroactivos
             WHERE COALESCE(CATEGORIA, '') != 'Distribuidor'
-            ORDER BY 
-                CASE 
-                    WHEN ZONA = 'A' THEN 1
-                    WHEN ZONA = 'B' THEN 2
-                    WHEN ZONA = 'GO' THEN 3
-                    ELSE 4
-                END, CLIENTE ASC
+            ORDER BY CASE WHEN ZONA = 'A' THEN 1 WHEN ZONA = 'B' THEN 2 WHEN ZONA = 'GO' THEN 3 ELSE 4 END, CLIENTE ASC
         """)
         resultados = cursor.fetchall()
 
@@ -181,10 +156,20 @@ def obtener_retroactivos():
                     fila[clave] = float(valor)
                 elif isinstance(valor, (datetime, date)):
                     fila[clave] = valor.strftime('%Y-%m-%d')
+            
+            # --- MATEMÁTICAS TRASLADADAS DESDE ANGULAR HACIA PYTHON ---
+            m_anual = fila.get('COMPRA_MINIMA_ANUAL', 0)
+            m_apparel = fila.get('COMPRA_MINIMA_APPAREL', 0)
+            
+            fila['porcentaje_avance_general'] = (fila.get('COMPRAS_TOTALES_CRUDO', 0) / m_anual) if m_anual > 0 else 0.0
+            fila['porcentaje_avance_scott'] = (fila.get('COMPRA_GLOBAL_SCOTT', 0) / m_anual) if m_anual > 0 else 0.0
+            fila['porcentaje_avance_apparel'] = (fila.get('COMPRA_GLOBAL_APPAREL', 0) / m_apparel) if m_apparel > 0 else 0.0
+            
+            fila['total_bicis_deduccion'] = fila.get('bicicleta_demo', 0) + fila.get('bicicletas_bold', 0)
+            fila['acumulado_global_calculado'] = fila.get('COMPRAS_TOTALES_CRUDO', 0) - fila.get('notas_credito', 0) - fila.get('garantias', 0)
         
         return jsonify(resultados), 200
     except Exception as e:
-        print("Error GET:", str(e))
         return jsonify({"error": str(e)}), 500
     finally:
         if cursor: cursor.close()
@@ -195,42 +180,26 @@ def obtener_retroactivos():
 # ==============================================================================
 @retroactivos_bp.route('/sincronizar_notas', methods=['POST'])
 def sincronizar_notas_odoo():
+    # [AQUÍ VA EXACTAMENTE EL MISMO CÓDIGO DEL POST QUE YA TIENES]
     conexion = obtener_conexion()
     cursor_dict = conexion.cursor(dictionary=True)
     cursor = conexion.cursor() 
     try:
         print("🔵 Iniciando sincronización...")
-        
-        # 1. Traer SOLO las claves de las sucursales normales (Omitiendo Integrales)
         cursor_dict.execute("SELECT CLAVE FROM tabla_retroactivos WHERE CLAVE NOT LIKE 'Integral%'")
         claves_db = [row['CLAVE'].strip().upper() for row in cursor_dict.fetchall() if row['CLAVE']]
 
-        # 2. Correr el motor de Odoo con las claves
         datos_por_clave = obtener_deducciones_odoo(claves_db)
         
-        # 3. Limpiar TODA la tabla a ceros
-        cursor.execute("""
-            UPDATE tabla_retroactivos 
-            SET notas_credito=0, garantias=0, productos_ofertados=0, 
-                NC='', FACT='', estatus='Pendiente'
-        """)
+        cursor.execute("UPDATE tabla_retroactivos SET notas_credito=0, garantias=0, productos_ofertados=0, NC='', FACT='', estatus='Pendiente'")
 
-        # 4. Inyectar datos (NC, Garantías y Ofertados) directamente a cada sucursal hija
         for clave, valores in datos_por_clave.items():
             if valores['nc'] != 0 or valores['garantia'] != 0 or valores['ofertado'] != 0:
                 cursor.execute("""
                     UPDATE tabla_retroactivos 
-                    SET notas_credito = %s, 
-                        garantias = %s, 
-                        productos_ofertados = %s
-                    WHERE CLAVE = %s
+                    SET notas_credito = %s, garantias = %s, productos_ofertados = %s WHERE CLAVE = %s
                 """, (valores['nc'], valores['garantia'], valores['ofertado'], clave))
 
-        # ------------------------------------------------------------------
-        # FASE 0.5: CONCENTRAR SUCURSALES EN LOS "INTEGRALES"
-        # ------------------------------------------------------------------
-        print("🔄 Fase 0.5: Agrupando NC, Garantías y Ofertados en cuentas Integrales...")
-        
         integrales_map = {
             'Integral 1': ['EC216', 'JC539'],
             'Integral 2': ['GC411', 'MC679', 'MC677', 'LC657'],
@@ -239,53 +208,21 @@ def sincronizar_notas_odoo():
         
         for clave_padre, claves_hijas in integrales_map.items():
             format_strings = ','.join(['%s'] * len(claves_hijas))
-            
-            # Aquí garantizamos que SUMAMOS los 3 campos de las hijas
-            query_suma = f"""
-                SELECT 
-                    COALESCE(SUM(notas_credito), 0),
-                    COALESCE(SUM(garantias), 0),
-                    COALESCE(SUM(productos_ofertados), 0)
-                FROM tabla_retroactivos
-                WHERE CLAVE IN ({format_strings})
-            """
+            query_suma = f"SELECT COALESCE(SUM(notas_credito), 0), COALESCE(SUM(garantias), 0), COALESCE(SUM(productos_ofertados), 0) FROM tabla_retroactivos WHERE CLAVE IN ({format_strings})"
             cursor.execute(query_suma, tuple(claves_hijas))
             suma = cursor.fetchone()
-            
             if suma:
-                # El Integral recibe la suma exacta de sus tiendas hijas
-                cursor.execute("""
-                    UPDATE tabla_retroactivos
-                    SET 
-                        notas_credito = %s,
-                        garantias = %s,
-                        productos_ofertados = %s
-                    WHERE CLAVE = %s
-                """, (suma[0], suma[1], suma[2], clave_padre))
+                cursor.execute("UPDATE tabla_retroactivos SET notas_credito = %s, garantias = %s, productos_ofertados = %s WHERE CLAVE = %s", (suma[0], suma[1], suma[2], clave_padre))
 
-        # ------------------------------------------------------------------
-        # FASE 1: MONTOS BASE
-        # ------------------------------------------------------------------
-        print("🔄 Fase 1: Totales Crudos y Compra Adicional...")
         cursor.execute("""
             UPDATE tabla_retroactivos
             SET 
                 COMPRAS_TOTALES_CRUDO = (COALESCE(COMPRA_GLOBAL_SCOTT, 0) + COALESCE(COMPRA_GLOBAL_APPAREL, 0) + COALESCE(COMPRA_GLOBAL_BOLD, 0)),
                 TOTAL_ACUMULADO = (COALESCE(COMPRA_GLOBAL_SCOTT, 0) + COALESCE(COMPRA_GLOBAL_APPAREL, 0) + COALESCE(COMPRA_GLOBAL_BOLD, 0)),
-                compra_anual_crudo = (
-                    (COALESCE(COMPRA_GLOBAL_SCOTT, 0) + COALESCE(COMPRA_GLOBAL_APPAREL, 0) + COALESCE(COMPRA_GLOBAL_BOLD, 0)) - 
-                    COALESCE(notas_credito, 0) - COALESCE(productos_ofertados, 0)
-                ),
-                compra_adicional = (
-                    ((COALESCE(COMPRA_GLOBAL_SCOTT, 0) + COALESCE(COMPRA_GLOBAL_APPAREL, 0) + COALESCE(COMPRA_GLOBAL_BOLD, 0)) - COALESCE(notas_credito, 0) - COALESCE(productos_ofertados, 0)) -
-                    COALESCE(COMPRA_MINIMA_ANUAL, 0)
-                )
+                compra_anual_crudo = ((COALESCE(COMPRA_GLOBAL_SCOTT, 0) + COALESCE(COMPRA_GLOBAL_APPAREL, 0) + COALESCE(COMPRA_GLOBAL_BOLD, 0)) - COALESCE(notas_credito, 0) - COALESCE(productos_ofertados, 0)),
+                compra_adicional = (((COALESCE(COMPRA_GLOBAL_SCOTT, 0) + COALESCE(COMPRA_GLOBAL_APPAREL, 0) + COALESCE(COMPRA_GLOBAL_BOLD, 0)) - COALESCE(notas_credito, 0) - COALESCE(productos_ofertados, 0)) - COALESCE(COMPRA_MINIMA_ANUAL, 0))
         """)
         
-        # ------------------------------------------------------------------
-        # FASE 2: DETERMINAR PORCENTAJES
-        # ------------------------------------------------------------------
-        print("🔄 Fase 2: Porcentajes...")
         cursor.execute("""
             UPDATE tabla_retroactivos
             SET 
@@ -297,19 +234,11 @@ def sincronizar_notas_odoo():
                 END,
                 porcentaje_retroactivo_apparel = CASE
                     WHEN COALESCE(COMPRA_GLOBAL_APPAREL, 0) >= COALESCE(COMPRA_MINIMA_APPAREL, 0) AND COALESCE(COMPRA_MINIMA_APPAREL, 0) > 0 THEN
-                        CASE 
-                            WHEN CATEGORIA LIKE '%Partner Elite%' THEN 0.025
-                            WHEN CATEGORIA = 'Partner' THEN 0.015
-                            ELSE 0.00
-                        END
+                        CASE WHEN CATEGORIA LIKE '%Partner Elite%' THEN 0.025 WHEN CATEGORIA = 'Partner' THEN 0.015 ELSE 0.00 END
                     ELSE 0.00
                 END
         """)
 
-        # ------------------------------------------------------------------
-        # FASE 3: TOTALES E IMPORTES A PAGAR
-        # ------------------------------------------------------------------
-        print("🔄 Fase 3: Importe Final a Pagar...")
         cursor.execute("""
             UPDATE tabla_retroactivos
             SET
@@ -318,10 +247,9 @@ def sincronizar_notas_odoo():
         """)
 
         conexion.commit()
-        return jsonify({"mensaje": "Sincronización exitosa", "actualizados": len(datos_por_clave)}), 200
+        return jsonify({"mensaje": "Sincronización exitosa"}), 200
 
     except Exception as e:
-        print("❌ Error Sync:", str(e))
         if conexion: conexion.rollback()
         return jsonify({"error": str(e)}), 500
     finally:
@@ -330,7 +258,7 @@ def sincronizar_notas_odoo():
         if conexion: conexion.close()
 
 # ==============================================================================
-# 4. ENDPOINT GET INDIVIDUAL
+# 4. ENDPOINT GET INDIVIDUAL (Con matemáticas en Python)
 # ==============================================================================
 @retroactivos_bp.route('/retroactivo_cliente/<string:identificador>', methods=['GET'])
 def obtener_retroactivo_individual(identificador):
@@ -362,25 +290,21 @@ def obtener_retroactivo_individual(identificador):
             elif valor is None:
                 cliente_data[clave] = 0.0 if clave not in ['CLAVE','ZONA','CLIENTE','CATEGORIA','estatus','NC','FACT'] else ''
 
-        # Cálculos al Vuelo para la Interfaz Web
+        # --- MATEMÁTICAS TRASLADADAS DESDE ANGULAR HACIA PYTHON ---
         minima_anual = cliente_data['COMPRA_MINIMA_ANUAL']
-        global_scott = cliente_data['COMPRA_GLOBAL_SCOTT']
-        cliente_data['porcentaje_avance_scott'] = (global_scott / minima_anual) if minima_anual > 0 else 0.0
-
         minima_apparel = cliente_data['COMPRA_MINIMA_APPAREL']
-        global_apparel = cliente_data['COMPRA_GLOBAL_APPAREL']
-        cliente_data['porcentaje_avance_apparel'] = (global_apparel / minima_apparel) if minima_apparel > 0 else 0.0
-
-        crudo = cliente_data['COMPRAS_TOTALES_CRUDO']
-        nc = cliente_data['notas_credito']
-        garantias = cliente_data['garantias']
-        cliente_data['acumulado_global_calculado'] = crudo - nc - garantias
+        
+        cliente_data['porcentaje_avance_general'] = (cliente_data['COMPRAS_TOTALES_CRUDO'] / minima_anual) if minima_anual > 0 else 0.0
+        cliente_data['porcentaje_avance_scott'] = (cliente_data['COMPRA_GLOBAL_SCOTT'] / minima_anual) if minima_anual > 0 else 0.0
+        cliente_data['porcentaje_avance_apparel'] = (cliente_data['COMPRA_GLOBAL_APPAREL'] / minima_apparel) if minima_apparel > 0 else 0.0
+        
+        cliente_data['total_bicis_deduccion'] = cliente_data['bicicleta_demo'] + cliente_data['bicicletas_bold']
+        cliente_data['acumulado_global_calculado'] = cliente_data['COMPRAS_TOTALES_CRUDO'] - cliente_data['notas_credito'] - cliente_data['garantias']
 
         return jsonify(cliente_data), 200
 
     except Exception as e:
         print("Error al obtener cliente:", str(e))
-        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
     finally:
         if cursor: cursor.close()

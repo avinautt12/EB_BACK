@@ -446,7 +446,7 @@ def recalcular_formulas_flujo(conexion, anio, mes):
         ID_RECUPERACION = 3  # Espejo de ventas
         
         # Otros Ingresos: Deudores(4), Compra USD(5), Creditos(6), Otros(7)
-        IDS_OTROS_INGRESOS = [4, 6, 7] 
+        IDS_OTROS_INGRESOS = [6, 7] 
         
         ID_TOTAL_ENTRADAS = 8 # Suma de Saldo Inicial + Recuperacion + Otros
 
@@ -460,7 +460,7 @@ def recalcular_formulas_flujo(conexion, anio, mes):
 
         # GRUPO 2: FINANCIEROS Y OTROS
         # Incluye: Creditos Bancarios(50), Comisiones(51), Particulares(52), Devoluciones(100)
-        IDS_FINANCIEROS = [50, 51, 52, 100]
+        IDS_FINANCIEROS = [50, 52, 100]
 
         # GRUPO 3: MOVIMIENTOS / INVERSIONES
         # Incluye: Inversiones enviados a BBVA/Monex (60)
