@@ -844,7 +844,7 @@ def detalle_compras_odoo():
                 clave = prod.get('default_code') if prod else None
                 producto_nombre = prod.get('name') if prod else (l['product_id'][1] if l.get('product_id') else None)
                 cantidad = float(l.get('product_uom_qty') or 0)
-                precio = float(l.get('price_unit') or 0)
+                precio = round(float(l.get('price_unit') or 0) * 1.16, 2)
                 order_obj['lineas'].append({
                     'id': l['id'],
                     'product_id_odoo': pid,   # guardamos el ID para cruzar con moves
