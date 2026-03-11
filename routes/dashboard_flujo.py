@@ -473,10 +473,12 @@ def recalcular_formulas_flujo(conexion, anio, mes):
         # ==========================================
         
         # A. Arrastre de Saldo del mes anterior
-        sql_ant = "SELECT monto_real FROM flujo_valores_unificados WHERE id_concepto = %s AND fecha_reporte = %s"
+        sql_ant = "SELECT monto_real, monto_proyectado FROM flujo_valores_unificados WHERE id_concepto = %s AND fecha_reporte = %s"
         cursor.execute(sql_ant, (ID_SALDO_FINAL, fecha_anterior))
         res_prev = cursor.fetchone()
-        saldo_arrastre = float(res_prev['monto_real']) if res_prev else 0.0
+        
+        saldo_arrastre_real = float(res_prev['monto_real']) if res_prev else 0.0
+        saldo_arrastre_proy = float(res_prev['monto_proyectado']) if res_prev else 0.0
 
         # B. Valores actuales del mes
         sql_fetch = "SELECT id_concepto, monto_real, monto_proyectado FROM flujo_valores_unificados WHERE fecha_reporte = %s"
@@ -490,10 +492,13 @@ def recalcular_formulas_flujo(conexion, anio, mes):
 
         # C. Aplicar Arrastre (Si no es el primer mes histórico)
         if not (anio == 2026 and mes == 1):
-            val_r[ID_SALDO_INICIAL] = saldo_arrastre
-            val_p[ID_SALDO_INICIAL] = saldo_arrastre
-            actualizar_valor_bd(cursor, ID_SALDO_INICIAL, fecha_actual, saldo_arrastre, 'real')
-            actualizar_valor_bd(cursor, ID_SALDO_INICIAL, fecha_actual, saldo_arrastre, 'proyectado')
+            # Asignamos el real al real y el proyectado al proyectado
+            val_r[ID_SALDO_INICIAL] = saldo_arrastre_real
+            val_p[ID_SALDO_INICIAL] = saldo_arrastre_proy
+            
+            # Guardamos ambos arrastres en la base de datos
+            actualizar_valor_bd(cursor, ID_SALDO_INICIAL, fecha_actual, saldo_arrastre_real, 'real')
+            actualizar_valor_bd(cursor, ID_SALDO_INICIAL, fecha_actual, saldo_arrastre_proy, 'proyectado')
 
         # ==========================================
         # 3. CÁLCULOS MATEMÁTICOS
