@@ -473,12 +473,27 @@ def recalcular_formulas_flujo(conexion, anio, mes):
         # ==========================================
         
         # A. Arrastre de Saldo del mes anterior
+        hoy = datetime.now()
+        mes_anterior_terminado = False
+        
+        # Verificamos si el mes anterior (del que tomaremos el saldo) ya terminó cronológicamente
+        if anio_ant < hoy.year:
+            mes_anterior_terminado = True
+        elif anio_ant == hoy.year and mes_ant < hoy.month:
+            mes_anterior_terminado = True
+
         sql_ant = "SELECT monto_real, monto_proyectado FROM flujo_valores_unificados WHERE id_concepto = %s AND fecha_reporte = %s"
         cursor.execute(sql_ant, (ID_SALDO_FINAL, fecha_anterior))
         res_prev = cursor.fetchone()
         
-        saldo_arrastre_real = float(res_prev['monto_real']) if res_prev else 0.0
-        saldo_arrastre_proy = float(res_prev['monto_proyectado']) if res_prev else 0.0
+        saldo_arrastre = 0.0
+        if res_prev:
+            if mes_anterior_terminado:
+                # REGLA 1: Si el mes ya acabó, mandan los números REALES.
+                saldo_arrastre = float(res_prev['monto_real'] or 0)
+            else:
+                # REGLA 2: Si el mes sigue en curso o es del futuro, manda la PROYECCIÓN.
+                saldo_arrastre = float(res_prev['monto_proyectado'] or 0)
 
         # B. Valores actuales del mes
         sql_fetch = "SELECT id_concepto, monto_real, monto_proyectado FROM flujo_valores_unificados WHERE fecha_reporte = %s"
@@ -492,13 +507,12 @@ def recalcular_formulas_flujo(conexion, anio, mes):
 
         # C. Aplicar Arrastre (Si no es el primer mes histórico)
         if not (anio == 2026 and mes == 1):
-            # Asignamos el real al real y el proyectado al proyectado
-            val_r[ID_SALDO_INICIAL] = saldo_arrastre_real
-            val_p[ID_SALDO_INICIAL] = saldo_arrastre_proy
+            # Inyectamos el mismo saldo calculado a ambas columnas (Real y Proyectado) del mes actual
+            val_r[ID_SALDO_INICIAL] = saldo_arrastre
+            val_p[ID_SALDO_INICIAL] = saldo_arrastre
             
-            # Guardamos ambos arrastres en la base de datos
-            actualizar_valor_bd(cursor, ID_SALDO_INICIAL, fecha_actual, saldo_arrastre_real, 'real')
-            actualizar_valor_bd(cursor, ID_SALDO_INICIAL, fecha_actual, saldo_arrastre_proy, 'proyectado')
+            actualizar_valor_bd(cursor, ID_SALDO_INICIAL, fecha_actual, saldo_arrastre, 'real')
+            actualizar_valor_bd(cursor, ID_SALDO_INICIAL, fecha_actual, saldo_arrastre, 'proyectado')
 
         # ==========================================
         # 3. CÁLCULOS MATEMÁTICOS
