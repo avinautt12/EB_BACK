@@ -435,7 +435,7 @@ def recalcular_formulas_flujo(conexion, anio, mes):
 
     try:
         # ==========================================
-        # 1. DEFINICIÓN DE GRUPOS (ACTUALIZADO SEGÚN FIX_TOTALES)
+        # 1. DEFINICIÓN DE GRUPOS 
         # ==========================================
         
         # --- CONCEPTOS DE SALDO Y ENTRADAS ---
@@ -445,37 +445,37 @@ def recalcular_formulas_flujo(conexion, anio, mes):
         ID_VENTAS = 2
         ID_RECUPERACION = 3  # Espejo de ventas
         
-        # Otros Ingresos: Deudores(4), Compra USD(5), Creditos(6), Otros(7)
+        # Otros Ingresos
         IDS_OTROS_INGRESOS = [6, 7, 101, 102, 103]
         
         ID_TOTAL_ENTRADAS = 8 # Suma de Saldo Inicial + Recuperacion + Otros
 
-        # --- CONCEPTOS DE SALIDAS (AGRUPACIÓN CORRECTA) ---
+        # --- CONCEPTOS DE SALIDAS (LÓGICA DINÁMICA) ---
         
-        # GRUPO 1: GASTOS OPERATIVOS (ID 49)
-        # Incluye: Proveedores (20-23), Importaciones(24), Anticipos(25),
-        # Gastos Fijos(40), Nomina(41), PTU(42), Impuestos(43)
-        IDS_PARA_GASTOS_OPERATIVOS = [20, 24, 25, 40, 41, 42, 43]
+        # 🚨 SEPARAMOS LOS GASTOS PARA LA NUEVA REGLA
+        # Base (Siempre se suman): Importaciones(24), Anticipos(25), Fijos(40), Nomina(41), PTU(42), Impuestos(43)
+        IDS_OPERATIVOS_BASE = [24, 25, 40, 41, 42, 43]
+        
+        # Los que cambian según la columna:
+        ID_COMPRA_DIVISAS = 20
+        IDS_PROVEEDORES = [21, 22, 23] 
+        
         ID_RESUMEN_GASTOS_OP = 49
 
         # GRUPO 2: FINANCIEROS Y OTROS
-        # Incluye: Creditos Bancarios(50), Comisiones(51), Particulares(52), Devoluciones(100)
         IDS_FINANCIEROS = [50, 52, 100]
 
         # GRUPO 3: MOVIMIENTOS / INVERSIONES
-        # Incluye: Inversiones enviados a BBVA/Monex (60)
         IDS_MOVIMIENTOS = [60]
         
         ID_TOTAL_SALIDAS = 90 # Suma de todo lo anterior
 
         # ==========================================
-        # 2. CARGA DE DATOS
+        # 2. CARGA DE DATOS Y ARRASTRE
         # ==========================================
-        
         hoy = datetime.now()
         mes_anterior_terminado = False
         
-        # Verificamos si el mes anterior (del que tomaremos el saldo) ya terminó cronológicamente
         if anio_ant < hoy.year:
             mes_anterior_terminado = True
         elif anio_ant == hoy.year and mes_ant < hoy.month:
@@ -485,16 +485,18 @@ def recalcular_formulas_flujo(conexion, anio, mes):
         cursor.execute(sql_ant, (ID_SALDO_FINAL, fecha_anterior))
         res_prev = cursor.fetchone()
         
-        saldo_arrastre = 0.0
+        saldo_arrastre_real = 0.0
+        saldo_arrastre_proyectado = 0.0
+        
         if res_prev:
             if mes_anterior_terminado:
-                # REGLA 1: Si el mes ya acabó, mandan los números REALES.
-                saldo_arrastre = float(res_prev['monto_real'] or 0)
+                saldo_arrastre_real = float(res_prev['monto_real'] or 0)
+                saldo_arrastre_proyectado = float(res_prev['monto_real'] or 0)
             else:
-                # REGLA 2: Si el mes sigue en curso o es del futuro, manda la PROYECCIÓN.
-                saldo_arrastre = float(res_prev['monto_proyectado'] or 0)
+                saldo_arrastre_real = float(res_prev['monto_real'] or 0)
+                saldo_arrastre_proyectado = float(res_prev['monto_proyectado'] or 0)
 
-        # B. Valores actuales del mes
+        # Valores actuales del mes
         sql_fetch = "SELECT id_concepto, monto_real, monto_proyectado FROM flujo_valores_unificados WHERE fecha_reporte = %s"
         cursor.execute(sql_fetch, (fecha_actual,))
         rows = cursor.fetchall()
@@ -504,14 +506,13 @@ def recalcular_formulas_flujo(conexion, anio, mes):
             val_r[r['id_concepto']] = float(r['monto_real'] or 0)
             val_p[r['id_concepto']] = float(r['monto_proyectado'] or 0)
 
-        # C. Aplicar Arrastre (Si no es el primer mes histórico)
+        # Aplicar Arrastre
         if not (anio == 2026 and mes == 1):
-            # Inyectamos el mismo saldo calculado a ambas columnas (Real y Proyectado) del mes actual
-            val_r[ID_SALDO_INICIAL] = saldo_arrastre
-            val_p[ID_SALDO_INICIAL] = saldo_arrastre
+            val_r[ID_SALDO_INICIAL] = saldo_arrastre_real
+            val_p[ID_SALDO_INICIAL] = saldo_arrastre_proyectado
             
-            actualizar_valor_bd(cursor, ID_SALDO_INICIAL, fecha_actual, saldo_arrastre, 'real')
-            actualizar_valor_bd(cursor, ID_SALDO_INICIAL, fecha_actual, saldo_arrastre, 'proyectado')
+            actualizar_valor_bd(cursor, ID_SALDO_INICIAL, fecha_actual, saldo_arrastre_real, 'real')
+            actualizar_valor_bd(cursor, ID_SALDO_INICIAL, fecha_actual, saldo_arrastre_proyectado, 'proyectado')
 
         # ==========================================
         # 3. CÁLCULOS MATEMÁTICOS
@@ -520,11 +521,9 @@ def recalcular_formulas_flujo(conexion, anio, mes):
             v_map = val_r if tipo == 'real' else val_p
             
             # --- A. INGRESOS ---
-            # 1. Total Recuperacion (Es espejo de Ventas ID 2)
             actualizar_valor_bd(cursor, ID_RECUPERACION, fecha_actual, v_map[ID_VENTAS], tipo)
             v_map[ID_RECUPERACION] = v_map[ID_VENTAS]
             
-            # 2. Total Entradas (Saldo Inicial + Recuperacion + Otros)
             s_otros = sum(v_map[i] for i in IDS_OTROS_INGRESOS)
             total_entradas = v_map[ID_SALDO_INICIAL] + v_map[ID_RECUPERACION] + s_otros
             
@@ -533,24 +532,28 @@ def recalcular_formulas_flujo(conexion, anio, mes):
             
             # --- B. SALIDAS ---
             
-            # 1. Calcular TOTAL GASTOS OPERATIVOS (ID 49)
-            # Suma de Proveedores + Nomina + Impuestos + Gastos Fijos
-            suma_operativos = sum(v_map[i] for i in IDS_PARA_GASTOS_OPERATIVOS)
+            # 🚀 AQUÍ APLICAMOS LA NUEVA REGLA MATEMÁTICA
+            if tipo == 'proyectado':
+                # Proyectado: Toma la base + PROVEEDORES (21, 22, 23). IGNORA Divisas (20).
+                ids_gastos_operativos = IDS_OPERATIVOS_BASE + IDS_PROVEEDORES
+            else:
+                # Real: Toma la base + COMPRA DE DIVISAS (20). IGNORA Proveedores (21, 22, 23).
+                ids_gastos_operativos = IDS_OPERATIVOS_BASE + [ID_COMPRA_DIVISAS]
+
+            # Hacemos la suma con la lista que haya ganado el IF
+            suma_operativos = sum(v_map[i] for i in ids_gastos_operativos)
+            
             actualizar_valor_bd(cursor, ID_RESUMEN_GASTOS_OP, fecha_actual, suma_operativos, tipo)
             v_map[ID_RESUMEN_GASTOS_OP] = suma_operativos
 
-            # 2. Calcular Financieros y Movimientos
             suma_financieros = sum(v_map[i] for i in IDS_FINANCIEROS)
             suma_movimientos = sum(v_map[i] for i in IDS_MOVIMIENTOS)
             
-            # 3. Calcular TOTAL SALIDAS (ID 90)
-            # Suma de (Gastos Operativos) + (Financieros) + (Movimientos)
             gran_total_salidas = suma_operativos + suma_financieros + suma_movimientos
             actualizar_valor_bd(cursor, ID_TOTAL_SALIDAS, fecha_actual, gran_total_salidas, tipo)
             v_map[ID_TOTAL_SALIDAS] = gran_total_salidas
             
             # --- C. SALDO FINAL (ID 99) ---
-            # Disponible = Total Entradas - Total Salidas
             disponible_final = total_entradas - gran_total_salidas
             actualizar_valor_bd(cursor, ID_SALDO_FINAL, fecha_actual, disponible_final, tipo)
 
