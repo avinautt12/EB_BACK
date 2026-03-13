@@ -499,6 +499,46 @@ def detalle_compras_odoo():
     if not cliente and not grupo_odoo:
         return jsonify({'error': 'Se requiere parámetro cliente o grupo'}), 400
 
+    # ── Fecha de inicio de temporada por cliente / grupo ──────────────────────
+    # En lugar del hard-code '2025-07-01' usamos f_inicio de la tabla clientes,
+    # lo que permite incluir pedidos de clientes con temporada anticipada.
+    FECHA_INICIO_DEFAULT = '2025-07-01'
+    fecha_inicio_temporada = FECHA_INICIO_DEFAULT
+    try:
+        _conn_fi = obtener_conexion()
+        _cur_fi = _conn_fi.cursor(dictionary=True)
+        if grupo_odoo:
+            _cur_fi.execute(
+                "SELECT MIN(f_inicio) AS fi FROM clientes "
+                "WHERE id_grupo = %s AND f_inicio IS NOT NULL",
+                (grupo_odoo,)
+            )
+            _row_fi = _cur_fi.fetchone()
+            if _row_fi and _row_fi.get('fi'):
+                fecha_inicio_temporada = str(_row_fi['fi'])
+        elif cliente:
+            # Primero buscar por clave exacta, luego por nombre LIKE
+            _cur_fi.execute(
+                "SELECT f_inicio FROM clientes WHERE clave = %s",
+                (cliente,)
+            )
+            _row_fi = _cur_fi.fetchone()
+            if _row_fi and _row_fi.get('f_inicio'):
+                fecha_inicio_temporada = str(_row_fi['f_inicio'])
+            else:
+                _cur_fi.execute(
+                    "SELECT MIN(f_inicio) AS fi FROM clientes "
+                    "WHERE nombre_cliente LIKE %s AND f_inicio IS NOT NULL",
+                    (f'%{cliente}%',)
+                )
+                _row_fi = _cur_fi.fetchone()
+                if _row_fi and _row_fi.get('fi'):
+                    fecha_inicio_temporada = str(_row_fi['fi'])
+        _cur_fi.close()
+        _conn_fi.close()
+    except Exception:
+        fecha_inicio_temporada = FECHA_INICIO_DEFAULT
+
     uid, models, odoo_err = get_odoo_models()
     if not uid or not models:
         logging.error('detalle_compras_odoo: no se pudo conectar a Odoo')
@@ -590,17 +630,20 @@ def detalle_compras_odoo():
         all_partner_ids = set()
         for p in partners:
             all_partner_ids.add(p['id'])
-            if not (grupo_odoo or ref_exacta):
+            # Expandir child_ids siempre que NO sea búsqueda por grupo_odoo.
+            # En grupo_odoo los hijos podrían pertenecer a otras empresas del grupo.
+            # En ref_exacta individual o Mis Pedidos, los hijos son del mismo cliente.
+            if not grupo_odoo:
                 for child_id in (p.get('child_ids') or []):
                     all_partner_ids.add(child_id)
         partner_ids = list(all_partner_ids)
 
-        # ── 2) Traer órdenes de venta desde 2025-07-01 (incluyendo campo state) ────────
+        # ── 2) Traer órdenes de venta desde la fecha de inicio de temporada del cliente ──
         try:
             orders = models.execute_kw(
                 ODOO_DB, uid, ODOO_PASSWORD,
                 'sale.order', 'search_read',
-                [[['partner_id', 'in', partner_ids], ['date_order', '>=', '2025-07-01']]],
+                [[['partner_id', 'in', partner_ids], ['date_order', '>=', fecha_inicio_temporada]]],
                 {'fields': ['id', 'name', 'date_order', 'partner_id', 'order_line', 'amount_total', 'state'],
                  'order': 'date_order desc', 'limit': 0}
             )
@@ -622,7 +665,7 @@ def detalle_compras_odoo():
                     ODOO_DB, uid, ODOO_PASSWORD,
                     'sale.order.line', 'search_read',
                     [[['id', 'in', all_line_ids]]],
-                    {'fields': ['id', 'order_id', 'product_id', 'name', 'product_uom_qty', 'qty_delivered', 'price_unit'], 'limit': 0}
+                    {'fields': ['id', 'order_id', 'product_id', 'name', 'product_uom_qty', 'qty_delivered', 'price_unit', 'discount', 'price_total', 'price_subtotal'], 'limit': 0}
                 )
                 for l in all_lines:
                     lines_map[l['id']] = l
@@ -658,7 +701,7 @@ def detalle_compras_odoo():
                 ODOO_DB, uid, ODOO_PASSWORD,
                 'account.move', 'search_read',
                 [[['origin', 'in', order_names], ['move_type', '=', 'out_invoice']]],
-                {'fields': ['id', 'name', 'invoice_date', 'origin'], 'limit': 0}
+                {'fields': ['id', 'name', 'invoice_date', 'origin', 'state', 'amount_total'], 'limit': 0}
             )
             for m in inv_rows:
                 invoices_map_by_origin.setdefault(m.get('origin'), []).append(m)
@@ -844,7 +887,16 @@ def detalle_compras_odoo():
                 clave = prod.get('default_code') if prod else None
                 producto_nombre = prod.get('name') if prod else (l['product_id'][1] if l.get('product_id') else None)
                 cantidad = float(l.get('product_uom_qty') or 0)
-                precio = round(float(l.get('price_unit') or 0) * 1.16, 2)
+                qty_entregada = float(l.get('qty_delivered') or 0)
+                # Usar price_total de Odoo (incluye el IVA real de cada producto)
+                # evitando el multiplicador fijo 1.16 que no aplica a todos los productos.
+                price_total_odoo = float(l.get('price_total') or 0)
+                if price_total_odoo <= 0 and cantidad > 0:
+                    # Fallback al cálculo manual si Odoo no devuelve price_total
+                    descuento = float(l.get('discount') or 0)
+                    price_total_odoo = round(float(l.get('price_unit') or 0) * (1 - descuento / 100) * 1.16 * cantidad, 2)
+                precio = round(price_total_odoo / cantidad, 4) if cantidad > 0 else 0
+                total_entregado_linea = round((qty_entregada / cantidad) * price_total_odoo, 2) if cantidad > 0 else 0
                 order_obj['lineas'].append({
                     'id': l['id'],
                     'product_id_odoo': pid,   # guardamos el ID para cruzar con moves
@@ -852,9 +904,10 @@ def detalle_compras_odoo():
                     'clave_producto': clave,
                     'descripcion': l.get('name'),
                     'cantidad_pedida': cantidad,
-                    'cantidad_entregada': float(l.get('qty_delivered') or 0),
+                    'cantidad_entregada': qty_entregada,
                     'precio_unitario': precio,
-                    'total_linea': round(cantidad * precio, 2)
+                    'total_linea': round(price_total_odoo, 2),
+                    'total_entregado_linea': total_entregado_linea
                 })
 
             # Pickings (todos leídos en batch, solo se indexan aquí)
@@ -897,7 +950,7 @@ def detalle_compras_odoo():
             order_name = o.get('name')
 
             for lin in order_obj['lineas']:
-                # Estatus individual por producto cruzando con los moves de los pickings
+                # ── Estatus por picking (cruce con moves)
                 estatus_out_lin = estatus_por_producto(order_name, lin.get('product_id_odoo'))
                 # Fallback: si no hay moves en pickings outgoing, usar el primer picking outgoing de la orden
                 if estatus_out_lin is None:
@@ -906,6 +959,24 @@ def detalle_compras_odoo():
                         estatus_out_lin = pickings_out[0]['estado']
                     elif order_obj['pickings']:
                         estatus_out_lin = order_obj['pickings'][0]['estado']
+
+                # ── Override con qty_delivered de Odoo (campo autoritativo)
+                # qty_delivered es el campo que Odoo calcula directamente;
+                # evita que movimientos multi-paso pasen desapercibidos.
+                qty_ped = lin.get('cantidad_pedida', 0)
+                qty_del = lin.get('cantidad_entregada', 0)
+                if qty_ped > 0 and estatus_out_lin != 'Cancelado':
+                    if qty_del >= qty_ped:
+                        estatus_out_lin = 'Entregado'
+                    elif qty_del > 0 and estatus_out_lin not in ('Entregado',):
+                        estatus_out_lin = 'Entregado Parcial'
+
+                # ── Override adicional: si el pedido tiene factura posted → entregado+facturado
+                facturas_orden = invoices_map_by_origin.get(order_name, [])
+                if facturas_orden and any(f.get('state') == 'posted' for f in facturas_orden):
+                    if estatus_out_lin not in ('Cancelado', 'Entregado Parcial', 'Entregado'):
+                        estatus_out_lin = 'Entregado'
+
                 filas_planas.append({
                     'numero_factura': factura_nombre or order_name,
                     'clave_producto': lin.get('clave_producto'),
@@ -916,6 +987,7 @@ def detalle_compras_odoo():
                     'cantidad': lin.get('cantidad_pedida'),
                     'cantidad_entregada': lin.get('cantidad_entregada', 0),
                     'total': lin.get('total_linea'),
+                    'total_entregado': lin.get('total_entregado_linea', 0),
                     'orden': order_name,
                     'estado_orden': estado_orden,
                     'estado_orden_raw': estado_orden_raw,
@@ -926,7 +998,37 @@ def detalle_compras_odoo():
 
             resultado.append(order_obj)
 
-        # Filtro opcional por estado de picking
+        # ── 12) Leer acumulado_anticipado desde previo ────────────────────────────
+        # Campo exacto que muestra la carátula como "Entregado".
+        # Para grupos usa la fila resumen ("Integral N", es_integral=1).
+        # Para clientes individuales usa la fila con su clave.
+        avance_previo = None
+        try:
+            _conn_ap = obtener_conexion()
+            _cur_ap = _conn_ap.cursor(dictionary=True)
+            if grupo_odoo:
+                # La fila resumen del integral tiene clave = "Integral {id}"
+                _cur_ap.execute(
+                    "SELECT acumulado_anticipado AS total FROM previo "
+                    "WHERE clave = %s LIMIT 1",
+                    (f"Integral {grupo_odoo}",)
+                )
+            else:
+                _cur_ap.execute(
+                    "SELECT acumulado_anticipado AS total FROM previo "
+                    "WHERE clave = %s AND (es_integral = 0 OR es_integral IS NULL) LIMIT 1",
+                    (cliente,)
+                )
+            _row_ap = _cur_ap.fetchone()
+            if _row_ap and _row_ap.get('total') is not None:
+                avance_previo = float(_row_ap['total'])
+            _cur_ap.close()
+            _conn_ap.close()
+        except Exception as _ex_ap:
+            logging.warning('detalle_compras_odoo: error al leer acumulado_anticipado: %s', _ex_ap)
+            avance_previo = None
+
+        # ── Filtro opcional por estado de picking
         if estado_filtro:
             filas_planas = [f for f in filas_planas if f.get('estatus_out') == estado_filtro]
 
@@ -936,7 +1038,14 @@ def detalle_compras_odoo():
         return jsonify({
             'data': resultado,
             'rows': filas_pag,
-            'meta': {'total': total, 'limit': limit, 'offset': offset, 'returned': len(filas_pag)}
+            'meta': {
+                'total': total,
+                'limit': limit,
+                'offset': offset,
+                'returned': len(filas_pag),
+                'fecha_inicio_temporada': fecha_inicio_temporada,
+                'avance_previo': avance_previo
+            }
         }), 200
 
     except Exception as e:

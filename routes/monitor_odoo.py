@@ -7,7 +7,9 @@ from datetime import datetime
 from models.monitor_odoo_model import obtener_todos_los_registros
 import re
 from zoneinfo import ZoneInfo
-import time # Importar librería de tiempo
+import time
+import logging
+from utils.odoo_utils import get_odoo_models, ODOO_DB, ODOO_PASSWORD
 
 monitor_odoo_bp = Blueprint('monitor_odoo', __name__, url_prefix='')
 
@@ -419,6 +421,429 @@ def importar_facturas():
             'success': False,
             'error': f'Ocurrió un error durante la importación: {str(e)}'
         }), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Funciones auxiliares compartidas por sync y recalcular
+# ─────────────────────────────────────────────────────────────────────────────
+
+MULTIMARCAS_GROUPS_SHARED = {
+    'A': {
+        'DOMESTIQUE 310188', 'WE SPORTS GROUP', 'HUMBERTO GONZALO GUERRA FLORES',
+        'ADRIAN ELIAS BONILLAS', 'ANGELA KARINA VILLEGAS CERVANTES',
+        'BLANCA ESTELA CHAVEZ VELAZQUEZ', 'COMERCIALIZADORA MEFRUP BIKE',
+        'ALDO CARLOS MALDONADO MONTOYA', 'RC PARTNERS',
+        'HUGO ENRIQUE MONDRAGON VERGARA', 'LAURA CRISTINA GUTIERREZ CRUZ',
+        'LUIS FERNANDO DE VILLACAÑA LEMUS', 'GUILLERMO FERNANDEZ GARDUÑO',
+        'FRANCISCO ALBERTO FERNANDO LUARCA JARQUIN',
+        'ALAN FERNANDO RINCON MALDONADO', 'HECTOR ENRIQUE SANCHEZ GALLO',
+        'SANDRA REYES SANCHEZ', 'MARIANO VERDUZCO MENDEZ',
+        'EDUARDO DANIEL CRUZ AZCOITIA', 'CESAR MARTINEZ MARTINEZ',
+        'LUIS AUGUSTO BAAS DZIB', 'SERGIO ORTEGA OLVERA',
+        'MELQUIADES GRANDE GARCIA', 'JORGE ALBERTO ORTIZ CUERVO',
+    },
+    'B': {
+        'TOMAS LUNA CHAVEZ', 'DAVID ESCUDERO CHAVEZ', 'AARON HOSAI TORRES ESTRADA',
+        'CARLOS ALBERTO TORRES ALANIS', 'MAURICIO OLIVEROS TORRES',
+        'FERNANDO JAVIER RUIZ GONZALEZ', 'PATRICIA DEL VIVAR MONTIEL',
+        'COMERCIALIZADORA CONAGUINET', 'EDUARDO NOEL RODRIGUEZ BRAY',
+        'OSCAR MAURICIO CUEVAS TELLEZ', 'GEORGINA ZAMUDIO PANTOJA',
+        'AURORA JAASIEL YEBRA SANCHEZ', 'EDNA GRACIELA PEÑA ZARATE',
+        'CICLISTAS DE SANTA FE', 'MARCOS ANTONIO CRUZ LOPEZ',
+        'ARMANDO MARIN MUÑOZ', 'RODOLFO MARTINEZ ARIETA',
+        'HECTOR GERARDO ROSAS GONZALEZ', 'EMMANUEL HERRERA FOSTER Y NOPHAL',
+        'GUILLERMO FERNANDEZ GARDUÑO', 'JOSE EDUARDO LOPEZ BAUTISTA',
+        'JAVIER RIVERA SPECIA', 'RICARDO VALENZUELA RODRIGUEZ',
+        'REINHARD STEGE RENK', 'EDGAR ENRIQUE OSEGUERA ESPERON',
+        'KASAT SERVICIOS INDUSTRIALES Y DE CONSTRUCCION',
+    }
+}
+
+
+def _normalizar_nombre_shared(nombre):
+    if not nombre:
+        return ""
+    nombre = str(nombre).strip().upper()
+    reemplazos = {
+        'S. A. DE C. V.': 'SA DE CV', 'S.A. DE C.V.': 'SA DE CV',
+        'S. DE R. L. DE C. V.': 'S DE RL DE CV', 'SAPI DE C. V.': 'SAPI DE CV',
+        '&': 'Y', ',': '', '.': '', '-': ' ', '  ': ' ',
+    }
+    for k, v in reemplazos.items():
+        nombre = nombre.replace(k, v)
+    nombre = ''.join(c if c.isalnum() or c.isspace() else ' ' for c in nombre)
+    return ' '.join(nombre.split())
+
+
+def _normalizar_categoria_shared(categoria):
+    if not categoria:
+        return None
+    categoria = str(categoria).strip()
+    categoria = re.sub(r'/(?=\S)', '/ ', categoria)
+    categoria = re.sub(r'\s+', ' ', categoria)
+    return categoria
+
+
+def _construir_buscar_evac(clientes_db):
+    """Devuelve la función buscar_evac con el contexto de clientes precargado."""
+    clientes_por_clave = {str(c['clave']).strip().upper(): c for c in clientes_db}
+    clientes_por_nombre = {}
+    for cliente in clientes_db:
+        nom = _normalizar_nombre_shared(cliente['nombre_cliente'])
+        if nom and nom not in clientes_por_nombre:
+            clientes_por_nombre[nom] = cliente
+        nom_sin = nom.replace(' ', '')
+        if nom_sin and nom_sin not in clientes_por_nombre:
+            clientes_por_nombre[nom_sin] = cliente
+
+    def buscar_evac(contacto_referencia, contacto_nombre):
+        if contacto_nombre:
+            nom = _normalizar_nombre_shared(contacto_nombre)
+            if nom in MULTIMARCAS_GROUPS_SHARED['A']:
+                return "A Multimarcas"
+            if nom in MULTIMARCAS_GROUPS_SHARED['B']:
+                return "B Multimarcas"
+        if contacto_referencia:
+            clave = str(contacto_referencia).strip().upper()
+            if clave in clientes_por_clave:
+                return clientes_por_clave[clave]['evac']
+        if contacto_nombre:
+            nom = _normalizar_nombre_shared(contacto_nombre)
+            if nom in clientes_por_nombre:
+                return clientes_por_nombre[nom]['evac']
+            nom_sin = nom.replace(' ', '')
+            if nom_sin in clientes_por_nombre:
+                return clientes_por_nombre[nom_sin]['evac']
+            palabras = set(nom.split())
+            for nom_db, cli in clientes_por_nombre.items():
+                if len(palabras & set(nom_db.split())) >= 2:
+                    return cli['evac']
+        return None
+
+    return buscar_evac
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Endpoint: Sincronizar monitor directamente desde Odoo (sin Excel)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@monitor_odoo_bp.route('/sync-monitor-odoo', methods=['POST'])
+def sync_monitor_odoo():
+    """
+    Reemplaza el flujo manual de exportar Excel desde Odoo y subirlo.
+    Consulta account.move (facturas posted) + líneas + productos + categorías
+    + partners en batch, aplica la misma lógica que importar_facturas y
+    actualiza la tabla monitor.
+
+    Acepta parámetro JSON opcional: { "recalcular_previo": true }
+    para también recalcular acumulado_anticipado en previo.
+    """
+    FECHA_INICIO = '2025-06-10'
+    body = request.get_json(silent=True) or {}
+    recalcular_previo = body.get('recalcular_previo', False)
+
+    conexion = None
+    cursor = None
+    try:
+        uid, models, odoo_err = get_odoo_models()
+        if not uid or not models:
+            return jsonify({'success': False, 'error': f'No se pudo conectar a Odoo: {odoo_err}'}), 500
+
+        # ── 1. Facturas posted desde la temporada ─────────────────────────────
+        facturas = models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD,
+            'account.move', 'search_read',
+            [[
+                ['move_type', '=', 'out_invoice'],
+                ['state', '=', 'posted'],
+                ['invoice_date', '>=', FECHA_INICIO],
+            ]],
+            {'fields': ['id', 'name', 'invoice_date', 'partner_id', 'invoice_line_ids'], 'limit': 0}
+        )
+
+        if not facturas:
+            return jsonify({'success': True, 'message': 'No hay facturas en el periodo', 'count': 0})
+
+        # ── 2. Mapear contexto por línea ──────────────────────────────────────
+        all_line_ids = []
+        line_context = {}
+        for f in facturas:
+            for lid in (f.get('invoice_line_ids') or []):
+                all_line_ids.append(lid)
+                line_context[lid] = {
+                    'invoice_name': f['name'],
+                    'invoice_date': f['invoice_date'],
+                    'partner_id': f['partner_id'][0] if f.get('partner_id') else None,
+                }
+
+        if not all_line_ids:
+            return jsonify({'success': True, 'message': 'No hay líneas de factura', 'count': 0})
+
+        # ── 3. Líneas en batch ────────────────────────────────────────────────
+        lines_raw = models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD,
+            'account.move.line', 'read',
+            [all_line_ids],
+            {'fields': ['id', 'product_id', 'price_unit', 'quantity', 'display_type']}
+        )
+        # Solo líneas de producto (sin secciones/notas)
+        lines = [l for l in lines_raw if l.get('product_id') and not l.get('display_type')]
+
+        # ── 4. Productos en batch ─────────────────────────────────────────────
+        product_ids = list({l['product_id'][0] for l in lines})
+        products_raw = models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD,
+            'product.product', 'read',
+            [product_ids],
+            {'fields': ['id', 'default_code', 'name', 'categ_id']}
+        )
+        products_map = {p['id']: p for p in products_raw}
+
+        # ── 5. Categorías en batch ────────────────────────────────────────────
+        categ_ids = list({p['categ_id'][0] for p in products_raw if p.get('categ_id')})
+        categs_raw = models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD,
+            'product.category', 'read',
+            [categ_ids],
+            {'fields': ['id', 'complete_name']}
+        )
+        # complete_name puede venir como "All / SCOTT / BICICLETA / ..." — quitamos el prefijo
+        categs_map = {}
+        for c in categs_raw:
+            nombre = c['complete_name'] or ''
+            if nombre.startswith('All / '):
+                nombre = nombre[6:]
+            elif nombre.startswith('All/'):
+                nombre = nombre[4:]
+            categs_map[c['id']] = nombre.strip()
+
+        # ── 6. Partners en batch ──────────────────────────────────────────────
+        partner_ids = list({ctx['partner_id'] for ctx in line_context.values() if ctx['partner_id']})
+        partners_raw = models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD,
+            'res.partner', 'read',
+            [partner_ids],
+            {'fields': ['id', 'ref', 'name']}
+        )
+        partners_map = {p['id']: p for p in partners_raw}
+
+        # ── 7. Preparar lógica EVAC ───────────────────────────────────────────
+        conexion = obtener_conexion()
+        cursor = conexion.cursor(dictionary=True)
+        cursor.execute("SELECT clave, nombre_cliente, evac FROM clientes")
+        buscar_evac = _construir_buscar_evac(cursor.fetchall())
+
+        # ── 8. Truncar e insertar ─────────────────────────────────────────────
+        cursor.execute("TRUNCATE TABLE monitor")
+        total_insertados = 0
+
+        for line in lines:
+            ctx = line_context.get(line['id'])
+            if not ctx:
+                continue
+
+            fecha_str = ctx['invoice_date']
+            if not fecha_str or str(fecha_str) < FECHA_INICIO:
+                continue
+
+            prod = products_map.get(line['product_id'][0])
+            if not prod:
+                continue
+
+            categ_id = prod['categ_id'][0] if prod.get('categ_id') else None
+            categoria = _normalizar_categoria_shared(categs_map.get(categ_id, '') if categ_id else '')
+
+            if not categoria or 'SERVICIOS' in categoria.upper():
+                continue
+
+            code = (prod.get('default_code') or '').strip().upper()
+            name_prod = (prod.get('name') or '').strip().lower()
+            if code.startswith('FLE') or 'standard delivery' in name_prod or 'descuento' in name_prod:
+                continue
+
+            partner = partners_map.get(ctx['partner_id'], {})
+            contacto_referencia = (partner.get('ref') or '').strip().upper()
+            contacto_nombre = (partner.get('name') or '').strip()
+
+            precio = float(line.get('price_unit') or 0)
+            cantidad = int(float(line.get('quantity') or 0))
+            venta_total = round(precio * cantidad * 1.16, 2)
+
+            partes = [p.strip() for p in categoria.split('/')]
+            marca = partes[0] if partes else None
+            subcategoria = partes[1] if len(partes) > 1 else None
+            apparel = 'SI' if subcategoria and subcategoria.upper() == 'APPAREL' else 'NO'
+            eride = 'SI' if 'ERIDE' in categoria.upper() else 'NO'
+
+            evac = buscar_evac(contacto_referencia, contacto_nombre)
+
+            cursor.execute("""
+                INSERT INTO monitor (
+                    numero_factura, referencia_interna, nombre_producto,
+                    contacto_referencia, contacto_nombre, fecha_factura,
+                    precio_unitario, cantidad, venta_total,
+                    marca, subcategoria, apparel, eride, evac,
+                    categoria_producto, estado_factura
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                ctx['invoice_name'],
+                code or prod.get('name', ''),
+                prod.get('name', ''),
+                contacto_referencia,
+                contacto_nombre,
+                str(fecha_str),
+                precio,
+                cantidad,
+                venta_total,
+                marca,
+                subcategoria,
+                apparel,
+                eride,
+                evac,
+                categoria,
+                'posted',
+            ))
+            total_insertados += 1
+
+        conexion.commit()
+
+        # ── 9. Timestamp ──────────────────────────────────────────────────────
+        try:
+            zona_mx = ZoneInfo("America/Mexico_City")
+            cursor.execute(
+                "INSERT INTO historial_actualizaciones (fecha_actualizacion) VALUES (%s)",
+                (datetime.now(zona_mx),)
+            )
+            conexion.commit()
+        except Exception as _e:
+            logging.warning('sync_monitor_odoo: no se pudo guardar timestamp: %s', _e)
+
+        result = {
+            'success': True,
+            'message': f'Se sincronizaron {total_insertados} registros desde Odoo',
+            'count': total_insertados,
+        }
+
+        # ── 10. Recalcular previo si se solicitó ──────────────────────────────
+        if recalcular_previo:
+            recalc = _recalcular_acumulados_previo(conexion, cursor)
+            result['previo_actualizado'] = recalc
+
+        return jsonify(result)
+
+    except Exception as e:
+        logging.exception('sync_monitor_odoo: error inesperado')
+        if conexion:
+            try:
+                conexion.rollback()
+            except Exception:
+                pass
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Endpoint: Recalcular acumulados en previo desde monitor (puede llamarse solo)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _recalcular_acumulados_previo(conexion, cursor):
+    """
+    Lee la tabla monitor agrupada por contacto_referencia y actualiza en previo:
+      - acumulado_anticipado  (total general)
+      - acumulado_syncros     (marca = SYNCROS)
+      - acumulado_apparel     (apparel = SI)
+      - acumulado_vittoria    (marca = VITTORIA)
+      - acumulado_bold        (marca = BOLD)
+    Para filas integrales suma los montos de todos los miembros del grupo.
+    Retorna el número de filas actualizadas.
+    """
+    # Totales por clave desde monitor
+    cursor.execute("""
+        SELECT
+            contacto_referencia AS clave,
+            SUM(venta_total)                                          AS total,
+            SUM(CASE WHEN marca = 'SYNCROS'  THEN venta_total ELSE 0 END) AS syncros,
+            SUM(CASE WHEN apparel = 'SI'     THEN venta_total ELSE 0 END) AS apparel,
+            SUM(CASE WHEN marca = 'VITTORIA' THEN venta_total ELSE 0 END) AS vittoria,
+            SUM(CASE WHEN marca = 'BOLD'     THEN venta_total ELSE 0 END) AS bold
+        FROM monitor
+        WHERE contacto_referencia IS NOT NULL AND contacto_referencia != ''
+        GROUP BY contacto_referencia
+    """)
+    totales = {row['clave']: row for row in cursor.fetchall()}
+
+    # Miembros de grupos integrales
+    cursor.execute("SELECT clave, id_grupo FROM clientes WHERE id_grupo IS NOT NULL")
+    miembros_grupo = {}
+    for row in cursor.fetchall():
+        miembros_grupo.setdefault(row['id_grupo'], []).append(row['clave'])
+
+    # Filas de previo
+    cursor.execute("SELECT id, clave, es_integral, grupo_integral FROM previo")
+    filas = cursor.fetchall()
+
+    actualizados = 0
+    for fila in filas:
+        if fila['es_integral']:
+            grupo_id = fila['grupo_integral']
+            claves = miembros_grupo.get(grupo_id, [])
+            total     = sum(float(totales.get(c, {}).get('total', 0) or 0)    for c in claves)
+            syncros   = sum(float(totales.get(c, {}).get('syncros', 0) or 0)  for c in claves)
+            apparel   = sum(float(totales.get(c, {}).get('apparel', 0) or 0)  for c in claves)
+            vittoria  = sum(float(totales.get(c, {}).get('vittoria', 0) or 0) for c in claves)
+            bold      = sum(float(totales.get(c, {}).get('bold', 0) or 0)     for c in claves)
+        else:
+            row = totales.get(fila['clave']) or {}
+            total    = float(row.get('total', 0)    or 0)
+            syncros  = float(row.get('syncros', 0)  or 0)
+            apparel  = float(row.get('apparel', 0)  or 0)
+            vittoria = float(row.get('vittoria', 0) or 0)
+            bold     = float(row.get('bold', 0)     or 0)
+
+        cursor.execute("""
+            UPDATE previo SET
+                acumulado_anticipado = %s,
+                acumulado_syncros    = %s,
+                acumulado_apparel    = %s,
+                acumulado_vittoria   = %s,
+                acumulado_bold       = %s
+            WHERE id = %s
+        """, (total, syncros, apparel, vittoria, bold, fila['id']))
+        actualizados += 1
+
+    conexion.commit()
+    return actualizados
+
+
+@monitor_odoo_bp.route('/recalcular-previo-desde-monitor', methods=['POST'])
+def recalcular_previo_desde_monitor():
+    """
+    Recalcula acumulado_anticipado y sub-marcas en previo sumando desde monitor.
+    Se puede llamar de forma independiente después de cualquier importación de Excel.
+    """
+    conexion = None
+    cursor = None
+    try:
+        conexion = obtener_conexion()
+        cursor = conexion.cursor(dictionary=True)
+        actualizados = _recalcular_acumulados_previo(conexion, cursor)
+        return jsonify({
+            'success': True,
+            'message': f'{actualizados} filas de previo actualizadas desde monitor',
+            'updated': actualizados,
+        })
+    except Exception as e:
+        logging.exception('recalcular_previo_desde_monitor: error')
+        return jsonify({'success': False, 'error': str(e)}), 500
     finally:
         if cursor:
             cursor.close()
