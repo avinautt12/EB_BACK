@@ -211,7 +211,7 @@ def guardar_valor():
         if conexion: conexion.close()
 
 # ==============================================================================
-# 4. SINCRONIZACIÓN CON ODOO (ACTUALIZADA MULTI-CÓDIGO)
+# 4. SINCRONIZACIÓN CON ODOO (ACTUALIZADA CON CÁLCULO DE MES ANTERIOR)
 # ==============================================================================
 @dashboard_flujo_bp.route('/sincronizar-odoo', methods=['POST'])
 def sincronizar_odoo():
@@ -222,10 +222,19 @@ def sincronizar_odoo():
     except:
         return jsonify({"mensaje": "Año o mes inválidos"}), 400
 
-    # Configuración de fechas
+    # Configuración de fechas del mes actual
     fecha_inicio = f"{anio}-{mes:02d}-01"
     ultimo_dia = calendar.monthrange(anio, mes)[1]
     fecha_fin = f"{anio}-{mes:02d}-{ultimo_dia}"
+    
+    # 🚀 NUEVO: Configuración de fechas del mes anterior para el cálculo especial
+    if mes == 1:
+        mes_ant, anio_ant = 12, anio - 1
+    else:
+        mes_ant, anio_ant = mes - 1, anio
+    ultimo_dia_ant = calendar.monthrange(anio_ant, mes_ant)[1]
+    fecha_fin_ant = f"{anio_ant}-{mes_ant:02d}-{ultimo_dia_ant}"
+    fecha_inicio_ant = f"{anio_ant}-{mes_ant:02d}-01"
     
     conexion = None
     try:
@@ -248,7 +257,6 @@ def sincronizar_odoo():
             # -----------------------------------------------------------
             # PASO A: Buscar configuración en la NUEVA TABLA (Prioridad)
             # -----------------------------------------------------------
-            # 🚨 AQUI ESTÁ LA MAGIA: Le pedimos a MySQL la nueva columna
             cursor_read.execute("""
                 SELECT codigo_cuenta_odoo, columna_saldo, palabras_excluidas, nomenclatura_ref, palabras_incluidas 
                 FROM detalles_cuentas_odoo 
@@ -265,8 +273,9 @@ def sincronizar_odoo():
                     columna = det['columna_saldo']
                     excluir = det['palabras_excluidas']
                     incluir = det['nomenclatura_ref'] 
-                    palabras_req = det.get('palabras_incluidas') # <--- 🚨 JALAMOS LA NUEVA COLUMNA DE LA BD
+                    palabras_req = det.get('palabras_incluidas')
                     
+                    # 1. Obtenemos el saldo Odoo del mes actual
                     saldo_parcial = obtener_saldo_cuenta_odoo(
                         codigo_cuenta=codigo, 
                         fecha_inicio=fecha_inicio, 
@@ -274,8 +283,23 @@ def sincronizar_odoo():
                         columna_saldo=columna,
                         excluir_txt=excluir,
                         incluir_txt=incluir,
-                        palabras_incluidas=palabras_req # <--- 🚨 Y SE LA MANDAMOS AL MOTOR DE PYTHON
+                        palabras_incluidas=palabras_req
                     )
+
+                    # 🚀 2. CÁLCULO ESPECIAL DE RESTA (Solo para IDs 101 y 102)
+                    if id_concepto in [101, 102]:
+                        saldo_mes_anterior = obtener_saldo_cuenta_odoo(
+                            codigo_cuenta=codigo, 
+                            fecha_inicio=fecha_inicio_ant, 
+                            fecha_fin=fecha_fin_ant, 
+                            columna_saldo=columna,
+                            excluir_txt=excluir,
+                            incluir_txt=incluir,
+                            palabras_incluidas=palabras_req
+                        )
+                        # Restamos el mes anterior al mes actual para tener el neto
+                        saldo_parcial = saldo_parcial - saldo_mes_anterior
+
                     total_real_concepto += saldo_parcial
 
             # -----------------------------------------------------------
@@ -284,8 +308,6 @@ def sincronizar_odoo():
             elif codigo_viejo and codigo_viejo.strip() != '':
                 se_proceso_informacion = True
                 
-                # 🛑 LA CORRECCIÓN ESTÁ AQUÍ 🛑
-                # Le enseñamos a Python a identificar correctamente los egresos, incluyendo tus importaciones
                 es_ingreso = not any(x in categoria.lower() for x in ['egreso', 'gasto', 'costo', 'pasivo', 'proveedor', 'importacion'])
                 
                 total_real_concepto = obtener_saldo_cuenta_odoo(
@@ -293,7 +315,7 @@ def sincronizar_odoo():
                     fecha_inicio=fecha_inicio, 
                     fecha_fin=fecha_fin, 
                     es_ingreso=es_ingreso,
-                    columna_saldo='Debe' # Por defecto usamos Debe si no está especificado
+                    columna_saldo='Debe'
                 )
 
             # -----------------------------------------------------------
@@ -311,7 +333,7 @@ def sincronizar_odoo():
 
     except Exception as e:
         if conexion: conexion.rollback()
-        print(f"Error en sync: {e}") # Importante para debug
+        print(f"Error en sync: {e}") 
         return jsonify({'error': str(e)}), 500
     finally:
         if conexion: conexion.close()
@@ -399,7 +421,7 @@ def verificar_permiso_joker(id_usuario):
         if conexion: conexion.close()
 
 # ==============================================================================
-# LÓGICA DE CÁLCULO DE FÓRMULAS (INTEGRADA DEL FIX_TOTALES)
+# LÓGICA DE CÁLCULO DE FÓRMULAS
 # ==============================================================================
 
 def actualizar_valor_bd(cursor, id_concepto, fecha, monto, tipo='real'):
@@ -411,7 +433,6 @@ def actualizar_valor_bd(cursor, id_concepto, fecha, monto, tipo='real'):
     registro = cursor.fetchone()
     
     if registro:
-        # Si es un cursor dict o tuple
         uid = registro['id_valor'] if isinstance(registro, dict) else registro[0]
         cursor.execute(f"UPDATE flujo_valores_unificados SET {columna} = %s WHERE id_valor = %s", (monto, uid))
     else:
@@ -454,7 +475,7 @@ def recalcular_formulas_flujo(conexion, anio, mes):
         
         # 🚨 SEPARAMOS LOS GASTOS PARA LA NUEVA REGLA
         # Base (Siempre se suman): Importaciones(24), Anticipos(25), Fijos(40), Nomina(41), PTU(42), Impuestos(43)
-        IDS_OPERATIVOS_BASE = [24, 25, 40, 41, 42, 43]
+        IDS_OPERATIVOS_BASE = [24, 25, 40, 41, 42, 43, 105]
         
         # Los que cambian según la columna:
         ID_COMPRA_DIVISAS = 20
