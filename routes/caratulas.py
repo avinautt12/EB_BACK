@@ -621,29 +621,27 @@ def detalle_compras_odoo():
         if not partners:
             return jsonify({'data': [], 'rows': [], 'meta': {'total': 0}}), 200
 
-        # Para búsqueda por ref exacta (grupo o Mis Pedidos) solo usamos los partners
-        # encontrados directamente — NO expandimos child_ids, porque los contactos hijo
-        # de una empresa pertenecen a otras empresas o son direcciones de envío y sus
-        # órdenes inflarían los resultados incorrectamente.
-        # Para búsqueda ilike (usuario normal) sí incluimos hijos porque en ese modo
-        # las órdenes pueden estar registradas en contactos hijo de la empresa.
+        # Siempre expandimos child_ids: los contactos hijo de un partner son
+        # sub-cuentas del mismo cliente (portales B2B, tiendas, etc.) y sus órdenes
+        # pertenecen al mismo distribuidor.  El filtro de COMPANY_ID y la búsqueda
+        # por ref garantizan que no mezclamos datos de otros clientes.
         all_partner_ids = set()
         for p in partners:
             all_partner_ids.add(p['id'])
-            # Expandir child_ids siempre que NO sea búsqueda por grupo_odoo.
-            # En grupo_odoo los hijos podrían pertenecer a otras empresas del grupo.
-            # En ref_exacta individual o Mis Pedidos, los hijos son del mismo cliente.
-            if not grupo_odoo:
-                for child_id in (p.get('child_ids') or []):
-                    all_partner_ids.add(child_id)
+            for child_id in (p.get('child_ids') or []):
+                all_partner_ids.add(child_id)
         partner_ids = list(all_partner_ids)
 
         # ── 2) Traer órdenes de venta desde la fecha de inicio de temporada del cliente ──
+        # Excluimos órdenes canceladas (state='cancel') y borradores (state='draft')
+        # para que órdenes eliminadas/canceladas no aparezcan en el monitor.
         try:
             orders = models.execute_kw(
                 ODOO_DB, uid, ODOO_PASSWORD,
                 'sale.order', 'search_read',
-                [[['partner_id', 'in', partner_ids], ['date_order', '>=', fecha_inicio_temporada]]],
+                [[['partner_id', 'in', partner_ids],
+                  ['date_order', '>=', fecha_inicio_temporada],
+                  ['state', 'not in', ['cancel', 'draft']]]],
                 {'fields': ['id', 'name', 'date_order', 'partner_id', 'order_line', 'amount_total', 'state'],
                  'order': 'date_order desc', 'limit': 0}
             )
@@ -661,11 +659,27 @@ def detalle_compras_odoo():
         lines_map = {}
         if all_line_ids:
             try:
+                sol_want = ['id', 'order_id', 'product_id', 'name', 'product_uom_qty',
+                             'qty_delivered', 'price_unit', 'discount', 'price_total',
+                             'price_subtotal']
+                # forecast_expected_date: fecha en que Odoo pronostica disponibilidad
+                # is_mto: True si la línea usa ruta MTO (pedido a proveedor bajo demanda)
+                sol_all_keys = set()
+                try:
+                    _sf = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+                        'sale.order.line', 'fields_get', [], {'attributes': ['string']})
+                    sol_all_keys = set(_sf.keys())
+                except Exception:
+                    pass
+                if 'forecast_expected_date' in sol_all_keys:
+                    sol_want.append('forecast_expected_date')
+                if 'is_mto' in sol_all_keys:
+                    sol_want.append('is_mto')
                 all_lines = models.execute_kw(
                     ODOO_DB, uid, ODOO_PASSWORD,
                     'sale.order.line', 'search_read',
                     [[['id', 'in', all_line_ids]]],
-                    {'fields': ['id', 'order_id', 'product_id', 'name', 'product_uom_qty', 'qty_delivered', 'price_unit', 'discount', 'price_total', 'price_subtotal'], 'limit': 0}
+                    {'fields': sol_want, 'limit': 0}
                 )
                 for l in all_lines:
                     lines_map[l['id']] = l
@@ -686,7 +700,7 @@ def detalle_compras_odoo():
                     ODOO_DB, uid, ODOO_PASSWORD,
                     'product.product', 'search_read',
                     [[['id', 'in', list(product_ids)]]],
-                    {'fields': ['id', 'default_code', 'name'], 'limit': 0}
+                    {'fields': ['id', 'default_code', 'name', 'display_name'], 'limit': 0}
                 )
                 for p in prods:
                     products_map[p['id']] = p
@@ -762,8 +776,15 @@ def detalle_compras_odoo():
             m_fields.append('quantity_done')
         elif 'qty_done' in move_keys:
             m_fields.append('qty_done')
+        if 'purchase_line_id' in move_keys:
+            m_fields.append('purchase_line_id')
+        # move_orig_ids: IDs de los moves de los que depende este move (cadena MTO).
+        # Un outgoing 'waiting' depende del incoming de la OC → accedemos a su purchase_line_id.
+        if 'move_orig_ids' in move_keys:
+            m_fields.append('move_orig_ids')
 
         moves_by_picking = {}
+        move_orig_map: dict = {}  # move_id → list[orig_move_id]
         if all_move_ids:
             try:
                 move_rows = models.execute_kw(
@@ -776,8 +797,70 @@ def detalle_compras_odoo():
                     p_id = m.get('picking_id') and m['picking_id'][0]
                     if p_id:
                         moves_by_picking.setdefault(p_id, []).append(m)
+                    orig_ids = m.get('move_orig_ids') or []
+                    if orig_ids:
+                        move_orig_map[m['id']] = orig_ids
             except Exception:
                 pass
+
+        # ── 8.5) Leer purchase.order.line → fecha esperada de entrega ──────────────
+        # Hay dos rutas para encontrar la OC ligada a un outgoing move:
+        #   A) Directa: el propio outgoing move tiene purchase_line_id (raro en v15+)
+        #   B) Indirecta (MTO): outgoing 'waiting' → move_orig_ids → incoming move → purchase_line_id
+        pol_fecha_map: dict = {}          # pol_id → {date_planned, po_name}
+        upstream_move_pol: dict = {}      # orig_move_id → pol_id  (para resolución en paso 10)
+        try:
+            pol_ids_set: set = set()
+
+            # Ruta A — POLs directos en los moves que ya leímos
+            for moves_list in moves_by_picking.values():
+                for m in moves_list:
+                    pol_ref = m.get('purchase_line_id')
+                    if pol_ref:
+                        pol_id_val = pol_ref[0] if isinstance(pol_ref, (list, tuple)) else pol_ref
+                        if isinstance(pol_id_val, int) and pol_id_val > 0:
+                            pol_ids_set.add(pol_id_val)
+
+            # Ruta B — Leer upstream moves (move_orig_ids de los outgoing waiting)
+            # para alcanzar el incoming que tiene purchase_line_id
+            all_orig_ids: set = set()
+            for orig_list in move_orig_map.values():
+                all_orig_ids.update(orig_list)
+            if all_orig_ids:
+                try:
+                    upstream_rows = models.execute_kw(
+                        ODOO_DB, uid, ODOO_PASSWORD,
+                        'stock.move', 'search_read',
+                        [[['id', 'in', list(all_orig_ids)]]],
+                        {'fields': ['id', 'purchase_line_id', 'state'], 'limit': 0}
+                    )
+                    for um in upstream_rows:
+                        pol_ref = um.get('purchase_line_id')
+                        if pol_ref:
+                            pol_id_val = pol_ref[0] if isinstance(pol_ref, (list, tuple)) else pol_ref
+                            if isinstance(pol_id_val, int) and pol_id_val > 0:
+                                pol_ids_set.add(pol_id_val)
+                                upstream_move_pol[um['id']] = pol_id_val
+                except Exception as _ex_up:
+                    logging.warning('detalle_compras_odoo: error al leer upstream moves: %s', _ex_up)
+
+            # Leer todas las POL en un solo batch
+            if pol_ids_set:
+                pol_rows = models.execute_kw(
+                    ODOO_DB, uid, ODOO_PASSWORD,
+                    'purchase.order.line', 'search_read',
+                    [[['id', 'in', list(pol_ids_set)]]],
+                    {'fields': ['id', 'date_planned', 'product_id', 'order_id'], 'limit': 0}
+                )
+                for pol in pol_rows:
+                    dp = pol.get('date_planned')
+                    if dp:
+                        pol_fecha_map[pol['id']] = {
+                            'date_planned': str(dp),
+                            'po_name': pol['order_id'][1] if pol.get('order_id') else None
+                        }
+        except Exception as _ex_pol:
+            logging.warning('detalle_compras_odoo: error al leer purchase.order.line: %s', _ex_pol)
 
         # ── 9) Leer TODOS los stock.move.line en un solo batch ───────────────────
         all_mline_ids = []
@@ -807,14 +890,19 @@ def detalle_compras_odoo():
                 pass
 
         # ── 10) Mapa de entrega por (orden, product_id) ─────────────────────────
-        # Solo tomamos pickings OUTGOING (entrega al cliente) para no confundir
-        # movimientos internos (Pick→Ship multi-paso) con la entrega real.
+        # Procesamos outgoing (entrega final) E internal (PICK) para poder
+        # desambiguar el estado 'waiting':
+        #   - outgoing waiting + internal assigned/done  → mercancía EN bodega (Almacén EB)
+        #   - outgoing waiting + internal sin reserva    → mercancía en tránsito del proveedor
+        # ────────────────────────────────────────────────────────────────────────────────────
+        # Clave = (nombre_orden, product_id_odoo)  ← combinación única por producto por orden
         entrega_por_prod = {}
         for p in all_pickings:
-            # Filtrar solo pickings de salida (entrega al cliente)
             ptype = p.get('picking_type_code') or ''
-            if ptype and ptype != 'outgoing':
+            # Ignoramos recepciones de proveedor (incoming) — su origin es la OC, no la OV
+            if ptype not in ('outgoing', 'internal'):
                 continue
+            is_outgoing = (ptype == 'outgoing')
             origin = p.get('origin') or ''
             p_id = p['id']
             for m in (moves_by_picking.get(p_id) or []):
@@ -823,38 +911,177 @@ def detalle_compras_odoo():
                     continue
                 key = (origin, prod_id)
                 if key not in entrega_por_prod:
-                    entrega_por_prod[key] = {'qty': 0.0, 'done': 0.0, 'estados': set()}
-                entrega_por_prod[key]['qty']  += float(m.get('product_uom_qty') or 0)
-                done_qty = m.get('quantity_done') or m.get('qty_done') or 0
-                entrega_por_prod[key]['done'] += float(done_qty)
+                    entrega_por_prod[key] = {
+                        'qty': 0.0, 'done': 0.0,
+                        'estados_out': set(),   # estados de stock.move outgoing
+                        'estados_int': set(),   # estados de stock.move interno (PICK)
+                        'has_purchase': False,  # True si algún move apunta a una OC
+                        'fecha_esperada': None, 'po_name': None
+                    }
                 raw_state = m.get('state') or ''
-                if raw_state:
-                    entrega_por_prod[key]['estados'].add(raw_state)
+                if is_outgoing:
+                    entrega_por_prod[key]['qty'] += float(m.get('product_uom_qty') or 0)
+                    done_qty = m.get('quantity_done') or m.get('qty_done') or 0
+                    entrega_por_prod[key]['done'] += float(done_qty)
+                    if raw_state:
+                        entrega_por_prod[key]['estados_out'].add(raw_state)
+                else:
+                    if raw_state:
+                        entrega_por_prod[key]['estados_int'].add(raw_state)
+                # ── Fecha esperada / vínculo OC ─────────────────────────────────────
+                # Ruta A: purchase_line_id directo en este move
+                pol_ref = m.get('purchase_line_id')
+                pol_id_direct = None
+                if pol_ref:
+                    pol_id_direct = pol_ref[0] if isinstance(pol_ref, (list, tuple)) else pol_ref
+                    entrega_por_prod[key]['has_purchase'] = True
+                    if isinstance(pol_id_direct, int) and pol_id_direct in pol_fecha_map:
+                        if entrega_por_prod[key]['fecha_esperada'] is None:
+                            entrega_por_prod[key]['fecha_esperada'] = pol_fecha_map[pol_id_direct]['date_planned']
+                            entrega_por_prod[key]['po_name'] = pol_fecha_map[pol_id_direct].get('po_name')
+
+                # Ruta B: buscar en los upstream moves (cadena MTO)
+                if not entrega_por_prod[key]['has_purchase']:
+                    for orig_id in (move_orig_map.get(m['id']) or []):
+                        pol_id_up = upstream_move_pol.get(orig_id)
+                        if pol_id_up:
+                            entrega_por_prod[key]['has_purchase'] = True
+                            if entrega_por_prod[key]['fecha_esperada'] is None and pol_id_up in pol_fecha_map:
+                                entrega_por_prod[key]['fecha_esperada'] = pol_fecha_map[pol_id_up]['date_planned']
+                                entrega_por_prod[key]['po_name'] = pol_fecha_map[pol_id_up].get('po_name')
+                            break
+
+        # ── 10.5) Fecha esperada via POL directo al producto (sin cadena MTO directa) ──
+        # Cubre dos escenarios sin enlace directo a OC:
+        #   A) outgoing en confirmed/partially_available  (move directo sin PICK intermedio)
+        #   B) outgoing waiting con PICK interno en confirmed (flujo multi-paso sin cadena MTO)
+        # IMPORTANTE: para evitar mostrar fechas anteriores a la orden de venta
+        # (que pertenecen a otras OCs), filtramos los POLs por fecha >= fecha_orden.
+        order_date_map = {o['name']: str(o.get('date_order') or '')[:10] for o in orders}
+
+        pending_items = {
+            (order_name, prod_id): order_date_map.get(order_name, '')
+            for (order_name, prod_id), info in entrega_por_prod.items()
+            if not info['has_purchase'] and (
+                info['estados_out'] & {'confirmed', 'partially_available'}
+                or 'confirmed' in info.get('estados_int', set())
+            )
+        }
+        pending_prod_ids = {pid for (_, pid) in pending_items}
+
+        if pending_prod_ids:
+            try:
+                pol_fallback_rows = models.execute_kw(
+                    ODOO_DB, uid, ODOO_PASSWORD,
+                    'purchase.order.line', 'search_read',
+                    [[['product_id', 'in', list(pending_prod_ids)],
+                      ['order_id.state', 'in', ['purchase', 'done']]]],
+                    {'fields': ['id', 'product_id', 'date_planned', 'order_id',
+                                'qty_received', 'product_qty'], 'limit': 0}
+                )
+                # Filtrar en Python: sólo líneas con pendiente de recibir
+                pol_fallback_rows = [
+                    p for p in pol_fallback_rows
+                    if float(p.get('qty_received') or 0) < float(p.get('product_qty') or 0)
+                ]
+
+                # Agrupar todos los POLs disponibles por product_id, ordenados por fecha
+                pols_by_prod: dict = {}  # prod_id → [{date_planned, po_name}, ...]
+                for pol in pol_fallback_rows:
+                    dp = pol.get('date_planned')
+                    if not dp:
+                        continue
+                    pid = pol['product_id'][0] if pol.get('product_id') else None
+                    if not pid:
+                        continue
+                    pols_by_prod.setdefault(pid, []).append({
+                        'date_planned': str(dp)[:10],
+                        'po_name': pol['order_id'][1] if pol.get('order_id') else None
+                    })
+                for pid in pols_by_prod:
+                    pols_by_prod[pid].sort(key=lambda x: x['date_planned'])
+
+                # Por cada (orden, producto) elegir el POL más cercano
+                # cuya fecha sea >= fecha de la orden de venta.
+                # Si ninguno cumple esa condición (entregas tardías), tomar la más reciente.
+                for (order_name, prod_id), order_date in pending_items.items():
+                    info = entrega_por_prod.get((order_name, prod_id))
+                    if not info or info['has_purchase']:
+                        continue
+                    cands = pols_by_prod.get(prod_id, [])
+                    if not cands:
+                        continue
+                    # Buscar el primer POL con fecha >= fecha de la OV
+                    chosen = next(
+                        (c for c in cands if c['date_planned'] >= order_date),
+                        None
+                    )
+                    # Siempre marcar has_purchase=True si existe cualquier POL
+                    # (para que el producto aparezca como "En tránsito")
+                    info['has_purchase'] = True
+                    # Solo asignar fecha si es igual o posterior a la OV:
+                    # fechas del pasado no aportan información útil al usuario
+                    if chosen is not None and info['fecha_esperada'] is None:
+                        info['fecha_esperada'] = chosen['date_planned']
+                        info['po_name'] = chosen.get('po_name')
+            except Exception as _ex_fb:
+                logging.warning('detalle_compras_odoo: error al leer POL fallback: %s', _ex_fb)
+
 
         def estatus_por_producto(order_name: str, product_id) -> str | None:
-            """Devuelve el estatus de entrega de un producto específico en una orden."""
+            """Devuelve el estatus de entrega de un producto específico en una orden.
+
+            Prioridad revisada para almacenes multi-paso (Pick + Ship):
+            1. Entregado / Entregado Parcial
+            2. En tránsito  — 'confirmed'/'partially_available' en outgoing,
+               incluso si coexiste con 'assigned' (parte en ruta, parte lista)
+            3. Almacén EB   — 'assigned' en outgoing  O  'waiting' en outgoing
+               con PICK interno reservado (mercancía ya en bodega, falta mover)
+            4. Falta de confirmación — 'waiting' sin stock en bodega y sin OC
+            5. Cancelado
+            """
             info = entrega_por_prod.get((order_name, product_id))
-            if not info or not info['estados']:
+            if not info or not info['estados_out']:
                 return None
-            estados = info['estados']
-            qty   = info['qty']
-            done  = info['done']
-            # Prioridad: Entregado > Entregado Parcial > Almacén EB > Falta de confirmación > En tránsito > Cancelado
-            if 'done' in estados:
+            estados_out = info['estados_out']
+            estados_int = info.get('estados_int', set())
+            has_purchase = info.get('has_purchase', False)
+            qty  = info['qty']
+            done = info['done']
+
+            # 1. Entregado
+            if 'done' in estados_out:
                 if qty > 0 and done >= qty:
                     return 'Entregado'
                 elif done > 0:
                     return 'Entregado Parcial'
                 return 'Entregado'
-            if 'assigned' in estados:
-                return 'Almacén EB'
-            if 'waiting' in estados:
-                return 'Falta de confirmación'
-            if estados & {'confirmed', 'partially_available'}:
+
+            # 2. En tránsito — prioridad sobre Almacén EB
+            #    Si alguna unidad aún no está disponible es la info más urgente
+            if estados_out & {'confirmed', 'partially_available'}:
                 return 'En tránsito'
-            if 'cancel' in estados:
+
+            # 3. Almacén EB — out reservado en zona de salida
+            if 'assigned' in estados_out:
+                return 'Almacén EB'
+
+            # 4. Waiting — desambiguar con move interno (PICK)
+            if 'waiting' in estados_out:
+                # PICK interno con reserva → mercancía físicamente en bodega
+                if estados_int & {'assigned', 'done'}:
+                    return 'Almacén EB'
+                # Hay vínculo a OC (directo o via fallback) → en tránsito del proveedor
+                if has_purchase:
+                    return 'En tránsito'
+                # Sin stock y sin OC → falta confirmar abasto
+                return 'Falta de confirmación'
+
+            # 5. Cancelado
+            if 'cancel' in estados_out:
                 return 'Cancelado'
-            return map_estado_picking(next(iter(estados)))
+
+            return map_estado_picking(next(iter(estados_out)))
 
         # ── 11) Construir resultado ───────────────────────────────────────────────
         resultado = []
@@ -885,8 +1112,16 @@ def detalle_compras_odoo():
                 if es_producto_excluido(prod):
                     continue
                 clave = prod.get('default_code') if prod else None
-                producto_nombre = prod.get('name') if prod else (l['product_id'][1] if l.get('product_id') else None)
+                if prod:
+                    dn = prod.get('display_name') or prod.get('name') or ''
+                    dc = prod.get('default_code') or ''
+                    producto_nombre = dn[len(f'[{dc}] '):] if (dc and dn.startswith(f'[{dc}] ')) else dn
+                else:
+                    producto_nombre = l['product_id'][1] if l.get('product_id') else None
                 cantidad = float(l.get('product_uom_qty') or 0)
+                # Omitir líneas con cantidad 0 (producto cancelado/removido sin borrar la línea)
+                if cantidad == 0:
+                    continue
                 qty_entregada = float(l.get('qty_delivered') or 0)
                 # Usar price_total de Odoo (incluye el IVA real de cada producto)
                 # evitando el multiplicador fijo 1.16 que no aplica a todos los productos.
@@ -907,7 +1142,9 @@ def detalle_compras_odoo():
                     'cantidad_entregada': qty_entregada,
                     'precio_unitario': precio,
                     'total_linea': round(price_total_odoo, 2),
-                    'total_entregado_linea': total_entregado_linea
+                    'total_entregado_linea': total_entregado_linea,
+                    'forecast_expected_date': l.get('forecast_expected_date') or None,
+                    'is_mto': bool(l.get('is_mto')),
                 })
 
             # Pickings (todos leídos en batch, solo se indexan aquí)
@@ -977,6 +1214,14 @@ def detalle_compras_odoo():
                     if estatus_out_lin not in ('Cancelado', 'Entregado Parcial', 'Entregado'):
                         estatus_out_lin = 'Entregado'
 
+                _ep_info = entrega_por_prod.get((order_name, lin.get('product_id_odoo'))) or {}
+                # Fuente primaria: forecast_expected_date de sale.order.line (Odoo calcula esto
+                # considerando toda la cadena de abasto; es el mismo dato del tooltip rojo).
+                # Fallback: fecha obtenida via cadena de OC en pasos 8.5 / 10.5.
+                raw_forecast = lin.get('forecast_expected_date')
+                fecha_esp_final = (str(raw_forecast)[:10] if raw_forecast else None) \
+                    or _ep_info.get('fecha_esperada')
+                po_name_final = _ep_info.get('po_name')
                 filas_planas.append({
                     'numero_factura': factura_nombre or order_name,
                     'clave_producto': lin.get('clave_producto'),
@@ -993,7 +1238,9 @@ def detalle_compras_odoo():
                     'estado_orden_raw': estado_orden_raw,
                     'cliente': order_obj['cliente'],
                     'pickings': order_obj['pickings'],
-                    'estatus_out': estatus_out_lin
+                    'estatus_out': estatus_out_lin,
+                    'fecha_esperada': fecha_esp_final,
+                    'po_name': po_name_final
                 })
 
             resultado.append(order_obj)
