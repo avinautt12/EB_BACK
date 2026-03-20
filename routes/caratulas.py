@@ -582,16 +582,19 @@ def detalle_compras_odoo():
         # ── 1) Determinar el dominio de partners según el modo de búsqueda ──────────────
         try:
             if grupo_odoo:
-                # Vista Global de integral: obtener todas las claves del grupo desde DB
-                # y buscar exactamente esos partners en Odoo por ref
+                # Vista Global de integral: obtener todas las claves Y nombres del grupo
+                # desde DB, luego buscar en Odoo por ref. Si algún miembro del grupo
+                # no tiene ref en Odoo (distribuidor nuevo), se busca también por nombre.
                 try:
                     _conn = obtener_conexion()
                     _cur = _conn.cursor(dictionary=True)
                     _cur.execute(
-                        "SELECT clave FROM clientes WHERE id_grupo = %s AND clave IS NOT NULL AND clave != ''",
+                        "SELECT clave, nombre_cliente FROM clientes "
+                        "WHERE id_grupo = %s AND clave IS NOT NULL AND clave != ''",
                         (grupo_odoo,)
                     )
-                    _claves = [r['clave'] for r in _cur.fetchall()]
+                    _grupo_rows = _cur.fetchall()
+                    _claves = [r['clave'] for r in _grupo_rows]
                     _cur.close()
                     _conn.close()
                 except Exception as db_ex:
@@ -602,8 +605,7 @@ def detalle_compras_odoo():
 
                 partner_domain = [['ref', 'in', _claves]]
             elif ref_exacta:
-                # Modo "Mis Pedidos" de integral: solo match exacto por ref
-                # Si la clave no existe en Odoo devuelve lista vacía (modal en blanco)
+                # Modo "Mis Pedidos" de integral: match exacto por ref
                 partner_domain = [['ref', '=', cliente]]
             else:
                 # Modo global/normal: busca por nombre o ref con ilike
@@ -615,6 +617,68 @@ def detalle_compras_odoo():
                 [partner_domain],
                 {'fields': ['id', 'name', 'ref', 'child_ids'], 'limit': 0}
             )
+
+            # ── Fallback por nombre para distribuidores sin ref en Odoo ─────────────
+            # Si ref_exacta y no encontró nada: el distribuidor existe en nuestra DB
+            # pero no tiene clave/ref asignada en Odoo → buscar por nombre_cliente.
+            if not partners and ref_exacta:
+                try:
+                    _conn_fb = obtener_conexion()
+                    _cur_fb = _conn_fb.cursor(dictionary=True)
+                    _cur_fb.execute(
+                        "SELECT nombre_cliente FROM clientes WHERE clave = %s",
+                        (cliente,)
+                    )
+                    _row_fb = _cur_fb.fetchone()
+                    _cur_fb.close()
+                    _conn_fb.close()
+                    if _row_fb and _row_fb.get('nombre_cliente'):
+                        partners = models.execute_kw(
+                            ODOO_DB, uid, ODOO_PASSWORD,
+                            'res.partner', 'search_read',
+                            [[['name', 'ilike', _row_fb['nombre_cliente']]]],
+                            {'fields': ['id', 'name', 'ref', 'child_ids'], 'limit': 0}
+                        )
+                except Exception:
+                    pass
+
+            # ── Fallback por nombre para miembros de grupo sin ref en Odoo ──────────
+            # Algunos distribuidores del grupo pueden no tener ref en Odoo.
+            # Detectamos cuáles faltan comparando los refs devueltos vs los esperados,
+            # y hacemos una búsqueda adicional por nombre para cada uno.
+            if grupo_odoo and _grupo_rows:
+                refs_encontradas = {(p.get('ref') or '').strip() for p in partners}
+                claves_sin_match = [
+                    r for r in _grupo_rows
+                    if r['clave'].strip() not in refs_encontradas and r.get('nombre_cliente')
+                ]
+                if claves_sin_match:
+                    nombres_faltantes = [r['nombre_cliente'] for r in claves_sin_match]
+                    try:
+                        # Construir dominio OR con todos los nombres faltantes
+                        _name_domain: list = []
+                        for _nm in nombres_faltantes:
+                            _name_domain.extend(['|', ['name', 'ilike', _nm]])
+                        # El último '|' sobra; re-construir correctamente con OR apilado
+                        _name_domain_clean: list = []
+                        for i, _nm in enumerate(nombres_faltantes):
+                            if i < len(nombres_faltantes) - 1:
+                                _name_domain_clean.append('|')
+                            _name_domain_clean.append(['name', 'ilike', _nm])
+                        extra_partners = models.execute_kw(
+                            ODOO_DB, uid, ODOO_PASSWORD,
+                            'res.partner', 'search_read',
+                            [_name_domain_clean],
+                            {'fields': ['id', 'name', 'ref', 'child_ids'], 'limit': 0}
+                        )
+                        # Mergear evitando duplicados por id
+                        existing_ids = {p['id'] for p in partners}
+                        partners = list(partners) + [
+                            p for p in extra_partners if p['id'] not in existing_ids
+                        ]
+                    except Exception:
+                        pass
+
         except Exception as ex:
             return jsonify({'error': f'Error consultando res.partner: {str(ex)}'}), 500
 
@@ -633,15 +697,16 @@ def detalle_compras_odoo():
         partner_ids = list(all_partner_ids)
 
         # ── 2) Traer órdenes de venta desde la fecha de inicio de temporada del cliente ──
-        # Excluimos órdenes canceladas (state='cancel') y borradores (state='draft')
-        # para que órdenes eliminadas/canceladas no aparezcan en el monitor.
+        # Excluimos únicamente borradores (state='draft') — órdenes que aún no han
+        # sido confirmadas y no deben aparecer en el monitor.
+        # Las órdenes canceladas (state='cancel') SÍ se muestran con estatus "Cancelado".
         try:
             orders = models.execute_kw(
                 ODOO_DB, uid, ODOO_PASSWORD,
                 'sale.order', 'search_read',
                 [[['partner_id', 'in', partner_ids],
                   ['date_order', '>=', fecha_inicio_temporada],
-                  ['state', 'not in', ['cancel', 'draft']]]],
+                  ['state', '!=', 'draft']]],
                 {'fields': ['id', 'name', 'date_order', 'partner_id', 'order_line', 'amount_total', 'state'],
                  'order': 'date_order desc', 'limit': 0}
             )
@@ -1196,6 +1261,10 @@ def detalle_compras_odoo():
                         estatus_out_lin = pickings_out[0]['estado']
                     elif order_obj['pickings']:
                         estatus_out_lin = order_obj['pickings'][0]['estado']
+                # Último fallback: si la orden de venta está cancelada y no hay pickings
+                # (se canceló antes de crear movimientos), reflejar "Cancelado" directamente.
+                if estatus_out_lin is None and estado_orden_raw == 'cancel':
+                    estatus_out_lin = 'Cancelado'
 
                 # ── Override con qty_delivered de Odoo (campo autoritativo)
                 # qty_delivered es el campo que Odoo calcula directamente;
