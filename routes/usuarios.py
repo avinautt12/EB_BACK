@@ -11,50 +11,70 @@ usuarios_bp = Blueprint('usuarios', __name__, url_prefix='/usuarios')
 
 @usuarios_bp.route('/para-monitor', methods=['GET'])
 def usuarios_para_monitor():
-    """Devuelve todos los usuarios con su clave de cliente, id_grupo y nombre de grupo
-    para que el administrador pueda seleccionar a quién ver en el Monitor de Pedidos."""
+    """Devuelve TODOS los clientes (tengan o no usuario vinculado) junto con su grupo
+    para que el administrador pueda seleccionarlos en el Monitor de Pedidos."""
     conexion = None
     cursor = None
     try:
         conexion = obtener_conexion()
         cursor = conexion.cursor(dictionary=True)
+        
+        # 1. Partimos de clientes (c) y hacemos LEFT JOIN a usuarios (u)
+        # 2. Usamos COALESCE para que si u.nombre es NULL, use c.nombre_cliente
         cursor.execute("""
-            SELECT
-                u.id,
-                u.nombre,
+            SELECT 
+                c.id AS id_cliente,
+                u.id AS id_usuario,
+                COALESCE(u.nombre, c.nombre_cliente) AS nombre,
                 u.usuario,
                 u.rol_id,
                 u.activo,
-                COALESCE(c.clave, NULL) AS clave,
+                c.clave,
                 COALESCE(c.id_grupo, u.id_grupo) AS id_grupo,
                 g.nombre_grupo
-            FROM usuarios u
-            LEFT JOIN clientes c ON u.cliente_id = c.id
+            FROM clientes c
+            LEFT JOIN usuarios u ON u.cliente_id = c.id
             LEFT JOIN grupo_clientes g ON COALESCE(c.id_grupo, u.id_grupo) = g.id
-            ORDER BY u.nombre
+            ORDER BY nombre
         """)
+        
         filas = cursor.fetchall()
         resultado = []
+        
         for f in filas:
+            # Manejamos el rol de forma segura para clientes sin usuario
+            if f["rol_id"] == 1:
+                rol = "Administrador"
+            elif f["rol_id"] is not None:
+                rol = "Usuario"
+            else:
+                rol = "Sin Usuario" # Identificador visual útil para tu monitor
+
             resultado.append({
-                "id": f["id"],
+                # Mandamos el id_usuario original por compatibilidad, 
+                # pero agregamos id_cliente por si tu front lo necesita.
+                "id": f["id_usuario"], 
+                "id_cliente": f["id_cliente"],
                 "nombre": f["nombre"],
-                "usuario": f["usuario"],
-                "rol": "Administrador" if f["rol_id"] == 1 else "Usuario",
-                "activo": bool(f["activo"]),
+                "usuario": f["usuario"], # Será nulo si no tiene
+                "rol": rol,
+                # Si activo es NULL (porque no hay usuario), lo pasamos como False
+                "activo": bool(f["activo"]) if f["activo"] is not None else False,
                 "clave": f["clave"],
                 "id_grupo": f["id_grupo"],
                 "nombre_grupo": f["nombre_grupo"]
             })
+            
         return jsonify(resultado), 200
+        
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+        
     finally:
         if cursor:
             cursor.close()
         if conexion and conexion.is_connected():
             conexion.close()
-
 
 @usuarios_bp.route('', methods=['GET'])
 def listar_usuarios():
