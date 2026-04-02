@@ -188,6 +188,7 @@ def ejecutar_sincronizacion_y_calculos():
                     SET notas_credito = %s, garantias = %s, productos_ofertados = %s WHERE CLAVE = %s
                 """, (valores['nc'], valores['garantia'], valores['ofertado'], clave))
 
+        # === DICCIONARIO DE INTEGRALES ===
         integrales_map = {
             'Integral 1': ['EC216', 'JC539'],
             'Integral 2': ['GC411', 'MC679', 'MC677', 'LC657'],
@@ -210,21 +211,60 @@ def ejecutar_sincronizacion_y_calculos():
                 compra_adicional = (COALESCE(COMPRAS_TOTALES_CRUDO, 0) - COALESCE(notas_credito, 0) - COALESCE(productos_ofertados, 0) - COALESCE(COMPRA_MINIMA_ANUAL, 0))
         """)
         
-        cursor.execute("""
+        # ==============================================================================
+        # LÓGICA DINÁMICA DE PORCENTAJES POR CANTIDAD DE TIENDAS
+        # ==============================================================================
+        umbrales_por_tiendas = {
+            1: [(5000000, 0.045), (2000000, 0.02), (800000, 0.01)],
+            2: [(7500000, 0.045), (3000000, 0.02), (1200000, 0.01)],
+            3: [(11250000, 0.045), (4500000, 0.02), (1800000, 0.01)],
+            4: [(15000000, 0.045), (6000000, 0.02), (2400000, 0.01)],
+            5: [(18750000, 0.045), (7500000, 0.02), (3000000, 0.01)],
+            6: [(22500000, 0.045), (9000000, 0.02), (3600000, 0.01)],
+        }
+
+        casos_integrales = []
+        # Leemos integrales_map para saber cuántas tiendas tiene cada Integral
+        for clave_integral, tiendas in integrales_map.items():
+            num_tiendas = len(tiendas)
+            if num_tiendas in umbrales_por_tiendas:
+                u = umbrales_por_tiendas[num_tiendas]
+                caso = f"""
+                    WHEN CLAVE = '{clave_integral}' AND CATEGORIA IN ('Partner Elite', 'Partner Elite Plus') THEN
+                        CASE
+                            WHEN compra_adicional >= {u[0][0]} THEN {u[0][1]}
+                            WHEN compra_adicional >= {u[1][0]} THEN {u[1][1]}
+                            WHEN compra_adicional >= {u[2][0]} THEN {u[2][1]}
+                            ELSE 0.00
+                        END
+                """
+                casos_integrales.append(caso)
+        
+        casos_sql = " ".join(casos_integrales)
+
+        # Inyectamos los casos generados dinámicamente en el UPDATE principal
+        query_porcentajes = f"""
             UPDATE tabla_retroactivos
             SET 
                 porcentaje_retroactivo = CASE
-                    WHEN compra_adicional >= 5000000 THEN 0.045
-                    WHEN compra_adicional >= 2000000 THEN 0.02
-                    WHEN compra_adicional >= 800000 THEN 0.01
-                    ELSE 0.00
+                    {casos_sql}
+                    -- Caso por defecto (1 tienda o sucursales normales)
+                    ELSE
+                        CASE
+                            WHEN compra_adicional >= 5000000 THEN 0.045
+                            WHEN compra_adicional >= 2000000 THEN 0.02
+                            WHEN compra_adicional >= 800000 THEN 0.01
+                            ELSE 0.00
+                        END
                 END,
                 porcentaje_retroactivo_apparel = CASE
                     WHEN COALESCE(COMPRA_GLOBAL_APPAREL, 0) >= COALESCE(COMPRA_MINIMA_APPAREL, 0) AND COALESCE(COMPRA_MINIMA_APPAREL, 0) > 0 THEN
                         CASE WHEN CATEGORIA LIKE '%Partner Elite%' THEN 0.025 WHEN CATEGORIA = 'Partner' THEN 0.015 ELSE 0.00 END
                     ELSE 0.00
                 END
-        """)
+        """
+        cursor.execute(query_porcentajes)
+        # ==============================================================================
 
         cursor.execute("""
             UPDATE tabla_retroactivos
@@ -241,7 +281,6 @@ def ejecutar_sincronizacion_y_calculos():
         if cursor_dict: cursor_dict.close()
         if cursor: cursor.close()
         if conexion: conexion.close()
-
 
 # ==============================================================================
 # 3. ENDPOINT GET GLOBALES (Este es el que llama Angular)
@@ -311,6 +350,9 @@ def sincronizar_notas_odoo():
 # ==============================================================================
 @retroactivos_bp.route('/retroactivo_cliente/<string:identificador>', methods=['GET'])
 def obtener_retroactivo_individual(identificador):
+
+    ejecutar_sincronizacion_y_calculos()
+
     conexion = obtener_conexion()
     cursor = conexion.cursor(dictionary=True)
     try:
