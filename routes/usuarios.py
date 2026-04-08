@@ -20,7 +20,7 @@ def usuarios_para_monitor():
         cursor = conexion.cursor(dictionary=True)
         
         # 1. Partimos de clientes (c) y hacemos LEFT JOIN a usuarios (u)
-        # 2. Usamos COALESCE para que si u.nombre es NULL, use c.nombre_cliente
+        # 2. UNION con usuarios que no tienen cliente vinculado (admins/internos)
         cursor.execute("""
             SELECT 
                 c.id AS id_cliente,
@@ -35,6 +35,23 @@ def usuarios_para_monitor():
             FROM clientes c
             LEFT JOIN usuarios u ON u.cliente_id = c.id
             LEFT JOIN grupo_clientes g ON COALESCE(c.id_grupo, u.id_grupo) = g.id
+
+            UNION
+
+            SELECT
+                NULL AS id_cliente,
+                u.id AS id_usuario,
+                u.nombre,
+                u.usuario,
+                u.rol_id,
+                u.activo,
+                NULL AS clave,
+                u.id_grupo,
+                g.nombre_grupo
+            FROM usuarios u
+            LEFT JOIN grupo_clientes g ON u.id_grupo = g.id
+            WHERE u.cliente_id IS NULL
+
             ORDER BY nombre
         """)
         
