@@ -88,7 +88,7 @@ def obtener_deducciones_odoo(claves_db, fechas_por_clave):
             if linea['partner_id']:
                 agregar_valor(linea['partner_id'][0], 'garantia', float(linea['price_subtotal']), linea.get('date'))
 
-        # B. PRODUCTOS OFERTADOS 
+        # B. PRODUCTOS OFERTADOS (Ahora incluye la etiqueta DEMO)
         domain_ofertado = [
             ('move_id.move_type', '=', 'out_invoice'), 
             ('move_id.state', '=', 'posted'),
@@ -96,8 +96,12 @@ def obtener_deducciones_odoo(claves_db, fechas_por_clave):
             ('move_id.invoice_date', '<=', max_date),
             ('quantity', '!=', 0),
             ('partner_id', 'in', lista_ids_validos),
-            ('product_id.product_tmpl_id.product_tag_ids.name', 'ilike', 'Producto Ofertado') 
+            # Usamos '|' (OR) para buscar una etiqueta u otra
+            '|', 
+                ('product_id.product_tmpl_id.product_tag_ids.name', 'ilike', 'Producto Ofertado'),
+                ('product_id.product_tmpl_id.product_tag_ids.name', 'ilike', 'DEMO')
         ]
+        
         lineas_ofertado = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, 'account.move.line', 'search_read', 
             [domain_ofertado], {'fields': ['partner_id', 'price_subtotal', 'date']})
 
