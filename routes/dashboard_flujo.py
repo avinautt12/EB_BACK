@@ -286,8 +286,8 @@ def sincronizar_odoo():
                         palabras_incluidas=palabras_req
                     )
 
-                    # 🚀 2. CÁLCULO ESPECIAL DE RESTA (Solo para ID 101)
-                    if id_concepto in [101]:
+                    # 🚀 2. CÁLCULO ESPECIAL DE RESTA (Solo para IDs 101 y 102)
+                    if id_concepto in [101, 102]:
                         saldo_mes_anterior = obtener_saldo_cuenta_odoo(
                             codigo_cuenta=codigo, 
                             fecha_inicio=fecha_inicio_ant, 
