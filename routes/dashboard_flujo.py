@@ -466,8 +466,8 @@ def recalcular_formulas_flujo(conexion, anio, mes):
         ID_VENTAS = 2
         ID_RECUPERACION = 3  # Espejo de ventas
         
-        # Otros Ingresos (ID 102 no suma al total de entradas por requerimiento)
-        IDS_OTROS_INGRESOS = [6, 7, 101, 103, 104]
+        # Otros Ingresos
+        IDS_OTROS_INGRESOS = [6, 7, 101, 102, 103, 104]
         
         ID_TOTAL_ENTRADAS = 8 # Suma de Saldo Inicial + Recuperacion + Otros
 
