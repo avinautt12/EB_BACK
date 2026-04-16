@@ -286,8 +286,8 @@ def sincronizar_odoo():
                         palabras_incluidas=palabras_req
                     )
 
-                    # 🚀 2. CÁLCULO ESPECIAL DE RESTA (Solo para IDs 101 y 102)
-                    if id_concepto in [101, 102]:
+                    # 🚀 2. CÁLCULO ESPECIAL DE RESTA (Solo para ID 101)
+                    if id_concepto in [101]:
                         saldo_mes_anterior = obtener_saldo_cuenta_odoo(
                             codigo_cuenta=codigo, 
                             fecha_inicio=fecha_inicio_ant, 
@@ -466,8 +466,8 @@ def recalcular_formulas_flujo(conexion, anio, mes):
         ID_VENTAS = 2
         ID_RECUPERACION = 3  # Espejo de ventas
         
-        # Otros Ingresos
-        IDS_OTROS_INGRESOS = [6, 7, 101, 102, 103, 104]
+        # Otros Ingresos (ID 102 no suma al total de entradas por requerimiento)
+        IDS_OTROS_INGRESOS = [6, 7, 101, 103, 104]
         
         ID_TOTAL_ENTRADAS = 8 # Suma de Saldo Inicial + Recuperacion + Otros
 
