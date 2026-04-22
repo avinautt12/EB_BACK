@@ -28,6 +28,9 @@ from routes.gastos import gastos_bp
 from routes.ingresos import ingresos_bp
 
 from routes.retroactivos import retroactivos_bp
+from routes.edicion_pedidos import edicion_bp
+from routes.forecast import forecast_bp
+from routes.ventas import ventas_bp
 
 # Importamos la instancia de Celery desde celery_worker
 from celery_worker import celery_app as celery
@@ -69,6 +72,20 @@ def create_app():
     # Además, añadimos un handler que refleja dinámicamente orígenes localhost/127.0.0.1 con cualquier puerto.
     # Esto permite desarrollar con el servidor Angular en puertos aleatorios sin romper CORS.
     from flask import request
+
+    from flask import make_response
+
+    @app.before_request
+    def _handle_preflight():
+        if request.method == 'OPTIONS':
+            origin = request.headers.get('Origin', '')
+            if origin in allowed_origins or origin.startswith('http://localhost:') or origin.startswith('http://127.0.0.1:'):
+                response = make_response('', 200)
+                response.headers['Access-Control-Allow-Origin'] = origin
+                response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,DELETE,OPTIONS'
+                response.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
+                response.headers['Access-Control-Allow-Credentials'] = 'true'
+                return response
 
     @app.after_request
     def _apply_cors_headers(response):
@@ -120,7 +137,10 @@ def create_app():
     app.register_blueprint(gastos_bp)
     app.register_blueprint(ingresos_bp)
 
-    app.register_blueprint(retroactivos_bp)  
+    app.register_blueprint(retroactivos_bp)
+    app.register_blueprint(edicion_bp)
+    app.register_blueprint(forecast_bp)
+    app.register_blueprint(ventas_bp)
     return app
 
 app = create_app()
@@ -133,5 +153,6 @@ if __name__ == '__main__':
         port=5000,
         debug=True,
         use_reloader=False,  # Importante para eventlet
-        log_output=True
+        log_output=True,
+        allow_unsafe_werkzeug=True
     )

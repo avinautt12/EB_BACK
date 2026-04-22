@@ -3,12 +3,19 @@ from flask import Blueprint, jsonify, request, Response
 from db_conexion import obtener_conexion
 from decimal import Decimal
 import json
+import time
 from utils.email_utils import crear_cuerpo_email
 from utils.odoo_utils import get_odoo_models, ODOO_DB, ODOO_PASSWORD
 import logging
 import traceback
 
 caratulas_bp = Blueprint('caratulas', __name__, url_prefix='')
+
+# ── Caché en memoria para detalle-compras-odoo (TTL = 5 min) ─────────────────
+# Evita repetir las lentas llamadas XML-RPC a Odoo cuando el mismo cliente
+# se consulta varias veces en una sesión de trabajo.
+_odoo_pedidos_cache: dict = {}   # key: (cliente, ref_exacta, grupo) → (ts, data)
+_ODOO_PEDIDOS_TTL = 300          # segundos
 
 @caratulas_bp.route('/caratula_evac', methods=['GET'])
 def buscar_caratula_evac():
@@ -498,6 +505,12 @@ def detalle_compras_odoo():
 
     if not cliente and not grupo_odoo:
         return jsonify({'error': 'Se requiere parámetro cliente o grupo'}), 400
+
+    # ── Caché de respuesta (5 min TTL) ────────────────────────────────────────
+    _cache_key = (cliente or '', bool(ref_exacta), grupo_odoo or '')
+    _cached = _odoo_pedidos_cache.get(_cache_key)
+    if _cached and (time.time() - _cached[0]) < _ODOO_PEDIDOS_TTL:
+        return jsonify(_cached[1]), 200
 
     # ── Fecha de inicio de temporada por cliente / grupo ──────────────────────
     # En lugar del hard-code '2025-07-01' usamos f_inicio de la tabla clientes,
@@ -1152,6 +1165,32 @@ def detalle_compras_odoo():
         resultado = []
         filas_planas = []
 
+        # Pre-cargar SKUs del forecast para marcar líneas con de_proyeccion
+        import re as _re_fc
+        def _norm_fc(s): return _re_fc.sub(r'[\-\s]', '', str(s or '')).upper()
+        _forecast_skus: set = set()
+        try:
+            _conn_fc = obtener_conexion()
+            _cur_fc = _conn_fc.cursor(dictionary=True)
+            if grupo_odoo:
+                _cur_fc.execute(
+                    "SELECT sku FROM forecast_proyecciones "
+                    "WHERE clave_cliente IN "
+                    "  (SELECT clave FROM clientes WHERE id_grupo = %s)",
+                    (grupo_odoo,)
+                )
+            else:
+                _cur_fc.execute(
+                    "SELECT sku FROM forecast_proyecciones "
+                    "WHERE clave_cliente = %s",
+                    (cliente,)
+                )
+            _forecast_skus = {_norm_fc(r['sku']) for r in _cur_fc.fetchall()}
+            _cur_fc.close()
+            _conn_fc.close()
+        except Exception as _ex_fc:
+            logging.warning('detalle_compras_odoo: error al leer forecast SKUs: %s', _ex_fc)
+
         for o in orders:
             estado_orden_raw = o.get('state') or ''
             estado_orden = SALE_STATE_LABELS.get(estado_orden_raw, estado_orden_raw)
@@ -1309,7 +1348,8 @@ def detalle_compras_odoo():
                     'pickings': order_obj['pickings'],
                     'estatus_out': estatus_out_lin,
                     'fecha_esperada': fecha_esp_final,
-                    'po_name': po_name_final
+                    'po_name': po_name_final,
+                    'de_proyeccion': _norm_fc(lin.get('clave_producto')) in _forecast_skus,
                 })
 
             resultado.append(order_obj)
@@ -1351,7 +1391,7 @@ def detalle_compras_odoo():
         total = len(filas_planas)
         filas_pag = filas_planas[offset: offset + limit] if limit is not None else filas_planas[offset:]
 
-        return jsonify({
+        _response_data = {
             'data': resultado,
             'rows': filas_pag,
             'meta': {
@@ -1362,7 +1402,9 @@ def detalle_compras_odoo():
                 'fecha_inicio_temporada': fecha_inicio_temporada,
                 'avance_previo': avance_previo
             }
-        }), 200
+        }
+        _odoo_pedidos_cache[_cache_key] = (time.time(), _response_data)
+        return jsonify(_response_data), 200
 
     except Exception as e:
         tb = traceback.format_exc()

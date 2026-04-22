@@ -1,0 +1,394 @@
+"""
+Servicio de gestión de catálogo de productos desde Excel.
+
+Proporciona funcionalidad de:
+- Carga de productos desde archivos Excel
+- Validación de SKUs contra el catálogo Excel
+- Administración (listar, eliminar, limpiar)
+"""
+
+from db_conexion import obtener_conexion
+import logging
+import io
+
+try:
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    OPENPYXL_OK = True
+except ImportError:
+    OPENPYXL_OK = False
+
+
+# ─────────────────────────────────────────────────────
+# Initialization
+# ─────────────────────────────────────────────────────
+
+def ensure_excel_producto_table():
+    """Create forecast_excel_productos table if it doesn't exist."""
+    conn = obtener_conexion()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS forecast_excel_productos (
+                sku VARCHAR(100) NOT NULL PRIMARY KEY,
+                nombre VARCHAR(400) NOT NULL,
+                color VARCHAR(150) DEFAULT NULL,
+                talla VARCHAR(100) DEFAULT NULL,
+                origen ENUM('excel', 'odoo') DEFAULT 'excel',
+                cargado_en DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                actualizado_en DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_origen (origen),
+                FULLTEXT idx_ft_nombre (nombre)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """)
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ─────────────────────────────────────────────────────
+# Public Functions
+# ─────────────────────────────────────────────────────
+
+def get_product_from_sources(sku: str) -> dict or None:
+    """
+    Busca un producto por SKU en ambas fuentes (Excel primero, luego Odoo).
+    
+    Args:
+        sku: código del producto
+    
+    Returns:
+        dict con keys: sku, nombre, color, talla, origen
+        o None si no existe en ninguna fuente
+    """
+    conn = obtener_conexion()
+    cur = conn.cursor(dictionary=True)
+    try:
+        # Buscar primero en Excel (tiene prioridad)
+        cur.execute("""
+            SELECT sku, nombre, color, talla, origen
+            FROM forecast_excel_productos
+            WHERE sku = %s AND origen = 'excel'
+        """, (sku,))
+        row = cur.fetchone()
+        if row:
+            return row
+
+        # Fallback a Odoo catalog
+        cur.execute("""
+            SELECT referencia_interna AS sku, 
+                   nombre_producto AS nombre,
+                   color,
+                   talla,
+                   'odoo' AS origen
+            FROM odoo_catalogo
+            WHERE referencia_interna = %s
+        """, (sku,))
+        row = cur.fetchone()
+        return row
+    finally:
+        cur.close()
+        conn.close()
+
+
+def load_excel_products(file_content: bytes) -> dict:
+    """
+    Parsea y carga productos desde un archivo Excel.
+    
+    Estructura esperada:
+    - Encabezado con: SKU, NOMBRE, [COLOR], [TALLA]
+    
+    Args:
+        file_content: contenido del archivo Excel en bytes
+    
+    Returns:
+        dict con keys:
+        - 'success': bool
+        - 'cargados': int
+        - 'total_filas_procesadas': int
+        - 'duplicados_actualizados': int
+        - 'errores': list
+        - 'message': str (si error)
+    """
+    ensure_excel_producto_table()
+    result = {
+        'success': False,
+        'cargados': 0,
+        'total_filas_procesadas': 0,
+        'duplicados_actualizados': 0,
+        'errores': []
+    }
+
+    if not OPENPYXL_OK:
+        result['message'] = 'openpyxl no está instalado'
+        return result
+
+    try:
+        # Parse Excel
+        wb = openpyxl.load_workbook(io.BytesIO(file_content), data_only=True)
+        ws = wb.active
+    except Exception as e:
+        result['message'] = f'No se pudo leer el archivo Excel: {str(e)}'
+        logging.error('[load_excel_products] Parse error: %s', e)
+        return result
+
+    # Find header row
+    header_row = None
+    for r_idx in range(1, 10):
+        val = ws.cell(row=r_idx, column=1).value
+        if val and str(val).strip().upper() == 'SKU':
+            header_row = r_idx
+            break
+
+    if header_row is None:
+        result['message'] = 'Estructura inválida: no se encontró encabezado con "SKU"'
+        return result
+
+    # Map columns
+    col_map = {}
+    for c_idx in range(1, 10):
+        header = ws.cell(row=header_row, column=c_idx).value
+        if not header:
+            break
+        header_clean = str(header).strip().upper()
+        col_map[header_clean] = c_idx
+
+    required_cols = {'SKU', 'NOMBRE'}
+    if not required_cols.issubset(set(col_map.keys())):
+        result['message'] = f'Faltan columnas requeridas. Encontradas: {list(col_map.keys())}'
+        return result
+
+    # Parse rows
+    productos = []
+    errores = []
+    skus_cargados = set()
+
+    for r_idx in range(header_row + 1, ws.max_row + 1):
+        sku = ws.cell(row=r_idx, column=col_map['SKU']).value
+        nombre = ws.cell(row=r_idx, column=col_map['NOMBRE']).value
+
+        if not sku or not nombre:
+            continue
+
+        sku = str(sku).strip()
+        nombre = str(nombre).strip().upper()
+        color = (str(ws.cell(row=r_idx, column=col_map.get('COLOR', 0)).value or '')).strip().upper()
+        talla = (str(ws.cell(row=r_idx, column=col_map.get('TALLA', 0)).value or '')).strip().upper()
+
+        if not sku:
+            errores.append(f'Fila {r_idx}: SKU vacío')
+            continue
+
+        if sku in skus_cargados:
+            errores.append(f'Fila {r_idx}: SKU "{sku}" duplicado dentro del archivo')
+            continue
+
+        skus_cargados.add(sku)
+        productos.append({
+            'sku': sku,
+            'nombre': nombre,
+            'color': color or None,
+            'talla': talla or None
+        })
+
+    if not productos:
+        result['message'] = 'No se encontraron productos válidos en el archivo'
+        result['errores'] = errores
+        return result
+
+    # Check for existing SKUs
+    conn = obtener_conexion()
+    cur = conn.cursor(dictionary=True)
+    try:
+        placeholders = ','.join(['%s'] * len(skus_cargados))
+        cur.execute(
+            f"SELECT sku FROM forecast_excel_productos WHERE sku IN ({placeholders})",
+            list(skus_cargados)
+        )
+        duplicados = set(r['sku'] for r in cur.fetchall())
+    finally:
+        cur.close()
+        conn.close()
+
+    # Upsert into database
+    conn = obtener_conexion()
+    cur = conn.cursor()
+    try:
+        for p in productos:
+            cur.execute("""
+                INSERT INTO forecast_excel_productos
+                    (sku, nombre, color, talla, origen, cargado_en)
+                VALUES (%s, %s, %s, %s, 'excel', CURRENT_TIMESTAMP)
+                ON DUPLICATE KEY UPDATE
+                    nombre = VALUES(nombre),
+                    color = VALUES(color),
+                    talla = VALUES(talla),
+                    actualizado_en = CURRENT_TIMESTAMP
+            """, (p['sku'], p['nombre'], p['color'], p['talla']))
+        conn.commit()
+        logging.info('[load_excel_products] Loaded %d products', len(productos))
+    except Exception as e:
+        conn.rollback()
+        logging.exception('[load_excel_products] Insert error: %s', e)
+        result['message'] = f'Error al guardar: {str(e)}'
+        return result
+    finally:
+        cur.close()
+        conn.close()
+
+    result['success'] = True
+    result['cargados'] = len(productos)
+    result['total_filas_procesadas'] = len(skus_cargados)
+    result['duplicados_actualizados'] = len(duplicados)
+    if errores:
+        result['errores'] = errores
+
+    return result
+
+
+def list_excel_products(search: str = '', limit: int = 100, offset: int = 0) -> dict:
+    """
+    Lista productos del catálogo Excel.
+    
+    Args:
+        search: búsqueda por SKU exacto o NOMBRE (fulltext)
+        limit: máximo resultados
+        offset: paginación
+    
+    Returns:
+        dict con: total, productos, limit, offset
+    """
+    ensure_excel_producto_table()
+    limit = min(limit, 500)
+    conn = obtener_conexion()
+    cur = conn.cursor(dictionary=True)
+    try:
+        if search:
+            cur.execute("""
+                SELECT sku, nombre, color, talla, cargado_en, actualizado_en
+                FROM forecast_excel_productos
+                WHERE origen = 'excel' AND (
+                    sku = %s
+                    OR MATCH(nombre) AGAINST(%s IN BOOLEAN MODE)
+                )
+                ORDER BY cargado_en DESC
+                LIMIT %s OFFSET %s
+            """, (search, search, limit, offset))
+        else:
+            cur.execute("""
+                SELECT sku, nombre, color, talla, cargado_en, actualizado_en
+                FROM forecast_excel_productos
+                WHERE origen = 'excel'
+                ORDER BY cargado_en DESC
+                LIMIT %s OFFSET %s
+            """, (limit, offset))
+
+        productos = cur.fetchall()
+
+        # Total count
+        if search:
+            cur.execute("""
+                SELECT COUNT(*) as cnt
+                FROM forecast_excel_productos
+                WHERE origen = 'excel' AND (
+                    sku = %s
+                    OR MATCH(nombre) AGAINST(%s IN BOOLEAN MODE)
+                )
+            """, (search, search))
+        else:
+            cur.execute("SELECT COUNT(*) as cnt FROM forecast_excel_productos WHERE origen = 'excel'")
+        
+        total = cur.fetchone()['cnt']
+
+        return {
+            'total': total,
+            'limit': limit,
+            'offset': offset,
+            'productos': productos
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+
+def delete_excel_product(sku: str) -> dict:
+    """
+    Elimina un producto del catálogo Excel.
+    
+    Args:
+        sku: código del producto
+    
+    Returns:
+        dict con: eliminado (bool), sku, message (si error)
+    """
+    sku = str(sku).strip()
+    if not sku:
+        return {'eliminado': False, 'message': 'SKU requerido'}
+
+    conn = obtener_conexion()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "DELETE FROM forecast_excel_productos WHERE sku = %s AND origen = 'excel'",
+            (sku,)
+        )
+        if cur.rowcount == 0:
+            return {'eliminado': False, 'message': f'Producto "{sku}" no encontrado'}
+        conn.commit()
+        logging.info('[delete_excel_product] Deleted SKU: %s', sku)
+        return {'eliminado': True, 'sku': sku}
+    except Exception as e:
+        logging.exception('[delete_excel_product] Error: %s', e)
+        return {'eliminado': False, 'message': f'Error: {str(e)}'}
+    finally:
+        cur.close()
+        conn.close()
+
+
+def clear_excel_catalog() -> dict:
+    """
+    Elimina TODOS los productos del catálogo Excel.
+    
+    Returns:
+        dict con: eliminados (int), message
+    """
+    conn = obtener_conexion()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM forecast_excel_productos WHERE origen = 'excel'")
+        count = cur.rowcount
+        conn.commit()
+        logging.warning('[clear_excel_catalog] Cleared %d products', count)
+        return {'eliminados': count, 'mensaje': 'Catálogo Excel vaciado'}
+    except Exception as e:
+        logging.exception('[clear_excel_catalog] Error: %s', e)
+        return {'eliminados': 0, 'message': f'Error: {str(e)}'}
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_valid_skus() -> set:
+    """
+    Returns the set of valid SKUs.
+    Excel catalog is the primary source; Odoo is only consulted when Excel is empty.
+    """
+    conn = obtener_conexion()
+    cur = conn.cursor(dictionary=True)
+    try:
+        cur.execute("SELECT DISTINCT sku FROM forecast_excel_productos WHERE origen = 'excel'")
+        valid_skus = set(r['sku'] for r in cur.fetchall())
+
+        if valid_skus:
+            return valid_skus
+
+        # Fallback to Odoo catalog when Excel is empty
+        cur.execute("SELECT referencia_interna FROM odoo_catalogo")
+        for r in cur.fetchall():
+            valid_skus.add(r['referencia_interna'])
+
+        return valid_skus
+    finally:
+        cur.close()
+        conn.close()

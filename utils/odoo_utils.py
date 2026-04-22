@@ -2,12 +2,28 @@ import xmlrpc.client
 import ssl
 import time
 import logging
+import os
+from pathlib import Path
+from dotenv import load_dotenv
 
-# --- CONFIGURACIÓN Y CREDENCIALES ---
-ODOO_URL = 'https://ebik.odoo.com'
-ODOO_DB = 'ebik-prod-15375115'
-ODOO_USER = 'sistemas@elitebike-mx.com'
-ODOO_PASSWORD = 'bb36fdae62c3c113fb91de0143eba06da199672d'
+# Cargar .env desde la raíz del proyecto (EB_BACK/)
+load_dotenv(Path(__file__).resolve().parent.parent / '.env')
+
+# --- AMBIENTE ACTIVO (prod | test) ---
+_ENV = os.getenv('ODOO_ENV', 'prod').strip().lower()
+
+if _ENV == 'test':
+    ODOO_URL      = os.getenv('ODOO_TEST_URL',      'https://ebik-pruebas031826-30774924.dev.odoo.com')
+    ODOO_DB       = os.getenv('ODOO_TEST_DB',       'ebik-pruebas031826-30774924')
+    ODOO_USER     = os.getenv('ODOO_TEST_USER',     'sistemas@elitebike-mx.com')
+    ODOO_PASSWORD = os.getenv('ODOO_TEST_PASSWORD', '')
+else:
+    ODOO_URL      = os.getenv('ODOO_PROD_URL',      'https://ebik.odoo.com')
+    ODOO_DB       = os.getenv('ODOO_PROD_DB',       'ebik-prod-15375115')
+    ODOO_USER     = os.getenv('ODOO_PROD_USER',     'sistemas@elitebike-mx.com')
+    ODOO_PASSWORD = os.getenv('ODOO_PROD_PASSWORD', 'bb36fdae62c3c113fb91de0143eba06da199672d')
+
+logging.info('Odoo ambiente: %s | URL: %s | DB: %s', _ENV.upper(), ODOO_URL, ODOO_DB)
 
 # 👇 BLINDAJE MULTI-EMPRESA: Fijamos el ID de Elite Bike
 ODOO_COMPANY_ID = 1
