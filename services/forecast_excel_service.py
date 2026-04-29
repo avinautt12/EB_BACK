@@ -372,23 +372,29 @@ def clear_excel_catalog() -> dict:
 def get_valid_skus() -> set:
     """
     Returns the set of valid SKUs.
-    Excel catalog is the primary source; Odoo is only consulted when Excel is empty.
+    Priority: forecast_sku_whitelist → forecast_excel_productos → odoo_catalogo.
     """
     conn = obtener_conexion()
-    cur = conn.cursor(dictionary=True)
+    cur  = conn.cursor(dictionary=True)
     try:
+        # 1. Whitelist (productos oficiales de Odoo seleccionados)
+        try:
+            cur.execute("SELECT sku FROM forecast_sku_whitelist")
+            whitelist = set(r['sku'] for r in cur.fetchall())
+            if whitelist:
+                return whitelist
+        except Exception:
+            pass  # tabla puede no existir aún en entornos recién migrados
+
+        # 2. Catálogo Excel (legacy)
         cur.execute("SELECT DISTINCT sku FROM forecast_excel_productos WHERE origen = 'excel'")
         valid_skus = set(r['sku'] for r in cur.fetchall())
-
         if valid_skus:
             return valid_skus
 
-        # Fallback to Odoo catalog when Excel is empty
+        # 3. Catálogo Odoo sincronizado
         cur.execute("SELECT referencia_interna FROM odoo_catalogo")
-        for r in cur.fetchall():
-            valid_skus.add(r['referencia_interna'])
-
-        return valid_skus
+        return set(r['referencia_interna'] for r in cur.fetchall())
     finally:
         cur.close()
         conn.close()

@@ -31,6 +31,7 @@ from routes.retroactivos import retroactivos_bp
 from routes.edicion_pedidos import edicion_bp
 from routes.forecast import forecast_bp
 from routes.ventas import ventas_bp
+from routes.garantias import garantias_bp
 
 # Importamos la instancia de Celery desde celery_worker
 from celery_worker import celery_app as celery
@@ -141,6 +142,7 @@ def create_app():
     app.register_blueprint(edicion_bp)
     app.register_blueprint(forecast_bp)
     app.register_blueprint(ventas_bp)
+    app.register_blueprint(garantias_bp)
     return app
 
 app = create_app()

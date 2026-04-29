@@ -20,8 +20,10 @@ from datetime import datetime
 
 try:
     import openpyxl
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, Protection
     from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.datavalidation import DataValidation
+    from openpyxl.cell.rich_text import CellRichText, TextBlock, InlineFont
     OPENPYXL_OK = True
 except ImportError:
     OPENPYXL_OK = False
@@ -40,50 +42,197 @@ MESES = ['mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre',
          'noviembre', 'diciembre', 'enero', 'febrero', 'marzo', 'abril']
 MESES_LABELS = ['May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic', 'Ene', 'Feb', 'Mar', 'Abr']
 
+TIER_NAMES  = ['Partner Elite Plus!', 'Partner Elite', 'Partner', 'Distribuidor']
 CAMPOS_INFO = ['SKU', 'Producto', 'Marca', 'Modelo', 'Color', 'Talla']
+IVA_FACTOR  = 1.16   # precios en SKU_CATALOG y Odoo son sin IVA
+
+# SKU whitelist para proyecciones (solo estos productos se muestran)
+FORECAST_SKU_WHITELIST = [
+    '427981-5814004', '427981-5814006', '427981-5814008', '427981-5814010', '427981-5814012',
+    '427982-8561004', '427982-8561006', '427982-8561008', '427982-8561010', '427982-8561012',
+    '427982-0002004', '427982-0002006', '427982-0002008', '427982-0002010', '427982-0002012',
+    '427902-8551004', '427902-8551006', '427902-8551008', '427902-8551010', '427902-8551012',
+    '427902-8512004', '427902-8512006', '427902-8512008', '427902-8512010', '427902-8512012',
+    '427983-8587004', '427983-8587006', '427983-8587008', '427983-8587010', '427983-8587012',
+    '427983-8266004', '427983-8266006', '427983-8266008', '427983-8266010', '427983-8266012',
+    '427984-8523004', '427984-8523006', '427984-8523008', '427984-8523010', '427984-8523012', '427984-8523014',
+    '427984-8423004', '427984-8423006', '427984-8423008', '427984-8423010', '427984-8423012',
+    '427984-8566004', '427984-8566006', '427984-8566008', '427984-8566010', '427984-8566012', '427984-8566014',
+    '427794-8538004', '427794-8538006', '427794-8538008', '427794-8538010', '427794-8538012', '427794-8538014',
+    '427794-8512004', '427794-8512006', '427794-8512008', '427794-8512010', '427794-8512012', '427794-8512014',
+    '427794-8605004', '427794-8605006', '427794-8605008', '427794-8605010',
+    '427102-0001004', '427102-0001006', '427102-0001008', '427102-0001010', '427102-0001012', '427102-0001014',
+    '427102-0002004', '427102-0002006', '427102-0002008', '427102-0002010', '427102-0002012', '427102-0002014',
+    '427102-2878004', '427102-2878006', '427102-2878008', '427102-2878010',
+    '427102-1087004', '427102-1087006', '427102-1087008', '427102-1087010',
+    '427985-3831006', '427985-3831008', '427985-3831010', '427985-3831012'
+]
+
+# Catálogo oficial MY27 — precios reales + disponibilidad mensual (May-Ago).
+# Meses NOT en este dict (Sep-Abr) siempre son disponibles.
+# avail: True = puede pedirse, False = mes bloqueado (celda oscura, solo lectura).
+SKU_CATALOG: dict = {
+    # ── CONTRAIL 40 ── llega MAYO(F): disponible desde junio (junio(F) no bloquea — ya llegó en mayo)
+    '427102-0001004': {'prices': {'Distribuidor': 10155.17, 'Partner': 9887.93, 'Partner Elite': 9553.88, 'Partner Elite Plus!': 9286.64, 'list_price': 13362.07}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427102-0001006': {'prices': {'Distribuidor': 10155.17, 'Partner': 9887.93, 'Partner Elite': 9553.88, 'Partner Elite Plus!': 9286.64, 'list_price': 13362.07}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427102-0001008': {'prices': {'Distribuidor': 10155.17, 'Partner': 9887.93, 'Partner Elite': 9553.88, 'Partner Elite Plus!': 9286.64, 'list_price': 13362.07}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427102-0001010': {'prices': {'Distribuidor': 10155.17, 'Partner': 9887.93, 'Partner Elite': 9553.88, 'Partner Elite Plus!': 9286.64, 'list_price': 13362.07}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427102-0001012': {'prices': {'Distribuidor': 10155.17, 'Partner': 9887.93, 'Partner Elite': 9553.88, 'Partner Elite Plus!': 9286.64, 'list_price': 13362.07}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    # talla 14: mayo(F) sí, junio NO → primer mes ordenable: junio
+    '427102-0001014': {'prices': {'Distribuidor': 10155.17, 'Partner': 9887.93, 'Partner Elite': 9553.88, 'Partner Elite Plus!': 9286.64, 'list_price': 13362.07}, 'avail': {'mayo': False, 'junio': True,  'julio': True, 'agosto': True}},
+    # ── CONTRAIL 40 color 2 ── mayo(F) pero junio sin llegada → primer mes ordenable: junio
+    '427102-0002004': {'prices': {'Distribuidor': 10155.17, 'Partner': 9887.93, 'Partner Elite': 9553.88, 'Partner Elite Plus!': 9286.64, 'list_price': 13362.07}, 'avail': {'mayo': False, 'junio': True,  'julio': True, 'agosto': True}},
+    '427102-0002006': {'prices': {'Distribuidor': 10155.17, 'Partner': 9887.93, 'Partner Elite': 9553.88, 'Partner Elite Plus!': 9286.64, 'list_price': 13362.07}, 'avail': {'mayo': False, 'junio': True,  'julio': True, 'agosto': True}},
+    '427102-0002008': {'prices': {'Distribuidor': 10155.17, 'Partner': 9887.93, 'Partner Elite': 9553.88, 'Partner Elite Plus!': 9286.64, 'list_price': 13362.07}, 'avail': {'mayo': False, 'junio': True,  'julio': True, 'agosto': True}},
+    '427102-0002010': {'prices': {'Distribuidor': 10155.17, 'Partner': 9887.93, 'Partner Elite': 9553.88, 'Partner Elite Plus!': 9286.64, 'list_price': 13362.07}, 'avail': {'mayo': False, 'junio': True,  'julio': True, 'agosto': True}},
+    '427102-0002012': {'prices': {'Distribuidor': 10155.17, 'Partner': 9887.93, 'Partner Elite': 9553.88, 'Partner Elite Plus!': 9286.64, 'list_price': 13362.07}, 'avail': {'mayo': False, 'junio': True,  'julio': True, 'agosto': True}},
+    '427102-0002014': {'prices': {'Distribuidor': 10155.17, 'Partner': 9887.93, 'Partner Elite': 9553.88, 'Partner Elite Plus!': 9286.64, 'list_price': 13362.07}, 'avail': {'mayo': False, 'junio': True,  'julio': True, 'agosto': True}},
+    # ── CONTRAIL 40 color 3 ── llega MAYO(F): disponible desde junio
+    '427102-1087004': {'prices': {'Distribuidor': 10155.17, 'Partner': 9887.93, 'Partner Elite': 9553.88, 'Partner Elite Plus!': 9286.64, 'list_price': 13362.07}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427102-1087006': {'prices': {'Distribuidor': 10155.17, 'Partner': 9887.93, 'Partner Elite': 9553.88, 'Partner Elite Plus!': 9286.64, 'list_price': 13362.07}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427102-1087008': {'prices': {'Distribuidor': 10155.17, 'Partner': 9887.93, 'Partner Elite': 9553.88, 'Partner Elite Plus!': 9286.64, 'list_price': 13362.07}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427102-1087010': {'prices': {'Distribuidor': 10155.17, 'Partner': 9887.93, 'Partner Elite': 9553.88, 'Partner Elite Plus!': 9286.64, 'list_price': 13362.07}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    # ── CONTRAIL 40 color 4 ── llega MAYO(F): disponible desde junio
+    '427102-2878004': {'prices': {'Distribuidor': 10155.17, 'Partner': 9887.93, 'Partner Elite': 9553.88, 'Partner Elite Plus!': 9286.64, 'list_price': 13362.07}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427102-2878006': {'prices': {'Distribuidor': 10155.17, 'Partner': 9887.93, 'Partner Elite': 9553.88, 'Partner Elite Plus!': 9286.64, 'list_price': 13362.07}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427102-2878008': {'prices': {'Distribuidor': 10155.17, 'Partner': 9887.93, 'Partner Elite': 9553.88, 'Partner Elite Plus!': 9286.64, 'list_price': 13362.07}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427102-2878010': {'prices': {'Distribuidor': 10155.17, 'Partner': 9887.93, 'Partner Elite': 9553.88, 'Partner Elite Plus!': 9286.64, 'list_price': 13362.07}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    # ── SCALE 920 ── primera llegada: JULIO (no finales) → primer mes ordenable: julio
+    '427983-8587004': {'prices': {'Distribuidor': 14020.69, 'Partner': 13651.72, 'Partner Elite': 13190.52, 'Partner Elite Plus!': 12821.55, 'list_price': 18448.28}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427983-8587006': {'prices': {'Distribuidor': 14020.69, 'Partner': 13651.72, 'Partner Elite': 13190.52, 'Partner Elite Plus!': 12821.55, 'list_price': 18448.28}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427983-8587008': {'prices': {'Distribuidor': 14020.69, 'Partner': 13651.72, 'Partner Elite': 13190.52, 'Partner Elite Plus!': 12821.55, 'list_price': 18448.28}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427983-8587010': {'prices': {'Distribuidor': 14020.69, 'Partner': 13651.72, 'Partner Elite': 13190.52, 'Partner Elite Plus!': 12821.55, 'list_price': 18448.28}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427983-8587012': {'prices': {'Distribuidor': 14020.69, 'Partner': 13651.72, 'Partner Elite': 13190.52, 'Partner Elite Plus!': 12821.55, 'list_price': 18448.28}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427983-8266004': {'prices': {'Distribuidor': 14020.69, 'Partner': 13651.72, 'Partner Elite': 13190.52, 'Partner Elite Plus!': 12821.55, 'list_price': 18448.28}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427983-8266006': {'prices': {'Distribuidor': 14020.69, 'Partner': 13651.72, 'Partner Elite': 13190.52, 'Partner Elite Plus!': 12821.55, 'list_price': 18448.28}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427983-8266008': {'prices': {'Distribuidor': 14020.69, 'Partner': 13651.72, 'Partner Elite': 13190.52, 'Partner Elite Plus!': 12821.55, 'list_price': 18448.28}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427983-8266010': {'prices': {'Distribuidor': 14020.69, 'Partner': 13651.72, 'Partner Elite': 13190.52, 'Partner Elite Plus!': 12821.55, 'list_price': 18448.28}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427983-8266012': {'prices': {'Distribuidor': 14020.69, 'Partner': 13651.72, 'Partner Elite': 13190.52, 'Partner Elite Plus!': 12821.55, 'list_price': 18448.28}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    # ── SCALE 980 ── primera llegada: JUNIO(F) → primer mes ordenable: junio
+    '427984-8523004': {'prices': {'Distribuidor': 12317.24, 'Partner': 11993.10, 'Partner Elite': 11587.93, 'Partner Elite Plus!': 11263.79, 'list_price': 16206.90}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427984-8523006': {'prices': {'Distribuidor': 12317.24, 'Partner': 11993.10, 'Partner Elite': 11587.93, 'Partner Elite Plus!': 11263.79, 'list_price': 16206.90}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427984-8523008': {'prices': {'Distribuidor': 12317.24, 'Partner': 11993.10, 'Partner Elite': 11587.93, 'Partner Elite Plus!': 11263.79, 'list_price': 16206.90}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427984-8523010': {'prices': {'Distribuidor': 12317.24, 'Partner': 11993.10, 'Partner Elite': 11587.93, 'Partner Elite Plus!': 11263.79, 'list_price': 16206.90}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427984-8523012': {'prices': {'Distribuidor': 12317.24, 'Partner': 11993.10, 'Partner Elite': 11587.93, 'Partner Elite Plus!': 11263.79, 'list_price': 16206.90}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427984-8523014': {'prices': {'Distribuidor': 12317.24, 'Partner': 11993.10, 'Partner Elite': 11587.93, 'Partner Elite Plus!': 11263.79, 'list_price': 16206.90}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427984-8423004': {'prices': {'Distribuidor': 12317.24, 'Partner': 11993.10, 'Partner Elite': 11587.93, 'Partner Elite Plus!': 11263.79, 'list_price': 16206.90}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427984-8423006': {'prices': {'Distribuidor': 12317.24, 'Partner': 11993.10, 'Partner Elite': 11587.93, 'Partner Elite Plus!': 11263.79, 'list_price': 16206.90}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427984-8423008': {'prices': {'Distribuidor': 12317.24, 'Partner': 11993.10, 'Partner Elite': 11587.93, 'Partner Elite Plus!': 11263.79, 'list_price': 16206.90}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427984-8423010': {'prices': {'Distribuidor': 12317.24, 'Partner': 11993.10, 'Partner Elite': 11587.93, 'Partner Elite Plus!': 11263.79, 'list_price': 16206.90}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427984-8423012': {'prices': {'Distribuidor': 12317.24, 'Partner': 11993.10, 'Partner Elite': 11587.93, 'Partner Elite Plus!': 11263.79, 'list_price': 16206.90}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427984-8566004': {'prices': {'Distribuidor': 12317.24, 'Partner': 11993.10, 'Partner Elite': 11587.93, 'Partner Elite Plus!': 11263.79, 'list_price': 16206.90}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427984-8566006': {'prices': {'Distribuidor': 12317.24, 'Partner': 11993.10, 'Partner Elite': 11587.93, 'Partner Elite Plus!': 11263.79, 'list_price': 16206.90}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427984-8566008': {'prices': {'Distribuidor': 12317.24, 'Partner': 11993.10, 'Partner Elite': 11587.93, 'Partner Elite Plus!': 11263.79, 'list_price': 16206.90}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427984-8566010': {'prices': {'Distribuidor': 12317.24, 'Partner': 11993.10, 'Partner Elite': 11587.93, 'Partner Elite Plus!': 11263.79, 'list_price': 16206.90}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427984-8566012': {'prices': {'Distribuidor': 12317.24, 'Partner': 11993.10, 'Partner Elite': 11587.93, 'Partner Elite Plus!': 11263.79, 'list_price': 16206.90}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427984-8566014': {'prices': {'Distribuidor': 12317.24, 'Partner': 11993.10, 'Partner Elite': 11587.93, 'Partner Elite Plus!': 11263.79, 'list_price': 16206.90}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    # ── SPARK RC ── primera llegada: JUNIO(F) → primer mes ordenable: junio
+    '427794-8538004': {'prices': {'Distribuidor': 11072.41, 'Partner': 10781.03, 'Partner Elite': 10416.81, 'Partner Elite Plus!': 10125.43, 'list_price': 14568.97}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427794-8538006': {'prices': {'Distribuidor': 11072.41, 'Partner': 10781.03, 'Partner Elite': 10416.81, 'Partner Elite Plus!': 10125.43, 'list_price': 14568.97}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427794-8538008': {'prices': {'Distribuidor': 11072.41, 'Partner': 10781.03, 'Partner Elite': 10416.81, 'Partner Elite Plus!': 10125.43, 'list_price': 14568.97}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427794-8538010': {'prices': {'Distribuidor': 11072.41, 'Partner': 10781.03, 'Partner Elite': 10416.81, 'Partner Elite Plus!': 10125.43, 'list_price': 14568.97}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427794-8538012': {'prices': {'Distribuidor': 11072.41, 'Partner': 10781.03, 'Partner Elite': 10416.81, 'Partner Elite Plus!': 10125.43, 'list_price': 14568.97}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427794-8538014': {'prices': {'Distribuidor': 11072.41, 'Partner': 10781.03, 'Partner Elite': 10416.81, 'Partner Elite Plus!': 10125.43, 'list_price': 14568.97}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427794-8512004': {'prices': {'Distribuidor': 11072.41, 'Partner': 10781.03, 'Partner Elite': 10416.81, 'Partner Elite Plus!': 10125.43, 'list_price': 14568.97}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427794-8512006': {'prices': {'Distribuidor': 11072.41, 'Partner': 10781.03, 'Partner Elite': 10416.81, 'Partner Elite Plus!': 10125.43, 'list_price': 14568.97}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427794-8512008': {'prices': {'Distribuidor': 11072.41, 'Partner': 10781.03, 'Partner Elite': 10416.81, 'Partner Elite Plus!': 10125.43, 'list_price': 14568.97}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427794-8512010': {'prices': {'Distribuidor': 11072.41, 'Partner': 10781.03, 'Partner Elite': 10416.81, 'Partner Elite Plus!': 10125.43, 'list_price': 14568.97}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427794-8512012': {'prices': {'Distribuidor': 11072.41, 'Partner': 10781.03, 'Partner Elite': 10416.81, 'Partner Elite Plus!': 10125.43, 'list_price': 14568.97}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427794-8512014': {'prices': {'Distribuidor': 11072.41, 'Partner': 10781.03, 'Partner Elite': 10416.81, 'Partner Elite Plus!': 10125.43, 'list_price': 14568.97}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427794-8605004': {'prices': {'Distribuidor': 11072.41, 'Partner': 10781.03, 'Partner Elite': 10416.81, 'Partner Elite Plus!': 10125.43, 'list_price': 14568.97}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427794-8605006': {'prices': {'Distribuidor': 11072.41, 'Partner': 10781.03, 'Partner Elite': 10416.81, 'Partner Elite Plus!': 10125.43, 'list_price': 14568.97}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427794-8605008': {'prices': {'Distribuidor': 11072.41, 'Partner': 10781.03, 'Partner Elite': 10416.81, 'Partner Elite Plus!': 10125.43, 'list_price': 14568.97}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427794-8605010': {'prices': {'Distribuidor': 11072.41, 'Partner': 10781.03, 'Partner Elite': 10416.81, 'Partner Elite Plus!': 10125.43, 'list_price': 14568.97}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    # ── SCALE 910 ── primera llegada: JULIO (no finales) → primer mes ordenable: julio
+    '427981-5814004': {'prices': {'Distribuidor': 26796.55, 'Partner': 26091.38, 'Partner Elite': 25209.91, 'Partner Elite Plus!': 24504.74, 'list_price': 35258.62}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427981-5814006': {'prices': {'Distribuidor': 26796.55, 'Partner': 26091.38, 'Partner Elite': 25209.91, 'Partner Elite Plus!': 24504.74, 'list_price': 35258.62}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427981-5814008': {'prices': {'Distribuidor': 26796.55, 'Partner': 26091.38, 'Partner Elite': 25209.91, 'Partner Elite Plus!': 24504.74, 'list_price': 35258.62}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427981-5814010': {'prices': {'Distribuidor': 26796.55, 'Partner': 26091.38, 'Partner Elite': 25209.91, 'Partner Elite Plus!': 24504.74, 'list_price': 35258.62}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427981-5814012': {'prices': {'Distribuidor': 26796.55, 'Partner': 26091.38, 'Partner Elite': 25209.91, 'Partner Elite Plus!': 24504.74, 'list_price': 35258.62}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    # ── SCALE 930 ── primera llegada: JULIO → primer mes ordenable: julio
+    '427982-8561004': {'prices': {'Distribuidor': 21489.66, 'Partner': 20924.14, 'Partner Elite': 20217.24, 'Partner Elite Plus!': 19651.72, 'list_price': 28275.86}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427982-8561006': {'prices': {'Distribuidor': 21489.66, 'Partner': 20924.14, 'Partner Elite': 20217.24, 'Partner Elite Plus!': 19651.72, 'list_price': 28275.86}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427982-8561008': {'prices': {'Distribuidor': 21489.66, 'Partner': 20924.14, 'Partner Elite': 20217.24, 'Partner Elite Plus!': 19651.72, 'list_price': 28275.86}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427982-8561010': {'prices': {'Distribuidor': 21489.66, 'Partner': 20924.14, 'Partner Elite': 20217.24, 'Partner Elite Plus!': 19651.72, 'list_price': 28275.86}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427982-8561012': {'prices': {'Distribuidor': 21489.66, 'Partner': 20924.14, 'Partner Elite': 20217.24, 'Partner Elite Plus!': 19651.72, 'list_price': 28275.86}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427982-0002004': {'prices': {'Distribuidor': 21489.66, 'Partner': 20924.14, 'Partner Elite': 20217.24, 'Partner Elite Plus!': 19651.72, 'list_price': 28275.86}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427982-0002006': {'prices': {'Distribuidor': 21489.66, 'Partner': 20924.14, 'Partner Elite': 20217.24, 'Partner Elite Plus!': 19651.72, 'list_price': 28275.86}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427982-0002008': {'prices': {'Distribuidor': 21489.66, 'Partner': 20924.14, 'Partner Elite': 20217.24, 'Partner Elite Plus!': 19651.72, 'list_price': 28275.86}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427982-0002010': {'prices': {'Distribuidor': 21489.66, 'Partner': 20924.14, 'Partner Elite': 20217.24, 'Partner Elite Plus!': 19651.72, 'list_price': 28275.86}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427982-0002012': {'prices': {'Distribuidor': 21489.66, 'Partner': 20924.14, 'Partner Elite': 20217.24, 'Partner Elite Plus!': 19651.72, 'list_price': 28275.86}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    # ── SCALE 900 ── primera llegada: JULIO → primer mes ordenable: julio
+    '427902-8551004': {'prices': {'Distribuidor': 17362.07, 'Partner': 16905.17, 'Partner Elite': 16334.05, 'Partner Elite Plus!': 15877.16, 'list_price': 22844.83}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427902-8551006': {'prices': {'Distribuidor': 17362.07, 'Partner': 16905.17, 'Partner Elite': 16334.05, 'Partner Elite Plus!': 15877.16, 'list_price': 22844.83}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427902-8551008': {'prices': {'Distribuidor': 17362.07, 'Partner': 16905.17, 'Partner Elite': 16334.05, 'Partner Elite Plus!': 15877.16, 'list_price': 22844.83}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427902-8551010': {'prices': {'Distribuidor': 17362.07, 'Partner': 16905.17, 'Partner Elite': 16334.05, 'Partner Elite Plus!': 15877.16, 'list_price': 22844.83}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427902-8551012': {'prices': {'Distribuidor': 17362.07, 'Partner': 16905.17, 'Partner Elite': 16334.05, 'Partner Elite Plus!': 15877.16, 'list_price': 22844.83}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427902-8512004': {'prices': {'Distribuidor': 17362.07, 'Partner': 16905.17, 'Partner Elite': 16334.05, 'Partner Elite Plus!': 15877.16, 'list_price': 22844.83}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427902-8512006': {'prices': {'Distribuidor': 17362.07, 'Partner': 16905.17, 'Partner Elite': 16334.05, 'Partner Elite Plus!': 15877.16, 'list_price': 22844.83}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427902-8512008': {'prices': {'Distribuidor': 17362.07, 'Partner': 16905.17, 'Partner Elite': 16334.05, 'Partner Elite Plus!': 15877.16, 'list_price': 22844.83}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427902-8512010': {'prices': {'Distribuidor': 17362.07, 'Partner': 16905.17, 'Partner Elite': 16334.05, 'Partner Elite Plus!': 15877.16, 'list_price': 22844.83}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    '427902-8512012': {'prices': {'Distribuidor': 17362.07, 'Partner': 16905.17, 'Partner Elite': 16334.05, 'Partner Elite Plus!': 15877.16, 'list_price': 22844.83}, 'avail': {'mayo': False, 'junio': False, 'julio': True, 'agosto': True}},
+    # ── SCOTT SUB CROSS 40 ── primera llegada: JUNIO(F) → primer mes ordenable: junio
+    '427985-3831006': {'prices': {'Distribuidor': 9696.55, 'Partner': 9441.38, 'Partner Elite': 9122.41, 'Partner Elite Plus!': 8867.24, 'list_price': 12758.62}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427985-3831008': {'prices': {'Distribuidor': 9696.55, 'Partner': 9441.38, 'Partner Elite': 9122.41, 'Partner Elite Plus!': 8867.24, 'list_price': 12758.62}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427985-3831010': {'prices': {'Distribuidor': 9696.55, 'Partner': 9441.38, 'Partner Elite': 9122.41, 'Partner Elite Plus!': 8867.24, 'list_price': 12758.62}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+    '427985-3831012': {'prices': {'Distribuidor': 9696.55, 'Partner': 9441.38, 'Partner Elite': 9122.41, 'Partner Elite Plus!': 8867.24, 'list_price': 12758.62}, 'avail': {'mayo': False, 'junio': True, 'julio': True, 'agosto': True}},
+}
 
 # ─────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────
 
+def _safe_obtener_conexion():
+    try:
+        return obtener_conexion()
+    except Exception as e:
+        logging.warning('[forecast] MySQL unavailable: %s', e)
+        return None
+
+
 def _ensure_table():
     """Create forecast_proyecciones if it doesn't exist (idempotent)."""
-    conn = obtener_conexion()
+    conn = _safe_obtener_conexion()
+    if conn is None:
+        return
+
     cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS forecast_proyecciones (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            id_cliente INT NOT NULL,
-            clave_cliente VARCHAR(20) NOT NULL,
-            periodo VARCHAR(9) NOT NULL,
-            sku VARCHAR(100) NOT NULL,
-            producto VARCHAR(255) NOT NULL,
-            marca VARCHAR(100) DEFAULT NULL,
-            modelo VARCHAR(100) DEFAULT NULL,
-            color VARCHAR(100) DEFAULT NULL,
-            talla VARCHAR(50) DEFAULT NULL,
-            mayo INT NOT NULL DEFAULT 0,
-            junio INT NOT NULL DEFAULT 0,
-            julio INT NOT NULL DEFAULT 0,
-            agosto INT NOT NULL DEFAULT 0,
-            septiembre INT NOT NULL DEFAULT 0,
-            octubre INT NOT NULL DEFAULT 0,
-            noviembre INT NOT NULL DEFAULT 0,
-            diciembre INT NOT NULL DEFAULT 0,
-            enero INT NOT NULL DEFAULT 0,
-            febrero INT NOT NULL DEFAULT 0,
-            marzo INT NOT NULL DEFAULT 0,
-            abril INT NOT NULL DEFAULT 0,
-            creado_en DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            actualizado_en DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            UNIQUE KEY uq_forecast (clave_cliente, periodo, sku),
-            INDEX idx_cliente_periodo (clave_cliente, periodo),
-            FOREIGN KEY (id_cliente) REFERENCES clientes(id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS forecast_proyecciones (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                id_cliente INT,
+                clave_cliente VARCHAR(255),
+                periodo VARCHAR(50),
+                sku VARCHAR(255),
+                producto VARCHAR(255),
+                marca VARCHAR(255),
+                modelo VARCHAR(255),
+                color VARCHAR(255),
+                talla VARCHAR(255),
+                mayo INT DEFAULT 0,
+                junio INT DEFAULT 0,
+                julio INT DEFAULT 0,
+                agosto INT DEFAULT 0,
+                septiembre INT DEFAULT 0,
+                octubre INT DEFAULT 0,
+                noviembre INT DEFAULT 0,
+                diciembre INT DEFAULT 0,
+                enero INT DEFAULT 0,
+                febrero INT DEFAULT 0,
+                marzo INT DEFAULT 0,
+                abril INT DEFAULT 0,
+                creado_en DATETIME DEFAULT CURRENT_TIMESTAMP,
+                actualizado_en DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_forecast_clave_periodo_sku (clave_cliente, periodo, sku)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        conn.commit()
+    except Exception as e:
+        logging.warning('[forecast] Could not ensure forecast_proyecciones table: %s', e)
+    finally:
+        cur.close()
+        conn.close()
 
 _ensure_table()
 
@@ -94,35 +243,29 @@ _ensure_table()
 
 def _ensure_catalogo_table():
     """Create odoo_catalogo table if it doesn't exist."""
-    conn = obtener_conexion()
+    conn = _safe_obtener_conexion()
+    if conn is None:
+        return
+
     cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS odoo_catalogo (
-            referencia_interna VARCHAR(150) NOT NULL,
-            nombre_producto    VARCHAR(400) NOT NULL,
-            categoria          VARCHAR(600) DEFAULT NULL,
-            marca              VARCHAR(150) DEFAULT NULL,
-            color              VARCHAR(150) DEFAULT NULL,
-            talla              VARCHAR(100) DEFAULT NULL,
-            actualizado_en     DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP
-                               ON UPDATE CURRENT_TIMESTAMP,
-            PRIMARY KEY (referencia_interna),
-            FULLTEXT idx_ft_nombre (nombre_producto),
-            INDEX idx_marca (marca)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
-    """)
-    # Add columns if they don't exist yet (for existing installations)
-    for col_def in [
-        "ALTER TABLE odoo_catalogo ADD COLUMN IF NOT EXISTS color VARCHAR(150) DEFAULT NULL",
-        "ALTER TABLE odoo_catalogo ADD COLUMN IF NOT EXISTS talla VARCHAR(100) DEFAULT NULL",
-    ]:
-        try:
-            cur.execute(col_def)
-        except Exception:
-            pass
-    conn.commit()
-    cur.close()
-    conn.close()
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS odoo_catalogo (
+                referencia_interna VARCHAR(255) PRIMARY KEY,
+                nombre_producto VARCHAR(255),
+                categoria VARCHAR(255),
+                marca VARCHAR(255),
+                color VARCHAR(255),
+                talla VARCHAR(255),
+                actualizado_en DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        conn.commit()
+    except Exception as e:
+        logging.warning('[forecast] Could not ensure odoo_catalogo table: %s', e)
+    finally:
+        cur.close()
+        conn.close()
 
 
 _ensure_catalogo_table()
@@ -138,27 +281,233 @@ _catalogo_syncing   = False
 
 def _ensure_excel_producto_table():
     """Create forecast_excel_productos table if it doesn't exist."""
-    conn = obtener_conexion()
+    conn = _safe_obtener_conexion()
+    if conn is None:
+        return
+
     cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS forecast_excel_productos (
-            sku VARCHAR(100) NOT NULL PRIMARY KEY,
-            nombre VARCHAR(400) NOT NULL,
-            color VARCHAR(150) DEFAULT NULL,
-            talla VARCHAR(100) DEFAULT NULL,
-            origen ENUM('excel', 'odoo') DEFAULT 'excel',
-            cargado_en DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            actualizado_en DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            INDEX idx_origen (origen),
-            FULLTEXT idx_ft_nombre (nombre)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS forecast_excel_productos (
+                sku VARCHAR(255) PRIMARY KEY,
+                nombre VARCHAR(255),
+                color VARCHAR(255),
+                talla VARCHAR(255),
+                origen VARCHAR(50) DEFAULT 'excel',
+                cargado_en DATETIME DEFAULT CURRENT_TIMESTAMP,
+                actualizado_en DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        conn.commit()
+    except Exception as e:
+        logging.warning('[forecast] Could not ensure forecast_excel_productos table: %s', e)
+    finally:
+        cur.close()
+        conn.close()
 
 
 _ensure_excel_producto_table()
+
+
+# ─────────────────────────────────────────────────────
+# SKU Whitelist (forecast_sku_whitelist table)
+# ─────────────────────────────────────────────────────
+
+def _ensure_sku_whitelist_table():
+    conn = _safe_obtener_conexion()
+    if conn is None:
+        return
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS forecast_sku_whitelist (
+                sku VARCHAR(255) PRIMARY KEY,
+                cargado_en DATETIME DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        conn.commit()
+    except Exception as e:
+        logging.warning('[forecast] Could not ensure forecast_sku_whitelist table: %s', e)
+    finally:
+        cur.close()
+        conn.close()
+
+
+_ensure_sku_whitelist_table()
+
+
+def _update_whitelist_skus():
+    """Populate forecast_sku_whitelist table with FORECAST_SKU_WHITELIST."""
+    conn = _safe_obtener_conexion()
+    if conn is None:
+        return
+    cur = conn.cursor()
+    try:
+        # Clear existing
+        cur.execute("DELETE FROM forecast_sku_whitelist")
+        # Insert new
+        for sku in FORECAST_SKU_WHITELIST:
+            cur.execute("INSERT IGNORE INTO forecast_sku_whitelist (sku) VALUES (%s)", (sku,))
+        conn.commit()
+        logging.info('[whitelist] Updated with %d SKUs', len(FORECAST_SKU_WHITELIST))
+    except Exception as e:
+        logging.warning('[whitelist] Error updating: %s', e)
+        conn.rollback()
+    finally:
+        cur.close()
+        conn.close()
+
+
+_update_whitelist_skus()
+
+def _get_whitelist_products() -> list:
+    """Returns product info from odoo_catalogo for whitelist SKUs (stubs for missing ones)."""
+    conn = _safe_obtener_conexion()
+    if conn is None:
+        return []
+    cur = conn.cursor(dictionary=True)
+    try:
+        cur.execute("SELECT sku FROM forecast_sku_whitelist ORDER BY sku")
+        all_skus = [r['sku'] for r in cur.fetchall()]
+        if not all_skus:
+            return []
+
+        placeholders = ','.join(['%s'] * len(all_skus))
+        cur.execute(f"""
+            SELECT referencia_interna AS sku, nombre_producto AS nombre,
+                   categoria, marca, color, talla
+            FROM odoo_catalogo
+            WHERE referencia_interna IN ({placeholders})
+            ORDER BY marca, nombre_producto
+        """, all_skus)
+        rows       = cur.fetchall()
+        found_skus = {r['sku'] for r in rows}
+
+        result = []
+        for r in rows:
+            cat    = r.get('categoria') or ''
+            modelo = cat.split(' / ')[-1].strip() if ' / ' in cat else ''
+            result.append({
+                'sku':      r['sku'] or '',
+                'producto': (r.get('nombre') or '').strip(),
+                'marca':    (r.get('marca') or '').strip(),
+                'modelo':   modelo,
+                'color':    (r.get('color') or '').upper().strip(),
+                'talla':    (r.get('talla') or '').upper().strip(),
+            })
+        for sku in all_skus:
+            if sku not in found_skus:
+                result.append({'sku': sku, 'producto': '', 'marca': '',
+                                'modelo': '', 'color': '', 'talla': ''})
+        return result
+    except Exception as e:
+        logging.warning('[forecast] _get_whitelist_products error: %s', e)
+        return []
+    finally:
+        cur.close()
+        conn.close()
+
+
+def _get_odoo_prices_for_skus(refs: list) -> dict:
+    """
+    Returns {sku: {list_price, 'Partner Elite Plus!', 'Partner Elite', 'Partner', 'Distribuidor'}}
+    Reads pricelist items for the 4 TIER_NAMES pricelists.
+    Falls back to zeros on any Odoo error.
+    """
+    empty = lambda: {'list_price': 0.0, **{t: 0.0 for t in TIER_NAMES}}
+    result = {ref: empty() for ref in refs}
+    if not refs:
+        return result
+    try:
+        from utils.odoo_utils import get_odoo_models, ODOO_DB, ODOO_PASSWORD
+        uid, models, err = get_odoo_models()
+        if not uid:
+            logging.warning('[prices] Cannot connect to Odoo: %s', err)
+            return result
+
+        prods = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'product.product', 'search_read',
+            [[['default_code', 'in', refs]]],
+            {'fields': ['id', 'default_code', 'lst_price', 'product_tmpl_id']}
+        )
+        prod_id_by_ref = {}
+        tmpl_id_by_ref = {}
+        for p in prods:
+            ref = (p.get('default_code') or '').strip()
+            if ref in result:
+                result[ref]['list_price'] = float(p.get('lst_price') or 0.0)
+                prod_id_by_ref[ref] = p['id']
+                if p.get('product_tmpl_id'):
+                    tmpl_id_by_ref[ref] = p['product_tmpl_id'][0]
+
+        if not prod_id_by_ref:
+            return result
+
+        pricelists = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'product.pricelist', 'search_read',
+            [[['name', 'in', TIER_NAMES]]],
+            {'fields': ['id', 'name']}
+        )
+        if not pricelists:
+            logging.warning('[prices] No pricelists found matching TIER_NAMES')
+            return result
+
+        all_prod_ids = list(prod_id_by_ref.values())
+        all_tmpl_ids = list(set(tmpl_id_by_ref.values()))
+        PRIORITY = {'0_product_variant': 0, '1_product': 1,
+                    '2_product_category': 2, '3_global': 3}
+
+        for pl in pricelists:
+            pl_id = pl['id']
+            tier  = pl['name']
+            items = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+                'product.pricelist.item', 'search_read',
+                [[
+                    ['pricelist_id', '=', pl_id],
+                    '|', '|', '|',
+                    ['product_id', 'in', all_prod_ids],
+                    ['product_tmpl_id', 'in', all_tmpl_ids],
+                    ['applied_on', '=', '2_product_category'],
+                    ['applied_on', '=', '3_global'],
+                ]],
+                {'fields': ['applied_on', 'product_id', 'product_tmpl_id',
+                            'compute_price', 'fixed_price', 'percent_price',
+                            'price_discount', 'price_surcharge']}
+            )
+            for ref in refs:
+                if ref not in result:
+                    continue
+                prod_id    = prod_id_by_ref.get(ref)
+                tmpl_id    = tmpl_id_by_ref.get(ref)
+                list_price = result[ref]['list_price']
+                best_item, best_prio = None, 999
+                for item in items:
+                    prio = PRIORITY.get(item.get('applied_on', '3_global'), 999)
+                    if prio >= best_prio:
+                        continue
+                    ao = item.get('applied_on')
+                    if ao == '0_product_variant':
+                        if not item.get('product_id') or item['product_id'][0] != prod_id:
+                            continue
+                    elif ao == '1_product':
+                        if not item.get('product_tmpl_id') or item['product_tmpl_id'][0] != tmpl_id:
+                            continue
+                    best_item, best_prio = item, prio
+                if best_item:
+                    compute = best_item.get('compute_price', 'fixed')
+                    if compute == 'fixed':
+                        result[ref][tier] = float(best_item.get('fixed_price') or 0.0)
+                    elif compute == 'percentage':
+                        pct = float(best_item.get('percent_price') or 0.0)
+                        result[ref][tier] = round(list_price * (1 - pct / 100), 2)
+                    else:
+                        disc      = float(best_item.get('price_discount') or 0.0)
+                        surcharge = float(best_item.get('price_surcharge') or 0.0)
+                        result[ref][tier] = round(list_price * (1 - disc / 100) + surcharge, 2)
+        return result
+    except Exception as e:
+        logging.exception('[prices] Error fetching Odoo prices: %s', e)
+        return result
 
 
 def _get_product_from_sources(sku: str) -> dict or None:
@@ -311,12 +660,20 @@ def _trigger_catalogo_sync(force: bool = False):
         if _catalogo_syncing:
             return 'already_running'
         if not force:
-            conn = obtener_conexion()
-            cur  = conn.cursor()
-            cur.execute('SELECT COUNT(*) as cnt FROM odoo_catalogo')
-            cnt = cur.fetchone()[0]
-            cur.close()
-            conn.close()
+            conn = _safe_obtener_conexion()
+            if conn is None:
+                return 'db_unavailable'
+            try:
+                cur = conn.cursor()
+                cur.execute('SELECT COUNT(*) as cnt FROM odoo_catalogo')
+                cnt = cur.fetchone()[0]
+            except Exception as exc:
+                logging.warning('[forecast] Could not evaluate odoo_catalogo count: %s', exc)
+                return 'db_unavailable'
+            finally:
+                cur.close()
+                conn.close()
+
             if cnt > 0:
                 return 'already_populated'
         _catalogo_syncing = True
@@ -475,13 +832,17 @@ def _validate_periodo(periodo: str) -> bool:
 def descargar_template():
     """
     GET /forecast/template?clave=<clave_cliente>&periodo=<periodo>
-    Returns an xlsx file pre-filled with the client's authorized products
-    and empty monthly columns (May–Abr).
+    Devuelve un xlsx con los productos del whitelist (solo estos productos de Odoo).
+    Columnas A-H bloqueadas. G1 = selector de nivel de distribuidor (desbloqueado).
+    Cols I-T (meses) editables. Cols V-Y ocultas con los 4 precios por nivel.
     """
     if not OPENPYXL_OK:
         return jsonify({'error': 'openpyxl no instalado en el servidor'}), 500
 
-    clave = request.args.get('clave', '').strip()
+    # Update whitelist with allowed SKUs
+    _update_whitelist_skus()
+
+    clave   = request.args.get('clave',   '').strip()
     periodo = request.args.get('periodo', '').strip()
 
     if not clave:
@@ -493,160 +854,327 @@ def descargar_template():
     if id_cliente is None:
         return jsonify({'error': f'Cliente "{clave}" no encontrado'}), 404
 
-    products = _get_authorized_products(clave, id_cliente)
+    # Fuente de productos: solo whitelist Odoo
+    products = _get_whitelist_products()
 
-    # Pick 5 diverse example rows: one per distinct marca, then one per modelo
-    seen_marcas: set = set()
-    sample: list = []
-    for p in products:
-        key = (p.get('marca') or '').upper() or p.get('modelo', '')
-        if key not in seen_marcas:
-            seen_marcas.add(key)
-            sample.append(p)
-        if len(sample) == 5:
-            break
-    # Fill remaining slots from different modelos if fewer than 5 marcas
-    if len(sample) < 5:
-        seen_modelos = {p.get('modelo', '') for p in sample}
-        for p in products:
-            if p not in sample and p.get('modelo', '') not in seen_modelos:
-                seen_modelos.add(p.get('modelo', ''))
-                sample.append(p)
-            if len(sample) == 5:
-                break
-    products = sample
+    # Precios de Odoo para todos los productos
+    skus   = [p['sku'] for p in products]
+    prices = _get_odoo_prices_for_skus(skus) if skus else {}
 
-    # ── Build Excel ──
+    # Fusionar con SKU_CATALOG: si Odoo devuelve 0 para un nivel, usar precio del catálogo
+    for sku in skus:
+        cat_entry  = SKU_CATALOG.get(sku, {})
+        cat_prices = cat_entry.get('prices', {})
+        odoo_entry = prices.get(sku, {})
+        for key in ['list_price'] + TIER_NAMES:
+            if not odoo_entry.get(key):
+                odoo_entry[key] = cat_prices.get(key, 0.0)
+        prices[sku] = odoo_entry
+
+    # ── Índices de columnas (1-based) ──────────────────────────────────────────
+    # A-F (1-6): CAMPOS_INFO
+    # G (7):     Precio Público
+    # H (8):     Precio [nivel distribuidor] — fórmula dinámica
+    # I-T (9-20): meses May-Abr
+    # U (21):    TOTAL
+    # V-Y (22-25): precios por nivel (ocultas)
+    PRICE_PUB_COL   = 7
+    PRICE_DIST_COL  = 8
+    MONTH_START     = 9
+    TOTAL_COL       = 21   # U — total unidades
+    TOTAL_PRICE_COL = 22   # V — total precio (H × U)
+    TIER_COLS = {
+        'Partner Elite Plus!': 23,   # W oculta
+        'Partner Elite':       24,   # X oculta
+        'Partner':             25,   # Y oculta
+        'Distribuidor':        26,   # Z oculta
+    }
+    VISIBLE_COLS = TOTAL_PRICE_COL  # columnas visibles: 1-22
+
+    # ── Estilos ────────────────────────────────────────────────────────────────
+    ORANGE      = 'FFEB5E28'
+    DARK_BG     = 'FF252422'
+    HEADER_BG   = 'FF1A1918'
+    SELECTOR_BG = 'FF2C2A28'
+    PRICE_BG    = 'FF1B3A2B'
+
+    info_font       = Font(bold=True, color='FFFFFFFF', size=10)
+    price_hdr_font  = Font(bold=True, color='FF66FFB2', size=10)
+    month_hdr_font  = Font(bold=True, color='FFFFFFFF', size=10)
+    editable_font   = Font(color='FF111111', size=10)
+    price_data_font = Font(color='FF333333', size=9)
+
+    center = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    left   = Alignment(horizontal='left',   vertical='center', wrap_text=True)
+    right  = Alignment(horizontal='right',  vertical='center')
+    thin   = Side(style='thin', color='FF666666')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = f'Forecast {periodo}'
 
-    ORANGE = 'FFEB5E28'
-    DARK_BG = 'FF252422'
-    HEADER_BG = 'FF1A1918'
-    LIGHT_GREY = 'FFD0D0D0'
-    EDITABLE_BG = 'FFFEFEFE'
+    # ── Fila 1: Selector de nivel de distribuidor ──────────────────────────────
+    ws.row_dimensions[1].height = 32
+    ws.merge_cells('A1:F1')
+    lbl = ws['A1']
+    lbl.value     = 'TIPO DE DISTRIBUIDOR  ▶'
+    lbl.font      = Font(bold=True, color='FFFFCC00', size=11)
+    lbl.fill      = PatternFill('solid', fgColor=SELECTOR_BG)
+    lbl.alignment = right
 
-    header_font  = Font(bold=True, color='FFFFFFFF', size=10)
-    info_font    = Font(bold=True, color='FFFFFFFF', size=10)
-    locked_font  = Font(color='FF888888', size=9)
-    editable_font= Font(color='FF111111', size=10)
-    month_header = Font(bold=True, color='FFFFFFFF', size=10)
+    ws.merge_cells('G1:H1')
+    sel = ws['G1']
+    sel.value      = 'Distribuidor'
+    sel.font       = Font(bold=True, color='FFEB5E28', size=12)
+    sel.fill       = PatternFill('solid', fgColor=SELECTOR_BG)
+    sel.alignment  = center
+    sel.protection = Protection(locked=False)   # única celda editable de A-H
 
-    center = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    left   = Alignment(horizontal='left',   vertical='center', wrap_text=True)
+    dv = DataValidation(
+        type='list',
+        formula1='"Partner Elite Plus!,Partner Elite,Partner,Distribuidor"',
+        allow_blank=False,
+        showDropDown=False,
+    )
+    ws.add_data_validation(dv)
+    dv.add(ws['G1'])
 
-    thin = Side(style='thin', color='FF666666')
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for ci in range(MONTH_START, VISIBLE_COLS + 1):
+        ws.cell(row=1, column=ci).fill = PatternFill('solid', fgColor=SELECTOR_BG)
 
-    # Row 1 – Title
-    ws.merge_cells('A1:R1')
-    title_cell = ws['A1']
-    title_cell.value = f'Forecast de Compra — Periodo Comercial {periodo}   |   Distribuidor: {clave}'
-    title_cell.font = Font(bold=True, color='FFEB5E28', size=12)
-    title_cell.fill = PatternFill('solid', fgColor=HEADER_BG)
-    title_cell.alignment = center
-    ws.row_dimensions[1].height = 28
+    # ── Fila 2: Título ─────────────────────────────────────────────────────────
+    ws.row_dimensions[2].height = 28
+    ws.merge_cells(f'A2:{get_column_letter(VISIBLE_COLS)}2')
+    tc = ws['A2']
+    tc.value     = f'Forecast de Compra — Periodo Comercial {periodo}   |   Distribuidor: {clave}'
+    tc.font      = Font(bold=True, color='FFEB5E28', size=12)
+    tc.fill      = PatternFill('solid', fgColor=HEADER_BG)
+    tc.alignment = center
 
-    # Row 2 – Column headers
-    HEADERS = CAMPOS_INFO + MESES_LABELS + ['TOTAL']
-    for col_idx, h in enumerate(HEADERS, start=1):
-        cell = ws.cell(row=2, column=col_idx, value=h)
+    # ── Fila 3: Encabezados de columnas ───────────────────────────────────────
+    ws.row_dimensions[3].height = 22
+    ALL_HEADERS = CAMPOS_INFO + ['Precio Público', 'Precio'] + MESES_LABELS + ['TOTAL', 'Total $']
+    for ci, h in enumerate(ALL_HEADERS, start=1):
+        cell = ws.cell(row=3, column=ci, value=h)
+        cell.alignment = center
+        cell.border    = border
         if h in CAMPOS_INFO:
             cell.fill = PatternFill('solid', fgColor=DARK_BG)
             cell.font = info_font
-        elif h == 'TOTAL':
+        elif h in ('Precio Público', 'Precio'):
+            cell.fill = PatternFill('solid', fgColor=PRICE_BG)
+            cell.font = price_hdr_font
+        elif h in ('TOTAL', 'Total $'):
             cell.fill = PatternFill('solid', fgColor=ORANGE)
             cell.font = Font(bold=True, color='FF000000', size=10)
         else:
             cell.fill = PatternFill('solid', fgColor=ORANGE)
-            cell.font = month_header
-        cell.alignment = center
-        cell.border = border
-    ws.row_dimensions[2].height = 22
+            cell.font = month_hdr_font
 
-    # Row 3 – Instructions note
-    ws.merge_cells('A3:R3')
-    note = ws['A3']
-    note.value = (
-        'INSTRUCCIONES: Complete las cantidades de los productos precargados y/o agregue filas con nuevos productos. '
-        'Para nuevos productos ingrese SKU (del catálogo autorizado), Producto, Marca, Modelo, Color y Talla. '
-        'Las cantidades deben ser números enteros ≥ 0. '
-        'Guarde y cargue este archivo en el sistema.'
+    # ── Fila 4: Instrucciones ──────────────────────────────────────────────────
+    ws.row_dimensions[4].height = 30
+    ws.merge_cells(f'A4:{get_column_letter(VISIBLE_COLS)}4')
+    note = ws['A4']
+    _instr_font = InlineFont(i=True, color='FF444444', sz=9)
+    _imp_font   = InlineFont(b=True, color='FF222222', sz=11)
+    note.value = CellRichText(
+        TextBlock(_instr_font,
+            '📌 INSTRUCCIONES: (1) Seleccione su NIVEL DE DISTRIBUIDOR en la celda naranja (G1): '
+            'Distribuidor, Partner, Partner Elite o Partner Elite Plus!  '
+            '(2) Los PRECIOS se actualizarán automáticamente en la columna H según el nivel que seleccione. '
+            '(3) Complete las CANTIDADES mensuales (columnas Mayo a Abril) de los productos que necesita. '
+            '(4) El TOTAL en unidades y precio se calcula automáticamente. '
+            'Guarde y cargue este archivo en el sistema.  '),
+        TextBlock(_imp_font,
+            '⚡ IMPORTANTE: Entre más rápido envíe sus proyecciones, mayor prioridad tendrán sus solicitudes. '
+            'Envíe este archivo a su Ejecutivo de Ventas antes del 30 de abril de 2026.'),
     )
-    note.font = Font(italic=True, color='FF444444', size=9)
-    note.fill = PatternFill('solid', fgColor='FFFFF8F0')
+    note.fill      = PatternFill('solid', fgColor='FFFFF8F0')
     note.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
-    ws.row_dimensions[3].height = 30
 
-    # Data rows
-    total_col = len(HEADERS)  # column index of TOTAL
-    for row_idx, p in enumerate(products, start=4):
-        info_values = [
-            p['sku'], p['producto'], p['marca'], p['modelo'], p['color'], p['talla']
-        ]
-        for ci, val in enumerate(info_values, start=1):
+    # ── Filas de datos (fila 5 en adelante) ───────────────────────────────────
+    tier_pep_col = get_column_letter(TIER_COLS['Partner Elite Plus!'])
+    tier_pe_col  = get_column_letter(TIER_COLS['Partner Elite'])
+    tier_p_col   = get_column_letter(TIER_COLS['Partner'])
+    tier_d_col   = get_column_letter(TIER_COLS['Distribuidor'])
+    h_col        = get_column_letter(PRICE_DIST_COL)
+    u_col        = get_column_letter(TOTAL_COL)
+    first_m      = get_column_letter(MONTH_START)
+    last_m       = get_column_letter(MONTH_START + len(MESES) - 1)
+    first_data_row = 5
+
+    for row_idx, p in enumerate(products, start=5):
+        sku         = p['sku']
+        prod_prices = prices.get(sku, {})
+
+        # A-F: información del producto (bloqueada con la protección de hoja)
+        for ci, val in enumerate(
+            [sku, p['producto'], p['marca'], p['modelo'], p['color'], p['talla']], start=1
+        ):
             c = ws.cell(row=row_idx, column=ci, value=val)
-            c.font = editable_font
-            c.fill = PatternFill('solid', fgColor='FFFAFAFA')
+            c.font      = editable_font
+            c.fill      = PatternFill('solid', fgColor='FFFAFAFA')
             c.alignment = left if ci == 2 else center
-            c.border = border
+            c.border    = border
 
-        # Month columns
-        month_start_col = len(CAMPOS_INFO) + 1
+        # G: Precio Público con IVA (bloqueado)
+        g = ws.cell(row=row_idx, column=PRICE_PUB_COL)
+        g.value         = round(prod_prices.get('list_price', 0.0) * IVA_FACTOR, 2)
+        g.font          = price_data_font
+        g.fill          = PatternFill('solid', fgColor='FFE8F5E9')
+        g.alignment     = center
+        g.border        = border
+        g.number_format = '"$"#,##0.00'
+
+        # H: Precio por nivel con IVA — fórmula que lee G1 (selector) y columnas ocultas W-Z
+        h = ws.cell(row=row_idx, column=PRICE_DIST_COL)
+        h.value = (
+            f'=IF($G$1="Partner Elite Plus!",{tier_pep_col}{row_idx},'
+            f'IF($G$1="Partner Elite",{tier_pe_col}{row_idx},'
+            f'IF($G$1="Partner",{tier_p_col}{row_idx},{tier_d_col}{row_idx})))'
+        )
+        h.font          = price_data_font
+        h.fill          = PatternFill('solid', fgColor='FFF3E5F5')
+        h.alignment     = center
+        h.border        = border
+        h.number_format = '"$"#,##0.00'
+
+        # I-T: meses — desbloqueados si el producto está disponible, bloqueados si no
+        cat_avail = SKU_CATALOG.get(sku, {}).get('avail', {})
         for mi in range(len(MESES)):
-            c = ws.cell(row=row_idx, column=month_start_col + mi, value=0)
-            c.font = editable_font
-            c.fill = PatternFill('solid', fgColor=EDITABLE_BG)
-            c.alignment = center
-            c.border = border
+            mes_name = MESES[mi]
+            is_avail = cat_avail.get(mes_name, True)  # meses fuera del dict (Sep-Abr) = siempre disponibles
+            c = ws.cell(row=row_idx, column=MONTH_START + mi)
+            c.alignment     = center
+            c.border        = border
             c.number_format = '0'
-            c.protection = openpyxl.styles.Protection(locked=False)
+            if is_avail:
+                c.value      = 0
+                c.font       = editable_font
+                c.fill       = PatternFill('solid', fgColor='FFFEFEFE')
+                c.protection = Protection(locked=False)
+            else:
+                c.value = None
+                c.font  = Font(color='FF888888', size=9)
+                c.fill  = PatternFill('solid', fgColor='FF3A3A3A')
 
-        # TOTAL formula
-        first_m = get_column_letter(month_start_col)
-        last_m  = get_column_letter(month_start_col + len(MESES) - 1)
-        tc = ws.cell(row=row_idx, column=total_col)
-        tc.value = f'=SUM({first_m}{row_idx}:{last_m}{row_idx})'
-        tc.font = Font(bold=True, color='FF000000', size=10)
-        tc.fill = PatternFill('solid', fgColor='FFFFF0D0')
-        tc.alignment = center
-        tc.border = border
-        tc.number_format = '0'
+        # U: TOTAL unidades (fórmula, bloqueado)
+        tc2 = ws.cell(row=row_idx, column=TOTAL_COL)
+        tc2.value         = f'=SUM({first_m}{row_idx}:{last_m}{row_idx})'
+        tc2.font          = Font(bold=True, color='FF000000', size=10)
+        tc2.fill          = PatternFill('solid', fgColor='FFFFF0D0')
+        tc2.alignment     = center
+        tc2.border        = border
+        tc2.number_format = '0'
 
-    # Blank editable rows for clients to add new products
-    blank_start = 4 + len(products)
-    month_start_col = len(CAMPOS_INFO) + 1
-    for blank_offset in range(15):
-        row_idx = blank_start + blank_offset
-        for ci in range(1, len(CAMPOS_INFO) + 1):
-            c = ws.cell(row=row_idx, column=ci)
-            c.fill = PatternFill('solid', fgColor='FFFAFAFA')
-            c.alignment = left if ci == 2 else center
-            c.border = border
-        for mi in range(len(MESES)):
-            c = ws.cell(row=row_idx, column=month_start_col + mi)
-            c.fill = PatternFill('solid', fgColor=EDITABLE_BG)
-            c.alignment = center
-            c.border = border
-            c.number_format = '0'
-        first_m = get_column_letter(month_start_col)
-        last_m  = get_column_letter(month_start_col + len(MESES) - 1)
-        tc = ws.cell(row=row_idx, column=total_col)
-        tc.value = f'=SUM({first_m}{row_idx}:{last_m}{row_idx})'
-        tc.font = Font(bold=True, color='FF000000', size=10)
-        tc.fill = PatternFill('solid', fgColor='FFFFF0D0')
-        tc.alignment = center
-        tc.border = border
-        tc.number_format = '0'
+        # V: TOTAL precio = H × U (fórmula, bloqueado)
+        tp = ws.cell(row=row_idx, column=TOTAL_PRICE_COL)
+        tp.value         = f'={h_col}{row_idx}*{u_col}{row_idx}'
+        tp.font          = Font(bold=True, color='FF000000', size=10)
+        tp.fill          = PatternFill('solid', fgColor='FFE8F0FF')
+        tp.alignment     = center
+        tp.border        = border
+        tp.number_format = '"$"#,##0.00'
 
-    # Widths
-    col_widths = [18, 42, 16, 22, 14, 8] + [7]*12 + [9]
+        # W-Z: precios por nivel con IVA (ocultas, referenciadas por la fórmula de H)
+        for tier, col_idx in TIER_COLS.items():
+            pc = ws.cell(row=row_idx, column=col_idx)
+            pc.value         = round(prod_prices.get(tier, 0.0) * IVA_FACTOR, 2)
+            pc.number_format = '"$"#,##0.00'
+
+    # ── Fila de TOTALES ────────────────────────────────────────────────────────────
+    last_data_row = first_data_row + len(products) - 1
+    total_row     = last_data_row + 1
+
+    ws.row_dimensions[total_row].height = 24
+
+    # A-H: Label "TOTALES"
+    ws.merge_cells(f'A{total_row}:H{total_row}')
+    label = ws[f'A{total_row}']
+    label.value     = 'TOTALES'
+    label.font      = Font(bold=True, color='FFFFFFFF', size=11)
+    label.fill      = PatternFill('solid', fgColor=ORANGE)
+    label.alignment = center
+    label.border    = border
+
+    # I-T: suma de cada mes
+    for mi in range(len(MESES)):
+        col_letter = get_column_letter(MONTH_START + mi)
+        c = ws.cell(row=total_row, column=MONTH_START + mi)
+        c.value         = f'=SUM({col_letter}{first_data_row}:{col_letter}{last_data_row})'
+        c.font          = Font(bold=True, color='FF000000', size=10)
+        c.fill          = PatternFill('solid', fgColor=ORANGE)
+        c.alignment     = center
+        c.border        = border
+        c.number_format = '0'
+
+    # U: suma de total unidades
+    tu = ws.cell(row=total_row, column=TOTAL_COL)
+    tu.value         = f'=SUM({u_col}{first_data_row}:{u_col}{last_data_row})'
+    tu.font          = Font(bold=True, color='FFFFFFFF', size=11)
+    tu.fill          = PatternFill('solid', fgColor=ORANGE)
+    tu.alignment     = center
+    tu.border        = border
+    tu.number_format = '0'
+
+    # V: suma de total precio
+    v_col_letter = get_column_letter(TOTAL_PRICE_COL)
+    tp_total = ws.cell(row=total_row, column=TOTAL_PRICE_COL)
+    tp_total.value         = f'=SUM({v_col_letter}{first_data_row}:{v_col_letter}{last_data_row})'
+    tp_total.font          = Font(bold=True, color='FFFFFFFF', size=11)
+    tp_total.fill          = PatternFill('solid', fgColor=ORANGE)
+    tp_total.alignment     = center
+    tp_total.border        = border
+    tp_total.number_format = '"$"#,##0.00'
+
+    # ── Fila de PRECIO POR MES (azul) — precio × cantidad por cada mes, sin repetir total final ──
+    price_row = total_row + 1
+    ws.row_dimensions[price_row].height = 24
+
+    ws.merge_cells(f'A{price_row}:H{price_row}')
+    label2 = ws[f'A{price_row}']
+    label2.value     = 'TOTAL PRECIO POR MES'
+    label2.font      = Font(bold=True, color='FFFFFFFF', size=11)
+    label2.fill      = PatternFill('solid', fgColor='FF1B5E9C')
+    label2.alignment = center
+    label2.border    = border
+
+    for mi in range(len(MESES)):
+        col_letter = get_column_letter(MONTH_START + mi)
+        c = ws.cell(row=price_row, column=MONTH_START + mi)
+        c.value         = f'=SUMPRODUCT(${h_col}${first_data_row}:${h_col}${last_data_row},{col_letter}${first_data_row}:{col_letter}${last_data_row})'
+        c.font          = Font(bold=True, color='FFFFFFFF', size=10)
+        c.fill          = PatternFill('solid', fgColor='FF1B5E9C')
+        c.alignment     = center
+        c.border        = border
+        c.number_format = '"$"#,##0.00'
+
+    # U vacío (el total de unidades ya está en la fila naranja)
+    cu = ws.cell(row=price_row, column=TOTAL_COL)
+    cu.fill      = PatternFill('solid', fgColor='FF1B5E9C')
+    cu.border    = border
+
+    # V vacío — el total anual en precio ya está en la fila naranja, no se repite
+    cv = ws.cell(row=price_row, column=TOTAL_PRICE_COL)
+    cv.fill      = PatternFill('solid', fgColor='FF1B5E9C')
+    cv.border    = border
+
+    # ── Ocultar columnas de precios por nivel (W-Z) ─────────────────────────────────
+    for col_idx in range(23, 27):
+        ws.column_dimensions[get_column_letter(col_idx)].hidden = True
+
+    # ── Anchos de columna ──────────────────────────────────────────────────────
+    col_widths = [18, 42, 16, 22, 14, 8, 14, 14] + [13] * 12 + [9, 18]
     for ci, w in enumerate(col_widths, start=1):
         ws.column_dimensions[get_column_letter(ci)].width = w
 
-    # Freeze header rows
-    ws.freeze_panes = 'A4'
+    # ── Congelar primeras 4 filas ──────────────────────────────────────────────
+    ws.freeze_panes = 'A5'
+
+    # ── Protección de hoja: A-H y U bloqueadas; G1 y columnas I-T desbloqueadas ─
+    ws.protection.sheet    = True
+    ws.protection.password = 'masterkey'
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -661,43 +1189,403 @@ def descargar_template():
     )
 
 
+@forecast_bp.route('/forecast/template-global', methods=['GET'])
+def descargar_template_global():
+    """
+    GET /forecast/template-global
+    Plantilla global sin cliente específico — el distribuidor ingresa su clave en B1.
+    Todos los 92 SKUs del whitelist, mismo layout que template() pero portable.
+    """
+    if not OPENPYXL_OK:
+        return jsonify({'error': 'openpyxl no instalado en el servidor'}), 500
+
+    _update_whitelist_skus()
+
+    # Usar período comercial actual como default (e.g., "2026-2027")
+    from datetime import datetime
+    current_year = datetime.now().year
+    periodo = f"{current_year}-{current_year + 1}"
+
+    products = _get_whitelist_products()
+    skus     = [p['sku'] for p in products]
+    prices   = _get_odoo_prices_for_skus(skus) if skus else {}
+
+    # Fusionar con SKU_CATALOG
+    for sku in skus:
+        cat_entry  = SKU_CATALOG.get(sku, {})
+        cat_prices = cat_entry.get('prices', {})
+        odoo_entry = prices.get(sku, {})
+        for key in ['list_price'] + TIER_NAMES:
+            if not odoo_entry.get(key):
+                odoo_entry[key] = cat_prices.get(key, 0.0)
+        prices[sku] = odoo_entry
+
+    # ── Índices de columnas (igual que template())
+    PRICE_PUB_COL   = 7
+    PRICE_DIST_COL  = 8
+    MONTH_START     = 9
+    TOTAL_COL       = 21
+    TOTAL_PRICE_COL = 22
+    TIER_COLS = {
+        'Partner Elite Plus!': 23,
+        'Partner Elite':       24,
+        'Partner':             25,
+        'Distribuidor':        26,
+    }
+    VISIBLE_COLS = TOTAL_PRICE_COL
+
+    # ── Estilos (igual)
+    ORANGE      = 'FFEB5E28'
+    DARK_BG     = 'FF252422'
+    HEADER_BG   = 'FF1A1918'
+    SELECTOR_BG = 'FF2C2A28'
+    PRICE_BG    = 'FF1B3A2B'
+
+    info_font       = Font(bold=True, color='FFFFFFFF', size=10)
+    price_hdr_font  = Font(bold=True, color='FF66FFB2', size=10)
+    month_hdr_font  = Font(bold=True, color='FFFFFFFF', size=10)
+    editable_font   = Font(color='FF111111', size=10)
+    price_data_font = Font(color='FF333333', size=9)
+
+    center = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    left   = Alignment(horizontal='left',   vertical='center', wrap_text=True)
+    right  = Alignment(horizontal='right',  vertical='center')
+    thin   = Side(style='thin', color='FF666666')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = 'Forecast Global'
+
+    # ── Fila 1: Campo para CLAVE DISTRIBUIDOR ─────────────────────────────────────
+    ws.row_dimensions[1].height = 28
+    ws.merge_cells('A1:C1')
+    lbl = ws['A1']
+    lbl.value     = 'CLAVE / NOMBRE DISTRIBUIDOR'
+    lbl.font      = Font(bold=True, color='FFFFFFFF', size=10)
+    lbl.fill      = PatternFill('solid', fgColor=SELECTOR_BG)
+    lbl.alignment = right
+
+    ws.merge_cells('D1:F1')
+    inp = ws['D1']
+    inp.value      = ''  # Campo editable para que ingrese su clave
+    inp.font       = Font(bold=True, color='FFEB5E28', size=11)
+    inp.fill       = PatternFill('solid', fgColor=SELECTOR_BG)
+    inp.alignment  = center
+    inp.protection = Protection(locked=False)  # EDITABLE
+
+    ws.merge_cells('G1:H1')
+    sel = ws['G1']
+    sel.value      = 'Distribuidor'
+    sel.font       = Font(bold=True, color='FFEB5E28', size=12)
+    sel.fill       = PatternFill('solid', fgColor=SELECTOR_BG)
+    sel.alignment  = center
+    sel.protection = Protection(locked=False)
+
+    dv = DataValidation(
+        type='list',
+        formula1='"Partner Elite Plus!,Partner Elite,Partner,Distribuidor"',
+        allow_blank=False,
+        showDropDown=False,
+    )
+    ws.add_data_validation(dv)
+    dv.add(ws['G1'])
+
+    for ci in range(MONTH_START, VISIBLE_COLS + 1):
+        ws.cell(row=1, column=ci).fill = PatternFill('solid', fgColor=SELECTOR_BG)
+
+    # ── Fila 2: Título ─────────────────────────────────────────────────────────────
+    ws.row_dimensions[2].height = 28
+    ws.merge_cells(f'A2:{get_column_letter(VISIBLE_COLS)}2')
+    tc = ws['A2']
+    tc.value     = f'Plantilla de Forecast — Periodo Comercial {periodo}'
+    tc.font      = Font(bold=True, color='FFEB5E28', size=12)
+    tc.fill      = PatternFill('solid', fgColor=HEADER_BG)
+    tc.alignment = center
+
+    # ── Fila 3: Encabezados de columnas ─────────────────────────────────────────────
+    ws.row_dimensions[3].height = 22
+    ALL_HEADERS = CAMPOS_INFO + ['Precio Público', 'Precio'] + MESES_LABELS + ['TOTAL', 'Total $']
+    for ci, h in enumerate(ALL_HEADERS, start=1):
+        cell = ws.cell(row=3, column=ci, value=h)
+        cell.alignment = center
+        cell.border    = border
+        if h in CAMPOS_INFO:
+            cell.fill = PatternFill('solid', fgColor=DARK_BG)
+            cell.font = info_font
+        elif h in ('Precio Público', 'Precio'):
+            cell.fill = PatternFill('solid', fgColor=PRICE_BG)
+            cell.font = price_hdr_font
+        elif h in ('TOTAL', 'Total $'):
+            cell.fill = PatternFill('solid', fgColor=ORANGE)
+            cell.font = Font(bold=True, color='FF000000', size=10)
+        else:
+            cell.fill = PatternFill('solid', fgColor=ORANGE)
+            cell.font = month_hdr_font
+
+    # ── Fila 4: Instrucciones ──────────────────────────────────────────────────────
+    ws.row_dimensions[4].height = 30
+    ws.merge_cells(f'A4:{get_column_letter(VISIBLE_COLS)}4')
+    note = ws['A4']
+    _instr_font2 = InlineFont(i=True, color='FF444444', sz=9)
+    _imp_font2   = InlineFont(b=True, color='FF222222', sz=11)
+    note.value = CellRichText(
+        TextBlock(_instr_font2,
+            '📌 INSTRUCCIONES: (1) Escriba su NOMBRE/CLAVE en el campo gris (arriba a la derecha de "CLAVE / NOMBRE DISTRIBUIDOR"). '
+            '(2) Seleccione su NIVEL DE DISTRIBUIDOR en la celda naranja (G1): Distribuidor, Partner, Partner Elite o Partner Elite Plus!  '
+            '(3) Los PRECIOS se actualizarán automáticamente en la columna H según el nivel que seleccione. '
+            '(4) Complete las CANTIDADES mensuales (columnas Mayo a Abril) de los productos que necesita. '
+            '(5) El TOTAL en unidades y precio se calcula automáticamente. Guarde y cargue este archivo en el sistema.  '),
+        TextBlock(_imp_font2,
+            '⚡ IMPORTANTE: Entre más rápido envíe sus proyecciones, mayor prioridad tendrán sus solicitudes. '
+            'Envíe este archivo a su Ejecutivo de Ventas antes del 30 de abril de 2026.'),
+    )
+    note.fill      = PatternFill('solid', fgColor='FFFFF8F0')
+    note.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
+
+    # ── Filas de datos (fila 5 en adelante) ────────────────────────────────────────
+    tier_pep_col = get_column_letter(TIER_COLS['Partner Elite Plus!'])
+    tier_pe_col  = get_column_letter(TIER_COLS['Partner Elite'])
+    tier_p_col   = get_column_letter(TIER_COLS['Partner'])
+    tier_d_col   = get_column_letter(TIER_COLS['Distribuidor'])
+    h_col        = get_column_letter(PRICE_DIST_COL)
+    u_col        = get_column_letter(TOTAL_COL)
+    first_m      = get_column_letter(MONTH_START)
+    last_m       = get_column_letter(MONTH_START + len(MESES) - 1)
+    first_data_row = 5
+
+    for row_idx, p in enumerate(products, start=5):
+        sku         = p['sku']
+        prod_prices = prices.get(sku, {})
+
+        for ci, val in enumerate(
+            [sku, p['producto'], p['marca'], p['modelo'], p['color'], p['talla']], start=1
+        ):
+            c = ws.cell(row=row_idx, column=ci, value=val)
+            c.font      = editable_font
+            c.fill      = PatternFill('solid', fgColor='FFFAFAFA')
+            c.alignment = left if ci == 2 else center
+            c.border    = border
+
+        g = ws.cell(row=row_idx, column=PRICE_PUB_COL)
+        g.value         = round(prod_prices.get('list_price', 0.0) * IVA_FACTOR, 2)
+        g.font          = price_data_font
+        g.fill          = PatternFill('solid', fgColor='FFE8F5E9')
+        g.alignment     = center
+        g.border        = border
+        g.number_format = '"$"#,##0.00'
+
+        h = ws.cell(row=row_idx, column=PRICE_DIST_COL)
+        h.value = (
+            f'=IF($G$1="Partner Elite Plus!",{tier_pep_col}{row_idx},'
+            f'IF($G$1="Partner Elite",{tier_pe_col}{row_idx},'
+            f'IF($G$1="Partner",{tier_p_col}{row_idx},{tier_d_col}{row_idx})))'
+        )
+        h.font          = price_data_font
+        h.fill          = PatternFill('solid', fgColor='FFF3E5F5')
+        h.alignment     = center
+        h.border        = border
+        h.number_format = '"$"#,##0.00'
+
+        cat_avail = SKU_CATALOG.get(sku, {}).get('avail', {})
+        for mi in range(len(MESES)):
+            mes_name = MESES[mi]
+            is_avail = cat_avail.get(mes_name, True)
+            c = ws.cell(row=row_idx, column=MONTH_START + mi)
+            c.alignment     = center
+            c.border        = border
+            c.number_format = '0'
+            if is_avail:
+                c.value      = 0
+                c.font       = editable_font
+                c.fill       = PatternFill('solid', fgColor='FFFEFEFE')
+                c.protection = Protection(locked=False)
+            else:
+                c.value = None
+                c.font  = Font(color='FF888888', size=9)
+                c.fill  = PatternFill('solid', fgColor='FF3A3A3A')
+
+        tc2 = ws.cell(row=row_idx, column=TOTAL_COL)
+        tc2.value         = f'=SUM({first_m}{row_idx}:{last_m}{row_idx})'
+        tc2.font          = Font(bold=True, color='FF000000', size=10)
+        tc2.fill          = PatternFill('solid', fgColor='FFFFF0D0')
+        tc2.alignment     = center
+        tc2.border        = border
+        tc2.number_format = '0'
+
+        tp = ws.cell(row=row_idx, column=TOTAL_PRICE_COL)
+        tp.value         = f'={h_col}{row_idx}*{u_col}{row_idx}'
+        tp.font          = Font(bold=True, color='FF000000', size=10)
+        tp.fill          = PatternFill('solid', fgColor='FFE8F0FF')
+        tp.alignment     = center
+        tp.border        = border
+        tp.number_format = '"$"#,##0.00'
+
+        for tier, col_idx in TIER_COLS.items():
+            pc = ws.cell(row=row_idx, column=col_idx)
+            pc.value         = round(prod_prices.get(tier, 0.0) * IVA_FACTOR, 2)
+            pc.number_format = '"$"#,##0.00'
+
+    # ── Fila de TOTALES
+    last_data_row = first_data_row + len(products) - 1
+    total_row     = last_data_row + 1
+
+    ws.row_dimensions[total_row].height = 24
+
+    ws.merge_cells(f'A{total_row}:H{total_row}')
+    label = ws[f'A{total_row}']
+    label.value     = 'TOTALES'
+    label.font      = Font(bold=True, color='FFFFFFFF', size=11)
+    label.fill      = PatternFill('solid', fgColor=ORANGE)
+    label.alignment = center
+    label.border    = border
+
+    for mi in range(len(MESES)):
+        col_letter = get_column_letter(MONTH_START + mi)
+        c = ws.cell(row=total_row, column=MONTH_START + mi)
+        c.value         = f'=SUM({col_letter}{first_data_row}:{col_letter}{last_data_row})'
+        c.font          = Font(bold=True, color='FF000000', size=10)
+        c.fill          = PatternFill('solid', fgColor=ORANGE)
+        c.alignment     = center
+        c.border        = border
+        c.number_format = '0'
+
+    tu = ws.cell(row=total_row, column=TOTAL_COL)
+    tu.value         = f'=SUM({u_col}{first_data_row}:{u_col}{last_data_row})'
+    tu.font          = Font(bold=True, color='FFFFFFFF', size=11)
+    tu.fill          = PatternFill('solid', fgColor=ORANGE)
+    tu.alignment     = center
+    tu.border        = border
+    tu.number_format = '0'
+
+    v_col_letter = get_column_letter(TOTAL_PRICE_COL)
+    tp_total = ws.cell(row=total_row, column=TOTAL_PRICE_COL)
+    tp_total.value         = f'=SUM({v_col_letter}{first_data_row}:{v_col_letter}{last_data_row})'
+    tp_total.font          = Font(bold=True, color='FFFFFFFF', size=11)
+    tp_total.fill          = PatternFill('solid', fgColor=ORANGE)
+    tp_total.alignment     = center
+    tp_total.border        = border
+    tp_total.number_format = '"$"#,##0.00'
+
+    # ── Fila de PRECIO POR MES (azul) — precio × cantidad por cada mes, sin repetir total final ──
+    price_row = total_row + 1
+    ws.row_dimensions[price_row].height = 24
+
+    ws.merge_cells(f'A{price_row}:H{price_row}')
+    label2 = ws[f'A{price_row}']
+    label2.value     = 'TOTAL PRECIO POR MES'
+    label2.font      = Font(bold=True, color='FFFFFFFF', size=11)
+    label2.fill      = PatternFill('solid', fgColor='FF1B5E9C')
+    label2.alignment = center
+    label2.border    = border
+
+    for mi in range(len(MESES)):
+        col_letter = get_column_letter(MONTH_START + mi)
+        c = ws.cell(row=price_row, column=MONTH_START + mi)
+        c.value         = f'=SUMPRODUCT(${h_col}${first_data_row}:${h_col}${last_data_row},{col_letter}${first_data_row}:{col_letter}${last_data_row})'
+        c.font          = Font(bold=True, color='FFFFFFFF', size=10)
+        c.fill          = PatternFill('solid', fgColor='FF1B5E9C')
+        c.alignment     = center
+        c.border        = border
+        c.number_format = '"$"#,##0.00'
+
+    cu = ws.cell(row=price_row, column=TOTAL_COL)
+    cu.fill   = PatternFill('solid', fgColor='FF1B5E9C')
+    cu.border = border
+
+    cv = ws.cell(row=price_row, column=TOTAL_PRICE_COL)
+    cv.fill   = PatternFill('solid', fgColor='FF1B5E9C')
+    cv.border = border
+
+    # ── Ocultar columnas de precios por nivel (W-Z)
+    for col_idx in range(23, 27):
+        ws.column_dimensions[get_column_letter(col_idx)].hidden = True
+
+    # ── Anchos de columna
+    col_widths = [18, 42, 16, 22, 14, 8, 14, 14] + [13] * 12 + [9, 18]
+    for ci, w in enumerate(col_widths, start=1):
+        ws.column_dimensions[get_column_letter(ci)].width = w
+
+    ws.freeze_panes        = 'A5'
+    ws.protection.sheet    = True
+    ws.protection.password = 'masterkey'
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    filename = f'Forecast_Template_Global_{periodo}.xlsx'
+    return send_file(
+        buf,
+        as_attachment=True,
+        download_name=filename,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+
+
+
 @forecast_bp.route('/forecast/importar', methods=['POST'])
 def importar_forecast():
     """
     POST /forecast/importar  (multipart/form-data)
-    Fields: clave_cliente, periodo, file (xlsx)
+    Fields: clave_cliente (opcional si el archivo global tiene clave en D1),
+            periodo (opcional — se lee de A2 si está vacío), file (xlsx).
     Validates and upserts rows into forecast_proyecciones.
     """
     if not OPENPYXL_OK:
         return jsonify({'error': 'openpyxl no instalado en el servidor'}), 500
 
-    clave  = request.form.get('clave_cliente', '').strip()
+    clave   = request.form.get('clave_cliente', '').strip()
     periodo = request.form.get('periodo', '').strip()
     archivo = request.files.get('file')
 
-    if not clave or not periodo or not archivo:
-        return jsonify({'error': 'Faltan campos: clave_cliente, periodo, file'}), 400
-    if not _validate_periodo(periodo):
-        return jsonify({'error': 'Formato de periodo inválido (use YYYY-YYYY)'}), 400
+    if not archivo:
+        return jsonify({'error': 'Falta el archivo Excel'}), 400
 
     ext = archivo.filename.rsplit('.', 1)[-1].lower() if archivo.filename else ''
     if ext not in ('xlsx', 'xls'):
         return jsonify({'error': 'El archivo debe ser Excel (.xlsx o .xls)'}), 400
 
-    id_cliente = _get_client_id(clave)
-    if id_cliente is None:
-        return jsonify({'error': f'Cliente "{clave}" no encontrado'}), 404
-
-    # Load valid SKUs — Excel catalog is primary; fall back to Odoo only when Excel is empty
-    valid_skus = get_valid_skus()
-
-    # Parse Excel
+    # Cargar el workbook una vez para poder leer clave/periodo del propio archivo si no vienen en el form
     try:
         content = archivo.read()
         wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
         ws = wb.active
     except Exception as e:
         return jsonify({'error': f'No se pudo leer el archivo Excel: {str(e)}'}), 400
+
+    # Leer clave desde D1 (plantilla global) si no viene en el form
+    if not clave:
+        d1_val = ws.cell(row=1, column=4).value  # D1 = campo de clave en plantilla global
+        if d1_val:
+            clave = str(d1_val).strip()
+
+    # Leer periodo desde la fila de título (A2) si no viene en el form
+    if not periodo:
+        titulo = str(ws.cell(row=2, column=1).value or '')
+        m_periodo = re.search(r'(\d{4}-\d{4})', titulo)
+        if m_periodo:
+            periodo = m_periodo.group(1)
+        else:
+            # Default: periodo comercial actual (Mayo–Abril)
+            now = datetime.now()
+            inicio = now.year if now.month >= 4 else now.year - 1
+            periodo = f'{inicio}-{inicio + 1}'
+
+    if not clave:
+        return jsonify({'error': 'No se encontró la clave del distribuidor. '
+                                 'Completa la celda de clave en la plantilla o envíala como parámetro.'}), 400
+    if not _validate_periodo(periodo):
+        return jsonify({'error': 'Formato de periodo inválido (use YYYY-YYYY)'}), 400
+
+    id_cliente = _get_client_id(clave)
+    if id_cliente is None:
+        return jsonify({'error': f'Cliente "{clave}" no encontrado en el sistema'}), 404
+
+    # Load valid SKUs — Excel catalog is primary; fall back to Odoo only when Excel is empty
+    valid_skus = get_valid_skus()
+
+    # wb/ws ya cargados arriba para leer clave/periodo — reutilizamos directamente
 
     # Find header row (row with 'SKU' in first column)
     header_row = None
@@ -826,7 +1714,7 @@ def importar_forecast():
         cur.close()
         conn.close()
 
-    result = {'guardados': saved}
+    result = {'guardados': saved, 'clave_cliente': clave, 'periodo': periodo}
     if errors:
         result['advertencias'] = errors
     return jsonify(result), 200
@@ -836,7 +1724,8 @@ def importar_forecast():
 def listar_forecast():
     """
     GET /forecast?clave=<clave_cliente>&periodo=<periodo>
-    Returns all forecast rows for a client+period.
+    Returns forecast rows for a client+period, only for whitelist products.
+    Includes precio (client tier price) and nivel_precio per row.
     """
     clave  = request.args.get('clave', '').strip()
     periodo = request.args.get('periodo', '').strip()
@@ -844,31 +1733,155 @@ def listar_forecast():
     if not clave or not periodo:
         return jsonify({'error': 'Faltan parámetros: clave, periodo'}), 400
 
+    _update_whitelist_skus()
+
+    # MySQL nivel → TIER_NAMES key
+    NIVEL_TO_TIER = {
+        'Partner Elite Plus!': 'Partner Elite Plus!',
+        'Partner Elite Plus':  'Partner Elite Plus!',
+        'Partner Elite':       'Partner Elite',
+        'Partner':             'Partner',
+        'Distribuidor':        'Distribuidor',
+    }
+
     conn = obtener_conexion()
     cur = conn.cursor(dictionary=True)
     try:
+        # Nivel del cliente para seleccionar precio correcto
+        cur.execute("SELECT nivel FROM clientes WHERE clave = %s LIMIT 1", (clave,))
+        cli = cur.fetchone()
+        nivel = (cli or {}).get('nivel') or ''
+        tier  = NIVEL_TO_TIER.get(nivel, 'Distribuidor')
+
         cur.execute("""
-            SELECT id, clave_cliente, periodo, sku, producto, marca, modelo, color, talla,
-                   mayo, junio, julio, agosto, septiembre, octubre,
-                   noviembre, diciembre, enero, febrero, marzo, abril,
-                   (mayo+junio+julio+agosto+septiembre+octubre+
-                    noviembre+diciembre+enero+febrero+marzo+abril) AS total,
-                   actualizado_en
-            FROM forecast_proyecciones
-            WHERE clave_cliente = %s AND periodo = %s
-            ORDER BY marca, modelo, sku
+            SELECT
+                p.referencia_interna AS sku, p.nombre_producto AS producto, p.marca, p.categoria AS modelo, p.color, p.talla,
+                COALESCE(f.mayo, 0) AS mayo,
+                COALESCE(f.junio, 0) AS junio,
+                COALESCE(f.julio, 0) AS julio,
+                COALESCE(f.agosto, 0) AS agosto,
+                COALESCE(f.septiembre, 0) AS septiembre,
+                COALESCE(f.octubre, 0) AS octubre,
+                COALESCE(f.noviembre, 0) AS noviembre,
+                COALESCE(f.diciembre, 0) AS diciembre,
+                COALESCE(f.enero, 0) AS enero,
+                COALESCE(f.febrero, 0) AS febrero,
+                COALESCE(f.marzo, 0) AS marzo,
+                COALESCE(f.abril, 0) AS abril,
+                (COALESCE(f.mayo, 0) + COALESCE(f.junio, 0) + COALESCE(f.julio, 0) +
+                 COALESCE(f.agosto, 0) + COALESCE(f.septiembre, 0) + COALESCE(f.octubre, 0) +
+                 COALESCE(f.noviembre, 0) + COALESCE(f.diciembre, 0) + COALESCE(f.enero, 0) +
+                 COALESCE(f.febrero, 0) + COALESCE(f.marzo, 0) + COALESCE(f.abril, 0)) AS total,
+                f.actualizado_en
+            FROM odoo_catalogo p
+            LEFT JOIN forecast_proyecciones f ON f.sku = p.referencia_interna AND f.clave_cliente = %s AND f.periodo = %s
+            WHERE p.referencia_interna IN (SELECT sku FROM forecast_sku_whitelist)
+            ORDER BY p.marca, p.categoria, p.referencia_interna
         """, (clave, periodo))
         rows = cur.fetchall()
-        # Serialize datetime
+
+        # Precios por SKU: Odoo con fallback a SKU_CATALOG
+        all_skus = [r['sku'] for r in rows if r.get('sku')]
+        prices = _get_odoo_prices_for_skus(all_skus) if all_skus else {}
+        for sku in all_skus:
+            cat_entry  = SKU_CATALOG.get(sku, {})
+            cat_prices = cat_entry.get('prices', {})
+            odoo_entry = prices.get(sku, {})
+            for key in ['list_price'] + TIER_NAMES:
+                if not odoo_entry.get(key):
+                    odoo_entry[key] = cat_prices.get(key, 0.0)
+            prices[sku] = odoo_entry
+
         for r in rows:
+            p = prices.get(r.get('sku') or '', {})
+            r['precio']       = round(p.get(tier, p.get('Distribuidor', 0.0)) * IVA_FACTOR, 2)
+            r['nivel_precio'] = tier
             if r.get('actualizado_en'):
                 r['actualizado_en'] = r['actualizado_en'].isoformat()
+
         return jsonify(rows), 200
     except Exception as e:
+        logging.exception('[forecast] listar_forecast error: %s', e)
         return jsonify({'error': str(e)}), 500
     finally:
         cur.close()
         conn.close()
+
+
+@forecast_bp.route('/forecast/distribuidores-precios', methods=['GET'])
+def distribuidores_precios():
+    """
+    GET /forecast/distribuidores-precios
+    Devuelve todos los clientes con su nivel en MySQL y su lista de precios en Odoo.
+    Permite detectar discrepancias entre ambas fuentes.
+    """
+    conn = obtener_conexion()
+    cur = conn.cursor(dictionary=True)
+    try:
+        cur.execute("""
+            SELECT id, clave, nombre_cliente, nivel, zona
+            FROM clientes
+            ORDER BY nombre_cliente
+        """)
+        clientes = cur.fetchall()
+    except Exception as e:
+        logging.exception('[distribuidores_precios] MySQL error: %s', e)
+        return jsonify({'error': 'Error al obtener clientes'}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+    if not clientes:
+        return jsonify([]), 200
+
+    claves = [c['clave'] for c in clientes if c.get('clave')]
+    odoo_pricelists: dict = {}
+
+    try:
+        from utils.odoo_utils import get_odoo_models, ODOO_DB, ODOO_PASSWORD, ODOO_COMPANY_ID
+        uid, models, err = get_odoo_models()
+        if uid:
+            partners = models.execute_kw(
+                ODOO_DB, uid, ODOO_PASSWORD,
+                'res.partner', 'search_read',
+                [[('ref', 'in', claves), ('company_id', '=', ODOO_COMPANY_ID)]],
+                {'fields': ['id', 'name', 'ref', 'property_product_pricelist']}
+            )
+            for p in partners:
+                ref = (p.get('ref') or '').strip()
+                pricelist = p.get('property_product_pricelist')
+                if ref and pricelist:
+                    odoo_pricelists[ref] = pricelist[1] if isinstance(pricelist, (list, tuple)) else str(pricelist)
+        else:
+            logging.warning('[distribuidores_precios] No Odoo connection: %s', err)
+    except Exception as e:
+        logging.exception('[distribuidores_precios] Odoo error: %s', e)
+
+    result = []
+    NIVEL_TO_TIER = {
+        'Partner Elite Plus!': 'Partner Elite Plus!',
+        'Partner Elite Plus':  'Partner Elite Plus!',
+        'Partner Elite':       'Partner Elite',
+        'Partner':             'Partner',
+        'Distribuidor':        'Distribuidor',
+    }
+    for c in clientes:
+        clave    = (c.get('clave') or '').strip()
+        odoo_pl  = odoo_pricelists.get(clave)
+        nivel    = c.get('nivel') or ''
+        tier     = NIVEL_TO_TIER.get(nivel, None)
+        coincide = (odoo_pl == nivel or odoo_pl == tier) if odoo_pl else None
+        result.append({
+            'id':                 c['id'],
+            'clave':              clave,
+            'nombre':             c.get('nombre_cliente'),
+            'zona':               c.get('zona'),
+            'nivel_mysql':        nivel,
+            'lista_precios_odoo': odoo_pl,
+            'coincide':           coincide,
+        })
+
+    return jsonify(result), 200
 
 
 @forecast_bp.route('/forecast/periodos', methods=['GET'])
@@ -1265,10 +2278,12 @@ def buscar_producto():
     """
     GET /forecast/buscar-producto?q=<query>&offset=<int>
     Searches forecast_excel_productos (Excel catalog, primary source).
+    Always refreshes the SKU whitelist from the configured fixed list before searching.
     Falls back to odoo_catalogo when Excel catalog is empty,
     and to monitor table if neither is populated.
     Returns {results: [...], has_more: bool, offset: int} with up to 50 items per page.
     """
+    _update_whitelist_skus()
     q = request.args.get('q', '').strip()
     if len(q) < 2:
         return jsonify({'results': [], 'has_more': False, 'offset': 0}), 200
@@ -1283,7 +2298,56 @@ def buscar_producto():
     conn = obtener_conexion()
     cur = conn.cursor(dictionary=True)
     try:
-        # Decide source: Excel catalog takes priority
+        # ── Whitelist activa: buscar SOLO entre los 92 SKUs configurados ──────
+        cur.execute("SELECT COUNT(*) as cnt FROM forecast_sku_whitelist")
+        use_whitelist = cur.fetchone()['cnt'] > 0
+
+        if use_whitelist:
+            cur.execute("""
+                SELECT
+                    oc.referencia_interna AS sku,
+                    oc.nombre_producto    AS nombre_src,
+                    oc.categoria          AS categoria,
+                    oc.marca              AS marca,
+                    oc.color              AS odoo_color,
+                    oc.talla              AS odoo_talla
+                FROM odoo_catalogo oc
+                INNER JOIN forecast_sku_whitelist wl ON wl.sku = oc.referencia_interna
+                WHERE (
+                    oc.nombre_producto    LIKE %s
+                    OR oc.referencia_interna LIKE %s
+                    OR oc.marca           LIKE %s
+                    OR oc.color           LIKE %s
+                    OR oc.talla           LIKE %s
+                )
+                ORDER BY
+                    CASE WHEN oc.referencia_interna = %s THEN 0 ELSE 1 END,
+                    oc.nombre_producto
+                LIMIT %s OFFSET %s
+            """, (like, like, like, like, like, q_search, _SEARCH_PAGE + 1, offset))
+            rows     = cur.fetchall()
+            has_more = len(rows) > _SEARCH_PAGE
+            rows     = rows[:_SEARCH_PAGE]
+
+            results = []
+            for r in rows:
+                cat    = r.get('categoria') or ''
+                modelo = cat.split(' / ')[-1].strip().upper() if ' / ' in cat else ''
+                color  = (r.get('odoo_color') or '').strip().upper() or 'N/A'
+                talla  = (r.get('odoo_talla') or '').strip().upper() or 'N/A'
+                nombre = (r.get('nombre_src') or '').strip().upper()
+                results.append({
+                    'sku':      r['sku'] or '',
+                    'producto': nombre,
+                    'marca':    (r.get('marca') or '').upper() or 'N/A',
+                    'modelo':   modelo,
+                    'color':    color,
+                    'talla':    talla,
+                    'label':    f"{r['sku']} — {nombre}",
+                })
+            return jsonify({'results': results, 'has_more': has_more, 'offset': offset}), 200
+
+        # ── Sin whitelist: cadena de fallback original ────────────────────────
         cur.execute("SELECT COUNT(*) as cnt FROM forecast_excel_productos WHERE origen = 'excel'")
         use_excel = cur.fetchone()['cnt'] > 0
 
@@ -1298,14 +2362,14 @@ def buscar_producto():
                     nombre
                 LIMIT %s OFFSET %s
             """, (like, like, q_search, _SEARCH_PAGE + 1, offset))
-            rows = cur.fetchall()
+            rows     = cur.fetchall()
             has_more = len(rows) > _SEARCH_PAGE
-            rows = rows[:_SEARCH_PAGE]
+            rows     = rows[:_SEARCH_PAGE]
 
             results = []
             for r in rows:
-                color = (r.get('odoo_color') or '').strip().upper() or 'N/A'
-                talla = (r.get('odoo_talla') or '').strip().upper() or 'N/A'
+                color  = (r.get('odoo_color') or '').strip().upper() or 'N/A'
+                talla  = (r.get('odoo_talla') or '').strip().upper() or 'N/A'
                 nombre = (r.get('nombre_src') or '').strip().upper()
                 results.append({
                     'sku':      r['sku'] or '',
@@ -1318,7 +2382,7 @@ def buscar_producto():
                 })
             return jsonify({'results': results, 'has_more': has_more, 'offset': offset}), 200
 
-        # Fallback: odoo_catalogo
+        # Fallback: odoo_catalogo completo
         cur.execute('SELECT COUNT(*) as cnt FROM odoo_catalogo')
         use_catalogo = cur.fetchone()['cnt'] > 0
 
@@ -1595,3 +2659,86 @@ def guardar_forecast():
     if errors:
         result['advertencias'] = errors
     return jsonify(result), 200
+
+
+# ─────────────────────────────────────────────────────
+# SKU Whitelist management
+# ─────────────────────────────────────────────────────
+
+@forecast_bp.route('/forecast/sku-whitelist', methods=['GET'])
+def listar_sku_whitelist():
+    """GET /forecast/sku-whitelist — lista SKUs y productos del catálogo de proyecciones."""
+    skus     = _get_whitelist_skus()
+    products = _get_whitelist_products() if skus else []
+    return jsonify({'total': len(skus), 'skus': skus, 'productos': products}), 200
+
+
+@forecast_bp.route('/forecast/sku-whitelist', methods=['POST'])
+def set_sku_whitelist():
+    """
+    POST /forecast/sku-whitelist
+    Body: {"skus": ["REF1", "REF2", ...], "replace": true}
+    Reemplaza (o añade) SKUs al whitelist de proyecciones.
+    """
+    data    = request.get_json(force=True, silent=True) or {}
+    skus    = data.get('skus', [])
+    replace = bool(data.get('replace', True))
+
+    if not isinstance(skus, list):
+        return jsonify({'error': 'skus debe ser una lista'}), 400
+
+    cleaned = [str(s).strip() for s in skus if str(s).strip()]
+    if not cleaned:
+        return jsonify({'error': 'Lista de SKUs vacía'}), 400
+
+    conn = obtener_conexion()
+    cur  = conn.cursor()
+    try:
+        if replace:
+            cur.execute("DELETE FROM forecast_sku_whitelist")
+        cur.executemany(
+            "INSERT IGNORE INTO forecast_sku_whitelist (sku) VALUES (%s)",
+            [(s,) for s in cleaned]
+        )
+        conn.commit()
+
+        placeholders = ','.join(['%s'] * len(cleaned))
+        cur.execute(
+            f"SELECT COUNT(*) FROM odoo_catalogo WHERE referencia_interna IN ({placeholders})",
+            cleaned
+        )
+        en_odoo   = cur.fetchone()[0]
+        faltantes = len(cleaned) - en_odoo
+
+        return jsonify({
+            'cargados':         len(cleaned),
+            'en_odoo_catalogo': en_odoo,
+            'advertencia': (
+                f'{faltantes} SKU(s) no encontrados en el catálogo Odoo local. '
+                'Ejecute POST /forecast/sync-catalogo para sincronizar primero.'
+            ) if faltantes > 0 else None,
+        }), 200
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
+@forecast_bp.route('/forecast/sku-whitelist', methods=['DELETE'])
+def limpiar_sku_whitelist():
+    """DELETE /forecast/sku-whitelist — vacía el whitelist de proyecciones."""
+    conn = obtener_conexion()
+    cur  = conn.cursor()
+    try:
+        cur.execute("DELETE FROM forecast_sku_whitelist")
+        count = cur.rowcount
+        conn.commit()
+        return jsonify({'eliminados': count}), 200
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()

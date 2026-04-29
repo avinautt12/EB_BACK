@@ -1,7 +1,7 @@
 from flask import Blueprint, jsonify, request
 from utils.otp_utils import (
     generar_otp, verificar_otp, otp_activo, listar_tokens_usuarios,
-    sincronizar_usuarios_desde_monitor, TIPOS_VALIDOS
+    sincronizar_usuarios_desde_monitor, TIPOS_VALIDOS, listar_tokens_usuarios_monitor
 )
 
 edicion_bp = Blueprint('edicion', __name__, url_prefix='/edicion')
@@ -34,6 +34,12 @@ def ver_otp_activo():
 def listar_tokens():
     """Lista todos los usuarios (no-admin) con sus tokens activos por tipo."""
     return jsonify(listar_tokens_usuarios())
+
+
+@edicion_bp.route('/tokens-monitor', methods=['GET'])
+def listar_tokens_monitor():
+    """Lista TODOS los usuarios visibles en Monitor de Pedidos con sus tokens activos."""
+    return jsonify(listar_tokens_usuarios_monitor())
 
 
 @edicion_bp.route('/verificar-otp', methods=['POST'])

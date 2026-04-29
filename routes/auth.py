@@ -2,6 +2,8 @@ from flask import Blueprint, request, jsonify
 from db_conexion import obtener_conexion
 from utils.seguridad import hash_password, verificar_password
 from utils.jwt_utils import generar_token
+import sqlite3
+import os
 import re
 import random
 from utils.email import enviar_correo_activacion
@@ -26,7 +28,6 @@ def registrar_usuario():
     correo     = data.get('correo')
     rol        = data.get('rol', 'Usuario')
     cliente_id = data.get('cliente_id')
-    id_grupo   = data.get('id_grupo')
 
     # Validaciones básicas de campos
     campos_requeridos = {'usuario': usuario, 'contrasena': contrasena, 'nombre': nombre, 'correo': correo}
@@ -70,18 +71,6 @@ def registrar_usuario():
         else:
             cliente_id = None
 
-        # Validar id_grupo si se proporciona (y no hay cliente_id)
-        if id_grupo not in [None, '', 'null']:
-            try:
-                id_grupo = int(id_grupo)
-                cursor.execute("SELECT id FROM grupo_clientes WHERE id = %s", (id_grupo,))
-                if not cursor.fetchone():
-                    return jsonify({"error": "El id_grupo no existe"}), 400
-            except ValueError:
-                return jsonify({"error": "id_grupo inválido"}), 400
-        else:
-            id_grupo = None
-
         # Validar duplicados (requiere BD)
         cursor.execute("SELECT id FROM usuarios WHERE usuario = %s", (usuario,))
         if cursor.fetchone():
@@ -93,12 +82,11 @@ def registrar_usuario():
         
         # Insertar
         contrasena_hash = hash_password(contrasena)
-        # Si hay cliente_id, id_grupo viene de la tabla clientes (JOIN); si no, lo guardamos directo
-        id_grupo_directo = None if cliente_id else id_grupo
+        # Registrar usuario sin id_grupo (se obtiene desde clientes table via JOIN)
         cursor.execute(
-            """INSERT INTO usuarios (usuario, contrasena, nombre, correo, rol_id, activo, cliente_id, id_grupo) 
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-            (usuario, contrasena_hash, nombre, correo, rol_id, True, cliente_id, id_grupo_directo)
+            """INSERT INTO usuarios (usuario, contrasena, nombre, correo, rol_id, activo, cliente_id) 
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            (usuario, contrasena_hash, nombre, correo, rol_id, True, cliente_id)
         )
         conexion.commit()
         nuevo_id = cursor.lastrowid
@@ -106,8 +94,7 @@ def registrar_usuario():
         # Obtener resultado
         cursor.execute("""
             SELECT u.id, u.usuario, u.nombre, u.correo, r.nombre AS rol, u.activo, 
-                   c.nombre_cliente, c.id AS cliente_id,
-                   COALESCE(c.id_grupo, u.id_grupo) AS id_grupo
+                   c.nombre_cliente, c.id AS cliente_id, c.id_grupo
             FROM usuarios u
             JOIN roles r ON u.rol_id = r.id
             LEFT JOIN clientes c ON u.cliente_id = c.id
@@ -185,6 +172,9 @@ def registrar_usuario_integral():
     except (ValueError, TypeError):
         return jsonify({"error": "id_grupo y cliente_id deben ser enteros"}), 400
 
+    if not cliente_id:
+        return jsonify({"error": "cliente_id es obligatorio para registro integral"}), 400
+
     # ── Validaciones con BD ──────────────────────────────────────────────────
     conexion = obtener_conexion()
     cursor   = None
@@ -218,13 +208,11 @@ def registrar_usuario_integral():
             return jsonify({"error": "El correo ya está registrado"}), 400
 
         # 4. Insertar usuario
-        # Si no hay cliente_id, guardamos id_grupo directamente en la columna id_grupo
         contrasena_hash = hash_password(contrasena)
         cursor.execute(
-            """INSERT INTO usuarios (usuario, contrasena, nombre, correo, rol_id, activo, cliente_id, id_grupo)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-            (usuario, contrasena_hash, nombre, correo, rol_id, True,
-             cliente_id, None if cliente_id else id_grupo)
+            """INSERT INTO usuarios (usuario, contrasena, nombre, correo, rol_id, activo, cliente_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            (usuario, contrasena_hash, nombre, correo, rol_id, True, cliente_id)
         )
         conexion.commit()
         nuevo_id = cursor.lastrowid
@@ -233,11 +221,10 @@ def registrar_usuario_integral():
         cursor.execute("""
             SELECT u.id, u.usuario, u.nombre, u.correo, r.nombre AS rol, u.activo,
                    c.nombre_cliente, c.clave AS clave_cliente, c.id AS cliente_id,
-                   g.id AS id_grupo, g.nombre_grupo
+                   c.id_grupo AS id_grupo
             FROM usuarios u
             JOIN roles r ON u.rol_id = r.id
             LEFT JOIN clientes c ON u.cliente_id = c.id
-            LEFT JOIN grupo_clientes g ON COALESCE(c.id_grupo, u.id_grupo) = g.id
             WHERE u.id = %s
         """, (nuevo_id,))
         usuario_creado = cursor.fetchone()
@@ -255,52 +242,76 @@ def registrar_usuario_integral():
         if conexion and conexion.is_connected(): conexion.close()
 
 
+def _sqlite_login_connection():
+    return obtener_conexion()
+
+
 @auth.route('/login', methods=['POST'])
 def login():
+    print("Login called")
     data = request.get_json()
     if not data: return jsonify({"error": "Sin datos"}), 400
     usuario = data.get('usuario')
     contrasena = data.get('contrasena')
     if campo_vacio(usuario) or campo_vacio(contrasena): return jsonify({"error": "Faltan datos"}), 400
 
-    conexion = obtener_conexion()
+    print(f"Attempting login for user: {usuario}")
+    conexion = _sqlite_login_connection()
+    if not conexion:
+        print("Failed to get SQLite connection")
+        return jsonify({"error": "Error de conexión a base de datos"}), 500
+
     cursor = None
     try:
-        cursor = conexion.cursor(dictionary=True)
-        # Traemos todos los campos necesarios, incluido el nuevo campo 'flujo'
+        cursor = conexion.cursor()
         cursor.execute("""
-            SELECT u.*, c.id as cliente_id, c.clave as clave_cliente, 
-                   c.nombre_cliente,
-                   COALESCE(c.id_grupo, u.id_grupo) AS id_grupo,
-                   u.flujo 
-            FROM usuarios u 
-            LEFT JOIN clientes c ON u.cliente_id = c.id 
-            WHERE u.usuario = %s AND u.activo = TRUE
+            SELECT u.id, u.usuario, u.contrasena, u.nombre, u.correo, u.rol_id,
+                   u.cliente_id, u.flujo,
+                   c.clave AS clave_cliente, c.nombre_cliente, c.id_grupo
+            FROM usuarios u
+            LEFT JOIN clientes c ON u.cliente_id = c.id
+            WHERE u.usuario = %s AND u.activo = 1
         """, (usuario,))
         user = cursor.fetchone()
-        
-        if user and verificar_password(contrasena, user['contrasena']):
-            # Llamada corregida con exactamente 9 argumentos
+
+        if user and verificar_password(contrasena, user[2]):
+            print("Password verified, generating token")
+            user_dict = {
+                'id': user[0],
+                'usuario': user[1],
+                'contrasena': user[2],
+                'nombre': user[3],
+                'correo': user[4],
+                'rol_id': user[5],
+                'cliente_id': user[6],
+                'flujo': user[7],
+                'clave_cliente': user[8],
+                'nombre_cliente': user[9],
+                'id_grupo': user[10]
+            }
+
             token = generar_token(
-                user['id'],             # 1
-                user['rol_id'],         # 2
-                user['usuario'],        # 3
-                user['nombre'],          # 4
-                user['cliente_id'],     # 5
-                user['clave_cliente'],  # 6
-                user['nombre_cliente'], # 7
-                user['id_grupo'],       # 8
-                user['flujo']           # 9
+                user_dict['id'],
+                user_dict['rol_id'],
+                user_dict['usuario'],
+                user_dict['nombre'],
+                user_dict['cliente_id'],
+                user_dict['clave_cliente'],
+                user_dict['nombre_cliente'],
+                user_dict['id_grupo'],
+                user_dict['flujo']
             )
+            print("Token generated successfully")
             return jsonify({"token": token}), 200
-            
+
+        print("Invalid credentials")
         return jsonify({"error": "Credenciales incorrectas"}), 401
     except Exception as e:
-        print(f"Error en login: {e}")
+        print(f"Error in login: {e}")
         return jsonify({"error": str(e)}), 500
     finally:
         if cursor: cursor.close()
-        if conexion and conexion.is_connected(): conexion.close()
+        if conexion: conexion.close()
 
 @auth.route('/logout', methods=['POST'])
 def logout():

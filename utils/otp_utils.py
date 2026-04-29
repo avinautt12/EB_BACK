@@ -131,11 +131,11 @@ def listar_tokens_usuarios() -> list:
             u.usuario,
             u.activo,
             c.clave,
-            COALESCE(c.id_grupo, u.id_grupo) AS id_grupo,
+            c.id_grupo,
             g.nombre_grupo
         FROM usuarios u
         LEFT JOIN clientes c ON u.cliente_id = c.id
-        LEFT JOIN grupo_clientes g ON COALESCE(c.id_grupo, u.id_grupo) = g.id
+        LEFT JOIN grupo_clientes g ON c.id_grupo = g.id
         WHERE u.rol_id IS NOT NULL AND u.rol_id != 1
         ORDER BY u.nombre
     """)
@@ -210,11 +210,11 @@ def obtener_usuarios_monitor() -> list:
             u.rol_id,
             u.activo,
             c.clave,
-            COALESCE(c.id_grupo, u.id_grupo) AS id_grupo,
+            c.id_grupo,
             g.nombre_grupo
         FROM clientes c
         LEFT JOIN usuarios u ON u.cliente_id = c.id
-        LEFT JOIN grupo_clientes g ON COALESCE(c.id_grupo, u.id_grupo) = g.id
+        LEFT JOIN grupo_clientes g ON c.id_grupo = g.id
 
         UNION
 
@@ -226,10 +226,9 @@ def obtener_usuarios_monitor() -> list:
             u.rol_id,
             u.activo,
             NULL AS clave,
-            u.id_grupo,
-            g.nombre_grupo
+            NULL AS id_grupo,
+            NULL AS nombre_grupo
         FROM usuarios u
-        LEFT JOIN grupo_clientes g ON u.id_grupo = g.id
         WHERE u.cliente_id IS NULL
 
         ORDER BY nombre
@@ -251,6 +250,72 @@ def obtener_usuarios_monitor() -> list:
                 "nombre_grupo": r["nombre_grupo"],
                 "rol_id": r["rol_id"] or 0
             })
+    return result
+
+
+def listar_tokens_usuarios_monitor() -> list:
+    """
+    Devuelve TODOS los usuarios visibles en Monitor de Pedidos con sus tokens activos.
+    Incluye usuarios de Odoo, huérfanos y vinculados a clientes.
+    Cada usuario incluye un objeto 'tokens' con slots para 'super', 'eliminar' y 'meses'.
+    """
+    _ensure_table()
+    usuarios_monitor = obtener_usuarios_monitor()
+    if not usuarios_monitor:
+        return []
+
+    conn = obtener_conexion()
+    cur = conn.cursor(dictionary=True)
+
+    # Obtener todos los OTPs activos de una sola query para eficiencia
+    ids = [u["id_usuario"] for u in usuarios_monitor if u["id_usuario"]]
+    if not ids:
+        conn.close()
+        return []
+
+    fmt = ",".join(["%s"] * len(ids))
+    cur.execute(f"""
+        SELECT usuario_id, tipo, codigo, expira_en, creado_en
+        FROM otps
+        WHERE usuario_id IN ({fmt})
+          AND usado = 0
+          AND expira_en > NOW()
+          AND id IN (
+              SELECT MAX(o2.id) FROM otps o2
+              WHERE o2.usado = 0 AND o2.expira_en > NOW()
+              GROUP BY o2.usuario_id, o2.tipo
+          )
+    """, ids)
+    otp_rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    # Indexar por (usuario_id, tipo)
+    otp_map: dict = {}
+    for o in otp_rows:
+        key = (o["usuario_id"], o["tipo"])
+        otp_map[key] = {
+            "codigo": o["codigo"],
+            "expira_en": str(o["expira_en"]) if o["expira_en"] else None,
+            "creado_en": str(o["creado_en"]) if o["creado_en"] else None,
+        }
+
+    result = []
+    for u in usuarios_monitor:
+        uid = u["id_usuario"]
+        result.append({
+            "id": uid,
+            "nombre": u["nombre"],
+            "usuario": u["usuario"],
+            "activo": u["activo"],
+            "clave": u["clave"],
+            "nombre_grupo": u["nombre_grupo"],
+            "tokens": {
+                "super":    otp_map.get((uid, "super")),
+                "eliminar": otp_map.get((uid, "eliminar")),
+                "meses":    otp_map.get((uid, "meses")),
+            },
+        })
     return result
 
 

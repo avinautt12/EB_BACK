@@ -30,11 +30,11 @@ def usuarios_para_monitor():
                 u.rol_id,
                 u.activo,
                 c.clave,
-                COALESCE(c.id_grupo, u.id_grupo) AS id_grupo,
+                c.id_grupo AS id_grupo,
                 g.nombre_grupo
             FROM clientes c
             LEFT JOIN usuarios u ON u.cliente_id = c.id
-            LEFT JOIN grupo_clientes g ON COALESCE(c.id_grupo, u.id_grupo) = g.id
+            LEFT JOIN grupo_clientes g ON c.id_grupo = g.id
 
             UNION
 
@@ -46,10 +46,9 @@ def usuarios_para_monitor():
                 u.rol_id,
                 u.activo,
                 NULL AS clave,
-                u.id_grupo,
-                g.nombre_grupo
+                NULL AS id_grupo,
+                NULL AS nombre_grupo
             FROM usuarios u
-            LEFT JOIN grupo_clientes g ON u.id_grupo = g.id
             WHERE u.cliente_id IS NULL
 
             ORDER BY nombre
