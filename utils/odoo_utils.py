@@ -1,3 +1,4 @@
+from __future__ import annotations
 import xmlrpc.client
 import ssl
 import time

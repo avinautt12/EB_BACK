@@ -1,3 +1,4 @@
+from __future__ import annotations
 import secrets
 from db_conexion import obtener_conexion
 

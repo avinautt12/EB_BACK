@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 Forecast / Proyecciones B2B
 Gestión del forecast anual de compra por distribuidor.
