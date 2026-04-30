@@ -1,3 +1,4 @@
+from __future__ import annotations
 from flask import Blueprint, jsonify, request
 from utils.odoo_utils import get_odoo_models, ODOO_DB, ODOO_PASSWORD, ODOO_COMPANY_ID
 from db_conexion import obtener_conexion
