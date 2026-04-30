@@ -1,6 +1,7 @@
 from flask import Blueprint, jsonify, request
 from utils.odoo_utils import get_odoo_models, ODOO_DB, ODOO_PASSWORD, ODOO_COMPANY_ID
 from db_conexion import obtener_conexion
+from datetime import date as _date, timedelta as _timedelta
 import logging
 import time
 
@@ -99,6 +100,148 @@ def _build_consolidation_map(partner_totals: dict, models, uid) -> dict:
 
     return result
 
+
+
+# ── Helpers para suplemento Odoo en integrales ────────────────────────────────
+
+_monitor_start_cache: str | None = None
+
+
+def _get_monitor_start() -> str | None:
+    """Devuelve la fecha más antigua en la tabla monitor (cacheada)."""
+    global _monitor_start_cache
+    if _monitor_start_cache:
+        return _monitor_start_cache
+    try:
+        conn = obtener_conexion()
+        cur  = conn.cursor()
+        cur.execute("SELECT MIN(fecha_factura) FROM monitor WHERE fecha_factura IS NOT NULL")
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row and row[0]:
+            _monitor_start_cache = str(row[0])[:10]
+            return _monitor_start_cache
+    except Exception:
+        pass
+    return None
+
+
+def _claves_para_grupo(grupo_id: int) -> list:
+    """Devuelve las claves de cliente de un grupo integral."""
+    try:
+        conn = obtener_conexion()
+        cur  = conn.cursor()
+        cur.execute("SELECT clave FROM clientes WHERE id_grupo = %s AND clave IS NOT NULL", (grupo_id,))
+        claves = [r[0] for r in cur.fetchall() if r[0]]
+        cur.close()
+        conn.close()
+        return claves
+    except Exception:
+        return []
+
+
+def _nombre_grupo(grupo_id: int) -> str:
+    try:
+        conn = obtener_conexion()
+        cur  = conn.cursor()
+        cur.execute("SELECT nombre_grupo FROM grupo_clientes WHERE id = %s", (grupo_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return row[0] if row else ''
+    except Exception:
+        return ''
+
+
+def _odoo_supplement_rows(uid, models, grupo_id: int, fi_str: str, ff_str: str) -> list:
+    """
+    Consulta Odoo para facturas del integral en el rango [fi_str, ff_str].
+    Retorna filas con el mismo formato que el SELECT de la tabla monitor.
+    """
+    claves = _claves_para_grupo(grupo_id)
+    if not claves:
+        return []
+
+    try:
+        parents = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'res.partner', 'search_read',
+            [[['ref', 'in', claves]]],
+            {'fields': ['id']})
+        all_pids = [p['id'] for p in parents]
+        if all_pids:
+            children = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+                'res.partner', 'search_read',
+                [[['parent_id', 'in', all_pids]]],
+                {'fields': ['id']})
+            all_pids += [c['id'] for c in children]
+    except Exception as e:
+        logging.warning('_odoo_supplement_rows: error obteniendo partner IDs: %s', e)
+        return []
+
+    if not all_pids:
+        return []
+
+    nombre = _nombre_grupo(grupo_id)
+
+    try:
+        domain = [
+            ['move_type', '=', 'out_invoice'],
+            ['state', '=', 'posted'],
+            PAYMENT_FILTER,
+            ['invoice_date', '>=', fi_str],
+            ['invoice_date', '<=', ff_str],
+            ['company_id', '=', ODOO_COMPANY_ID],
+            ['partner_id', 'in', all_pids],
+        ]
+        moves = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'account.move', 'search_read',
+            [domain],
+            {'fields': ['id', 'name', 'partner_id', 'invoice_date', 'amount_total']})
+
+        if not moves:
+            return []
+
+        move_ids = [m['id'] for m in moves]
+        lines = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'account.move.line', 'search_read',
+            [[['move_id', 'in', move_ids], ['display_type', '=', 'product']]],
+            {'fields': ['move_id', 'name', 'quantity'], 'order': 'id asc', 'limit': 0})
+
+        move_product: dict = {}
+        move_qty: dict = {}
+        for l in lines:
+            mid = l['move_id'][0] if isinstance(l['move_id'], (list, tuple)) else l['move_id']
+            if mid not in move_product:
+                raw = (l.get('name') or '').split('\n')[0].strip()
+                if raw and 'FLETE' not in raw.upper():
+                    move_product[mid] = raw
+                    move_qty[mid] = int(l.get('quantity') or 0)
+
+        rows = []
+        for m in moves:
+            pname = m['partner_id'][1] if isinstance(m['partner_id'], (list, tuple)) else 'Sin cliente'
+            d_str = str(m.get('invoice_date') or '')[:10]
+            if len(d_str) < 10:
+                continue
+            mid = m['id']
+            rows.append({
+                'numero_factura':      m.get('name', ''),
+                'contacto_referencia': None,
+                'contacto_nombre':     pname,
+                'nombre_display':      nombre or pname,
+                'fecha_factura':       None,
+                'venta_total':         float(m.get('amount_total') or 0),
+                'nombre_producto':     move_product.get(mid, ''),
+                'cantidad':            move_qty.get(mid, 0),
+                'anio':                int(d_str[:4]),
+                'mes':                 int(d_str[5:7]),
+            })
+        return rows
+
+    except Exception as e:
+        logging.warning('_odoo_supplement_rows: error consultando Odoo: %s', e)
+        return []
 
 
 ventas_bp = Blueprint('ventas', __name__, url_prefix='/ventas')
@@ -329,9 +472,11 @@ def resumen():
                 merged[key]['cantidad'] += info['facturas']
             clientes_list = sorted(merged.values(), key=lambda x: x['total'], reverse=True)
 
+        total_cli = sum(c['total'] for c in clientes_list) or 1
         todos_clientes = [
             {'rank': i + 1, 'nombre': c['nombre'],
-             'facturas': c['cantidad'], 'total': round(c['total'], 2)}
+             'facturas': c['cantidad'], 'total': round(c['total'], 2),
+             'participacion_pct': round(c['total'] / total_cli * 100, 1)}
             for i, c in enumerate(clientes_list)
         ]
         top_clientes = todos_clientes[:10]
@@ -360,7 +505,7 @@ def resumen():
                 continue
             # Tomar solo la primera línea (quita números de serie, fechas, etc.)
             nombre = nombre_raw.split('\n')[0].strip()
-            if not nombre or 'FLETE' in nombre.upper():
+            if not nombre or 'FLETE' in nombre.upper() or 'LEYENDA' in nombre.upper():
                 continue
             monto = float(l.get('price_subtotal') or 0)
             cant  = float(l.get('quantity') or 0)
@@ -372,9 +517,11 @@ def resumen():
             prod_dict[nombre]['cantidad'] += cant
 
         prod_sorted = sorted(prod_dict.items(), key=lambda x: x[1]['total'], reverse=True)
+        total_prod = sum(v['total'] for _, v in prod_sorted) or 1
         todos_productos = [
             {'rank': i + 1, 'nombre': k,
-             'cantidad': int(round(v['cantidad'])), 'total': round(v['total'], 2)}
+             'cantidad': int(round(v['cantidad'])), 'total': round(v['total'], 2),
+             'participacion_pct': round(v['total'] / total_prod * 100, 1)}
             for i, (k, v) in enumerate(prod_sorted)
         ]
         top_productos = todos_productos[:10]
@@ -420,6 +567,127 @@ def resumen():
 
     except Exception as e:
         logging.exception('ventas.resumen error')
+        return jsonify({'error': str(e)}), 500
+
+
+# ── Productos top por estado ──────────────────────────────────────────────────
+@ventas_bp.route('/productos-por-estado', methods=['GET'])
+def productos_por_estado():
+    """
+    Top de productos vendidos en un estado específico.
+    Params: fecha_inicio, fecha_fin, estado (nombre del estado)
+    """
+    fecha_inicio = request.args.get('fecha_inicio')
+    fecha_fin    = request.args.get('fecha_fin')
+    estado_req   = request.args.get('estado', '').strip()
+
+    if not fecha_inicio or not fecha_fin or not estado_req:
+        return jsonify({'error': 'Se requieren fecha_inicio, fecha_fin y estado'}), 400
+
+    try:
+        uid, models, err = get_odoo_models()
+        if not uid:
+            return jsonify({'error': 'No se pudo conectar a Odoo', 'detail': err}), 500
+
+        domain_move = [
+            ['move_type', '=', 'out_invoice'],
+            ['state', '=', 'posted'],
+            PAYMENT_FILTER,
+            ['invoice_date', '>=', fecha_inicio],
+            ['invoice_date', '<=', fecha_fin],
+            ['company_id', '=', ODOO_COMPANY_ID],
+        ]
+
+        # Facturas del periodo con partner_id
+        moves = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'account.move', 'search_read',
+            [domain_move],
+            {'fields': ['id', 'partner_id'], 'limit': 0})
+
+        if not moves:
+            return jsonify({'estado': estado_req, 'total': 0, 'facturas': 0, 'productos': []}), 200
+
+        all_pids = list({
+            m['partner_id'][0]
+            for m in moves
+            if m.get('partner_id') and isinstance(m['partner_id'], (list, tuple))
+        })
+
+        if not all_pids:
+            return jsonify({'estado': estado_req, 'total': 0, 'facturas': 0, 'productos': []}), 200
+
+        # Estado de cada partner
+        partners_data = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'res.partner', 'read', [all_pids], {'fields': ['id', 'state_id']})
+
+        pids_en_estado: set = set()
+        for p in partners_data:
+            state = p.get('state_id')
+            if state and isinstance(state, (list, tuple)):
+                nombre_estado = state[1].replace(' (MX)', '').strip()
+            else:
+                nombre_estado = 'Sin estado'
+            if nombre_estado == estado_req:
+                pids_en_estado.add(p['id'])
+
+        if not pids_en_estado:
+            return jsonify({'estado': estado_req, 'total': 0, 'facturas': 0, 'productos': []}), 200
+
+        move_ids_estado = [
+            m['id'] for m in moves
+            if m.get('partner_id') and isinstance(m['partner_id'], (list, tuple))
+            and m['partner_id'][0] in pids_en_estado
+        ]
+
+        if not move_ids_estado:
+            return jsonify({'estado': estado_req, 'total': 0, 'facturas': 0, 'productos': []}), 200
+
+        lines = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'account.move.line', 'search_read',
+            [[
+                ['move_id', 'in', move_ids_estado],
+                ['display_type', '=', 'product'],
+                ['quantity', '>', 0],
+            ]],
+            {'fields': ['name', 'quantity', 'price_subtotal'], 'limit': 0})
+
+        prod_dict: dict = {}
+        for l in lines:
+            nombre_raw = (l.get('name') or '').split('\n')[0].strip()
+            if not nombre_raw or 'FLETE' in nombre_raw.upper() or 'LEYENDA' in nombre_raw.upper():
+                continue
+            monto = float(l.get('price_subtotal') or 0)
+            cant  = float(l.get('quantity') or 0)
+            if monto <= 0:
+                continue
+            if nombre_raw not in prod_dict:
+                prod_dict[nombre_raw] = {'total': 0.0, 'cantidad': 0.0}
+            prod_dict[nombre_raw]['total']    += monto
+            prod_dict[nombre_raw]['cantidad'] += cant
+
+        total_estado = sum(v['total'] for v in prod_dict.values())
+        prod_sorted = sorted(prod_dict.items(), key=lambda x: x[1]['total'], reverse=True)
+
+        productos = [
+            {
+                'rank':              i + 1,
+                'nombre':            k,
+                'cantidad':          int(round(v['cantidad'])),
+                'total':             round(v['total'], 2),
+                'participacion_pct': round(v['total'] / total_estado * 100, 1) if total_estado > 0 else 0,
+            }
+            for i, (k, v) in enumerate(prod_sorted[:25])
+        ]
+
+        return jsonify({
+            'estado':   estado_req,
+            'total':    round(total_estado, 2),
+            'facturas': len(move_ids_estado),
+            'productos': productos,
+        }), 200
+
+    except Exception as e:
+        logging.exception('ventas.productos_por_estado error')
         return jsonify({'error': str(e)}), 500
 
 
@@ -515,14 +783,13 @@ def comparar_anual():
         return jsonify({'error': str(e)}), 500
 
 
-# ── Resumen por integral (fuente: tabla monitor local) ────────────────────────
+# ── Resumen por integral (fuente: Odoo, montos reales) ───────────────────────
 @ventas_bp.route('/resumen-integral', methods=['GET'])
 def resumen_integral():
     """
-    Resumen de ventas leído desde la tabla `monitor` local.
-    Soporta filtro por grupo (integral) vía ?grupo_id=<int>.
-    Retorna la misma estructura que /ventas/resumen para ser compatible con
-    el mismo componente de Angular.
+    Resumen de ventas de un grupo integral consultado directamente en Odoo.
+    Usa amount_total real (no calculado) e incluye facturas paid y partial.
+    Cubre el año natural completo sin límite de tabla local.
     """
     fecha_inicio = request.args.get('fecha_inicio')
     fecha_fin    = request.args.get('fecha_fin')
@@ -530,82 +797,141 @@ def resumen_integral():
 
     if not fecha_inicio or not fecha_fin:
         return jsonify({'error': 'Se requieren fecha_inicio y fecha_fin'}), 400
+    if not grupo_id:
+        return jsonify({'error': 'Se requiere grupo_id'}), 400
 
     try:
-        conexion = obtener_conexion()
-        cursor   = conexion.cursor(dictionary=True)
+        # ── 1. Claves del grupo ───────────────────────────────────────────────
+        claves = _claves_para_grupo(grupo_id)
+        if not claves:
+            return jsonify({'error': 'Grupo no encontrado o sin clientes asignados'}), 404
 
-        params = [fecha_inicio, fecha_fin]
-        grupo_filter = ''
-        if grupo_id:
-            grupo_filter = 'AND c.id_grupo = %s'
-            params.append(grupo_id)
+        # ── 2. Conectar a Odoo ────────────────────────────────────────────────
+        uid, models, err = get_odoo_models()
+        if not uid:
+            return jsonify({'error': 'No se pudo conectar a Odoo', 'detail': err}), 500
 
-        cursor.execute(f"""
-            SELECT
-                m.numero_factura,
-                m.contacto_referencia,
-                m.contacto_nombre,
-                COALESCE(gc.nombre_grupo, m.contacto_nombre, 'Sin cliente') AS nombre_display,
-                m.fecha_factura,
-                m.venta_total,
-                m.nombre_producto,
-                m.cantidad,
-                YEAR(m.fecha_factura)  AS anio,
-                MONTH(m.fecha_factura) AS mes
-            FROM monitor m
-            LEFT JOIN clientes c        ON c.clave   = m.contacto_referencia
-            LEFT JOIN grupo_clientes gc ON gc.id      = c.id_grupo
-            WHERE m.fecha_factura BETWEEN %s AND %s
-            {grupo_filter}
-        """, params)
+        # ── 3. Partner IDs (padres + cuentas hijas) ───────────────────────────
+        parents = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'res.partner', 'search_read',
+            [[['ref', 'in', claves]]],
+            {'fields': ['id', 'name']})
+        all_pids   = [p['id'] for p in parents]
+        pid_name   = {p['id']: p['name'] for p in parents}
+        if all_pids:
+            children = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+                'res.partner', 'search_read',
+                [[['parent_id', 'in', all_pids]]],
+                {'fields': ['id', 'name', 'parent_id']})
+            for c in children:
+                cid    = c['id']
+                parent = c.get('parent_id')
+                pid    = parent[0] if isinstance(parent, (list, tuple)) else parent
+                if cid not in all_pids:
+                    all_pids.append(cid)
+                # El nombre de la cuenta hija usa el nombre del padre para consolidar
+                pid_name[cid] = pid_name.get(pid, c.get('name', 'Sin cliente'))
 
-        rows = cursor.fetchall()
-        cursor.close()
-        if conexion.is_connected():
-            conexion.close()
+        if not all_pids:
+            _empty = {'total': 0, 'cantidad_facturas': 0, 'participacion_total_pct': 0,
+                      'global_total': 0, 'por_mes': [],
+                      'top_clientes': [], 'todos_clientes': [],
+                      'top_productos': [], 'todos_productos': [], 'por_estado': []}
+            return jsonify(_empty), 200
 
-        # ── Agregación en Python ──────────────────────────────────────────────
+        # ── 4a. Total global del período (todas las ventas, sin filtro de grupo) ─
+        domain_global = [
+            ['move_type', '=', 'out_invoice'],
+            ['state', '=', 'posted'],
+            PAYMENT_FILTER,
+            ['invoice_date', '>=', fecha_inicio],
+            ['invoice_date', '<=', fecha_fin],
+            ['company_id', '=', ODOO_COMPANY_ID],
+        ]
+        global_agg = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'account.move', 'read_group',
+            [domain_global, ['amount_total'], []],
+            {'lazy': False})
+        global_total = float((global_agg[0].get('amount_total') or 0) if global_agg else 0)
+
+        # ── 4b. Facturas del grupo ────────────────────────────────────────────
+        domain_move = [
+            ['move_type', '=', 'out_invoice'],
+            ['state', '=', 'posted'],
+            PAYMENT_FILTER,
+            ['invoice_date', '>=', fecha_inicio],
+            ['invoice_date', '<=', fecha_fin],
+            ['company_id', '=', ODOO_COMPANY_ID],
+            ['partner_id', 'in', all_pids],
+        ]
+        moves = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'account.move', 'search_read',
+            [domain_move],
+            {'fields': ['id', 'name', 'partner_id', 'invoice_date', 'amount_total']})
+
+        if not moves:
+            _empty = {'total': 0, 'cantidad_facturas': 0, 'participacion_total_pct': 0,
+                      'global_total': round(global_total, 2), 'por_mes': [],
+                      'top_clientes': [], 'todos_clientes': [],
+                      'top_productos': [], 'todos_productos': [], 'por_estado': []}
+            return jsonify(_empty), 200
+
+        # ── 5. Líneas de producto para el top de artículos ────────────────────
+        move_ids = [m['id'] for m in moves]
+        lines = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'account.move.line', 'search_read',
+            [[['move_id', 'in', move_ids],
+              ['display_type', '=', 'product'],
+              ['quantity', '>', 0]]],
+            {'fields': ['move_id', 'name', 'quantity', 'price_subtotal'], 'limit': 0})
+
+        prod_dict: dict = {}
+        for l in lines:
+            nombre_raw = (l.get('name') or '').split('\n')[0].strip()
+            if not nombre_raw or 'FLETE' in nombre_raw.upper() or 'LEYENDA' in nombre_raw.upper():
+                continue
+            monto = float(l.get('price_subtotal') or 0)
+            cant  = float(l.get('quantity') or 0)
+            if monto <= 0:
+                continue
+            if nombre_raw not in prod_dict:
+                prod_dict[nombre_raw] = {'total': 0.0, 'cantidad': 0.0}
+            prod_dict[nombre_raw]['total']    += monto
+            prod_dict[nombre_raw]['cantidad'] += cant
+
+        # ── 6. Agregación por mes y cliente ───────────────────────────────────
         total_global  = 0.0
         facturas_set  = set()
-        por_mes_dict  = {}   # (anio, mes) → {total, facturas: set}
-        clientes_dict = {}   # nombre_display → {total, facturas: set}
-        productos_dict = {}  # nombre_producto → {total, cantidad}
+        por_mes_dict  = {}
+        clientes_dict = {}
 
-        for row in rows:
-            venta     = float(row['venta_total']   or 0)
-            factura   = row['numero_factura']
-            anio_r    = int(row['anio']  or 0)
-            mes_r     = int(row['mes']   or 0)
-            display   = (row['nombre_display'] or 'Sin cliente').strip()
-            prod_name = (row['nombre_producto'] or '').strip().split('\n')[0].strip()
-            cantidad  = int(row['cantidad'] or 0)
-
-            if not anio_r or not mes_r:
-                continue
-            if venta <= 0:
+        for m in moves:
+            monto   = float(m.get('amount_total') or 0)
+            factura = m.get('name', '')
+            d_str   = str(m.get('invoice_date') or '')[:10]
+            if len(d_str) < 10 or monto <= 0:
                 continue
 
-            total_global += venta
+            anio_r = int(d_str[:4])
+            mes_r  = int(d_str[5:7])
+            pid_m  = m['partner_id'][0] if isinstance(m['partner_id'], (list, tuple)) else None
+            pname  = pid_name.get(pid_m, (m['partner_id'][1] if isinstance(m['partner_id'], (list, tuple)) else 'Sin cliente'))
+
+            total_global += monto
             facturas_set.add(factura)
 
             ym = (anio_r, mes_r)
             if ym not in por_mes_dict:
                 por_mes_dict[ym] = {'total': 0.0, 'facturas': set()}
-            por_mes_dict[ym]['total'] += venta
+            por_mes_dict[ym]['total']    += monto
             por_mes_dict[ym]['facturas'].add(factura)
 
-            if display not in clientes_dict:
-                clientes_dict[display] = {'total': 0.0, 'facturas': set()}
-            clientes_dict[display]['total'] += venta
-            clientes_dict[display]['facturas'].add(factura)
+            if pname not in clientes_dict:
+                clientes_dict[pname] = {'total': 0.0, 'facturas': set()}
+            clientes_dict[pname]['total']    += monto
+            clientes_dict[pname]['facturas'].add(factura)
 
-            if prod_name and 'FLETE' not in prod_name.upper():
-                if prod_name not in productos_dict:
-                    productos_dict[prod_name] = {'total': 0.0, 'cantidad': 0}
-                productos_dict[prod_name]['total']    += venta
-                productos_dict[prod_name]['cantidad'] += cantidad
-
+        # ── 7. Construir respuesta ────────────────────────────────────────────
         por_mes = sorted([
             {
                 'anio':              ym[0],
@@ -617,39 +943,45 @@ def resumen_integral():
             for ym, v in por_mes_dict.items()
         ], key=lambda x: (x['anio'], x['mes']))
 
+        denom = max(global_total, 1)
+
         clientes_sorted = sorted(clientes_dict.items(), key=lambda x: x[1]['total'], reverse=True)
         todos_clientes = [
             {
-                'rank':     i + 1,
-                'nombre':   nombre,
-                'facturas': len(v['facturas']),
-                'total':    round(v['total'], 2),
+                'rank':              i + 1,
+                'nombre':            nombre,
+                'facturas':          len(v['facturas']),
+                'total':             round(v['total'], 2),
+                'participacion_pct': round(v['total'] / denom * 100, 1),
             }
             for i, (nombre, v) in enumerate(clientes_sorted)
         ]
         top_clientes = todos_clientes[:10]
 
-        productos_sorted = sorted(productos_dict.items(), key=lambda x: x[1]['total'], reverse=True)
+        prod_sorted = sorted(prod_dict.items(), key=lambda x: x[1]['total'], reverse=True)
         todos_productos = [
             {
-                'rank':     i + 1,
-                'nombre':   nombre,
-                'cantidad': v['cantidad'],
-                'total':    round(v['total'], 2),
+                'rank':              i + 1,
+                'nombre':            nombre,
+                'cantidad':          int(round(v['cantidad'])),
+                'total':             round(v['total'], 2),
+                'participacion_pct': round(v['total'] / denom * 100, 1),
             }
-            for i, (nombre, v) in enumerate(productos_sorted)
+            for i, (nombre, v) in enumerate(prod_sorted)
         ]
         top_productos = todos_productos[:10]
 
         return jsonify({
-            'total':             round(total_global, 2),
-            'cantidad_facturas': len(facturas_set),
-            'por_mes':           por_mes,
-            'top_clientes':      top_clientes,
-            'todos_clientes':    todos_clientes,
-            'top_productos':     top_productos,
-            'todos_productos':   todos_productos,
-            'por_estado':        [],   # monitor no almacena estado geográfico
+            'total':                    round(total_global, 2),
+            'cantidad_facturas':        len(facturas_set),
+            'participacion_total_pct':  round(total_global / denom * 100, 1),
+            'global_total':             round(global_total, 2),
+            'por_mes':                  por_mes,
+            'top_clientes':             top_clientes,
+            'todos_clientes':           todos_clientes,
+            'top_productos':            top_productos,
+            'todos_productos':          todos_productos,
+            'por_estado':               [],
         }), 200
 
     except Exception as e:

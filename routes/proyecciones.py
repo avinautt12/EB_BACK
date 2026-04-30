@@ -7,9 +7,17 @@ import json
 from werkzeug.utils import secure_filename
 import os
 from datetime import datetime
-import pandas as pd
-import traceback 
-import numpy as np
+try:
+    import pandas as pd
+    PANDAS_OK = True
+except Exception:
+    pd = None  # type: ignore
+    PANDAS_OK = False
+import traceback
+try:
+    import numpy as np
+except Exception:
+    np = None  # type: ignore
 
 SECRET_KEY = "123456"
 

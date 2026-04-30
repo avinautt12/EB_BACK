@@ -3,7 +3,14 @@ import logging
 import time
 import unicodedata
 
-import pandas as pd
+try:
+    import pandas as pd
+    PANDAS_OK = True
+except Exception as e:
+    logging.warning(f"Pandas import error: {e}")
+    pd = None  # type: ignore
+    PANDAS_OK = False
+
 import requests
 from openpyxl.styles import Alignment, Font, PatternFill
 
@@ -12,7 +19,9 @@ def _norm(s: str) -> str:
     return unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode("ascii").upper().strip()
 
 
-def _find_col(df: pd.DataFrame, target: str) -> str | None:
+def _find_col(df, target: str):
+    if not PANDAS_OK or pd is None:
+        return None
     target_n = _norm(target)
     for col in df.columns:
         if _norm(col) == target_n:
@@ -35,7 +44,9 @@ MESES_ORDER = [
 ]
 
 
-def _fetch_df() -> pd.DataFrame:
+def _fetch_df():
+    if not PANDAS_OK or pd is None:
+        return None
     global _cache
     now = time.time()
     if _cache["df"] is not None and (now - _cache["ts"]) < CACHE_TTL:
@@ -54,7 +65,9 @@ def _fetch_df() -> pd.DataFrame:
     return df
 
 
-def _to_num(series: pd.Series) -> pd.Series:
+def _to_num(series):
+    if not PANDAS_OK or pd is None:
+        return None
     return pd.to_numeric(series, errors="coerce")
 
 
@@ -63,6 +76,15 @@ def invalidar_cache() -> None:
 
 
 def get_dashboard_data() -> dict:
+    if not PANDAS_OK or pd is None:
+        logging.warning("Pandas no disponible - retornando datos vacíos de garantías")
+        return {
+            "total": 0, "cerradas": 0, "pct_cierre": 0.0, "lat_promedio": 0.0,
+            "por_estatus": {}, "lat_mensual": {}, "lat_cliente": {},
+            "gar_cliente": {}, "desc_dano": {}, "ubic_dano": {},
+            "por_mes": {}
+        }
+
     df = _fetch_df().copy()
 
     def col(name: str) -> pd.Series:
@@ -150,7 +172,13 @@ def get_dashboard_data() -> dict:
 
 
 def exportar_excel() -> bytes:
+    if not PANDAS_OK or pd is None:
+        logging.warning("Pandas no disponible - no se puede exportar Excel")
+        return b""
+
     df = _fetch_df().copy()
+    if df is None:
+        return b""
     cols_excluir = [c for c in df.columns if "FOTOGRAFIA" in c.upper() or "EVIDENCIA" in c.upper()]
     df.drop(columns=cols_excluir, inplace=True, errors="ignore")
 

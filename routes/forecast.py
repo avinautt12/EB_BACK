@@ -2742,3 +2742,161 @@ def limpiar_sku_whitelist():
     finally:
         cur.close()
         conn.close()
+
+
+@forecast_bp.route('/forecast/resumen-articulos', methods=['GET'])
+def resumen_articulos():
+    """
+    GET /forecast/resumen-articulos
+
+    Vista consolidada de los 92 artículos MY27:
+    - Totales por mes sumando TODOS los distribuidores
+    - Desglose de cuánto aportó cada distribuidor por mes
+    - Total anual por artículo
+    - Disponibilidad por mes
+    - KPIs globales
+
+    Query params:
+      periodo (str) — ej. "2026-2027". Sin valor = todos los periodos.
+    """
+    periodo = request.args.get('periodo', '').strip()
+
+    MESES = ['mayo', 'junio', 'julio', 'agosto', 'septiembre',
+             'octubre', 'noviembre', 'diciembre', 'enero', 'febrero', 'marzo', 'abril']
+    MESES_LABELS = ['May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic', 'Ene', 'Feb', 'Mar', 'Abr']
+
+    conn = obtener_conexion()
+    cur  = conn.cursor(dictionary=True)
+
+    try:
+        where  = "WHERE periodo = %s" if periodo else ""
+        params = (periodo,) if periodo else ()
+
+        # ── 1. Totales por SKU (suma de todos los distribuidores) ─────────────
+        cur.execute(f"""
+            SELECT
+                sku,
+                MAX(producto)   AS producto,
+                MAX(marca)      AS marca,
+                MAX(modelo)     AS modelo,
+                MAX(color)      AS color,
+                MAX(talla)      AS talla,
+                SUM(mayo)       AS mayo,
+                SUM(junio)      AS junio,
+                SUM(julio)      AS julio,
+                SUM(agosto)     AS agosto,
+                SUM(septiembre) AS septiembre,
+                SUM(octubre)    AS octubre,
+                SUM(noviembre)  AS noviembre,
+                SUM(diciembre)  AS diciembre,
+                SUM(enero)      AS enero,
+                SUM(febrero)    AS febrero,
+                SUM(marzo)      AS marzo,
+                SUM(abril)      AS abril,
+                SUM(mayo+junio+julio+agosto+septiembre+
+                    octubre+noviembre+diciembre+
+                    enero+febrero+marzo+abril) AS total_anual,
+                COUNT(DISTINCT clave_cliente)  AS num_distribuidores
+            FROM forecast_proyecciones
+            {where}
+            GROUP BY sku
+        """, params)
+        totales_map = {r['sku']: r for r in cur.fetchall()}
+
+        # ── 2. Desglose por SKU + distribuidor ────────────────────────────────
+        cur.execute(f"""
+            SELECT
+                sku, clave_cliente,
+                mayo, junio, julio, agosto, septiembre,
+                octubre, noviembre, diciembre,
+                enero, febrero, marzo, abril,
+                (mayo+junio+julio+agosto+septiembre+
+                 octubre+noviembre+diciembre+
+                 enero+febrero+marzo+abril) AS total_dist
+            FROM forecast_proyecciones
+            {where}
+            ORDER BY sku, clave_cliente
+        """, params)
+        filas_dist = cur.fetchall()
+
+        # Agrupa desglose por SKU
+        desglose_map: dict = {}
+        for fd in filas_dist:
+            s = fd['sku']
+            if s not in desglose_map:
+                desglose_map[s] = []
+            desglose_map[s].append({
+                'clave_cliente': fd['clave_cliente'],
+                'total':         int(fd['total_dist'] or 0),
+                'meses': {
+                    mes: int(fd[mes] or 0) for mes in MESES
+                }
+            })
+
+        # ── 3. Construir respuesta con los 92 artículos del catálogo ─────────
+        articulos = []
+        for sku in FORECAST_SKU_WHITELIST:
+            cat_info  = SKU_CATALOG.get(sku, {})
+            avail_map = cat_info.get('avail', {})
+            precios   = cat_info.get('prices', {})
+            t         = totales_map.get(sku)
+
+            meses_data = {}
+            for mes in MESES:
+                meses_data[mes] = {
+                    'cantidad':   int(t[mes] or 0) if t else 0,
+                    'disponible': avail_map.get(mes, True),
+                }
+
+            total_anual = int(t['total_anual'] or 0) if t else 0
+
+            articulos.append({
+                'sku':               sku,
+                'producto':          (t['producto'] or '') if t else '',
+                'marca':             (t['marca']    or '') if t else '',
+                'modelo':            (t['modelo']   or '') if t else '',
+                'color':             (t['color']    or '') if t else '',
+                'talla':             (t['talla']    or '') if t else '',
+                'precio_dist':       float(precios.get('Distribuidor', 0)),
+                'num_distribuidores': int(t['num_distribuidores'] or 0) if t else 0,
+                'total_anual':       total_anual,
+                'meses':             meses_data,
+                'desglose':          desglose_map.get(sku, []),
+            })
+
+        # ── 4. Totales de columna (suma de los 92 artículos por mes) ─────────
+        totales_mes = {
+            mes: sum(a['meses'][mes]['cantidad'] for a in articulos)
+            for mes in MESES
+        }
+        total_general = sum(totales_mes.values())
+
+        # ── 5. KPIs globales ──────────────────────────────────────────────────
+        distribuidores_activos = set()
+        for a in articulos:
+            for d in a['desglose']:
+                if d['total'] > 0:
+                    distribuidores_activos.add(d['clave_cliente'])
+
+        return jsonify({
+            'articulos':              articulos,
+            'totales_mes':            totales_mes,
+            'total_general':          total_general,
+            'meses':                  MESES,
+            'meses_labels':           MESES_LABELS,
+            'periodo':                periodo or '2026-2027',
+            'kpis': {
+                'total_articulos':        len(articulos),
+                'articulos_con_pedido':   sum(1 for a in articulos if a['total_anual'] > 0),
+                'articulos_sin_pedido':   sum(1 for a in articulos if a['total_anual'] == 0),
+                'total_unidades':         total_general,
+                'distribuidores_activos': len(distribuidores_activos),
+            },
+        }), 200
+
+    except Exception as e:
+        logging.exception('[forecast] resumen-articulos error: %s', e)
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()

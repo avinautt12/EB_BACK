@@ -1,5 +1,10 @@
 from flask import Blueprint, request, jsonify
-import pandas as pd
+try:
+    import pandas as pd
+    PANDAS_OK = True
+except Exception:
+    pd = None  # type: ignore
+    PANDAS_OK = False
 from db_conexion import obtener_conexion
 from werkzeug.utils import secure_filename
 import os
