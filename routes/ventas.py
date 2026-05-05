@@ -373,11 +373,13 @@ def anios_disponibles():
 @ventas_bp.route('/resumen', methods=['GET'])
 def resumen():
     """
-    Resumen de ventas COBRADAS para un rango de fechas.
+    Resumen de ventas para un rango de fechas.
     Devuelve: total, por_mes, top_clientes, top_productos, por_estado.
+    Param: vista = 'cobranza' (default) | 'facturas'
     """
     fecha_inicio = request.args.get('fecha_inicio')
     fecha_fin    = request.args.get('fecha_fin')
+    vista        = request.args.get('vista', 'cobranza')
 
     if not fecha_inicio or not fecha_fin:
         return jsonify({'error': 'Se requieren fecha_inicio y fecha_fin'}), 400
@@ -387,10 +389,12 @@ def resumen():
         if not uid:
             return jsonify({'error': 'No se pudo conectar a Odoo', 'detail': err}), 500
 
+        filtros_pago = [PAYMENT_FILTER] if vista == 'cobranza' else []
+
         domain_move = [
             ['move_type', '=', 'out_invoice'],
             ['state', '=', 'posted'],
-            PAYMENT_FILTER,
+            *filtros_pago,
             ['invoice_date', '>=', fecha_inicio],
             ['invoice_date', '<=', fecha_fin],
             ['company_id', '=', ODOO_COMPANY_ID],
@@ -399,7 +403,7 @@ def resumen():
         domain_line = [
             ['move_id.move_type', '=', 'out_invoice'],
             ['move_id.state', '=', 'posted'],
-            ['move_id.payment_state', 'in', ['paid', 'partial']],
+            *([['move_id.payment_state', 'in', ['paid', 'partial']]] if vista == 'cobranza' else []),
             ['move_id.invoice_date', '>=', fecha_inicio],
             ['move_id.invoice_date', '<=', fecha_fin],
             ['move_id.company_id', '=', ODOO_COMPANY_ID],
@@ -581,6 +585,7 @@ def productos_por_estado():
     fecha_inicio = request.args.get('fecha_inicio')
     fecha_fin    = request.args.get('fecha_fin')
     estado_req   = request.args.get('estado', '').strip()
+    vista        = request.args.get('vista', 'cobranza')
 
     if not fecha_inicio or not fecha_fin or not estado_req:
         return jsonify({'error': 'Se requieren fecha_inicio, fecha_fin y estado'}), 400
@@ -590,10 +595,12 @@ def productos_por_estado():
         if not uid:
             return jsonify({'error': 'No se pudo conectar a Odoo', 'detail': err}), 500
 
+        filtros_pago = [PAYMENT_FILTER] if vista == 'cobranza' else []
+
         domain_move = [
             ['move_type', '=', 'out_invoice'],
             ['state', '=', 'posted'],
-            PAYMENT_FILTER,
+            *filtros_pago,
             ['invoice_date', '>=', fecha_inicio],
             ['invoice_date', '<=', fecha_fin],
             ['company_id', '=', ODOO_COMPANY_ID],
@@ -795,6 +802,7 @@ def resumen_integral():
     fecha_inicio = request.args.get('fecha_inicio')
     fecha_fin    = request.args.get('fecha_fin')
     grupo_id     = request.args.get('grupo_id', type=int)
+    vista        = request.args.get('vista', 'cobranza')
 
     if not fecha_inicio or not fecha_fin:
         return jsonify({'error': 'Se requieren fecha_inicio y fecha_fin'}), 400
@@ -802,6 +810,8 @@ def resumen_integral():
         return jsonify({'error': 'Se requiere grupo_id'}), 400
 
     try:
+        filtros_pago = [PAYMENT_FILTER] if vista == 'cobranza' else []
+
         # ── 1. Claves del grupo ───────────────────────────────────────────────
         claves = _claves_para_grupo(grupo_id)
         if not claves:
@@ -844,7 +854,7 @@ def resumen_integral():
         domain_global = [
             ['move_type', '=', 'out_invoice'],
             ['state', '=', 'posted'],
-            PAYMENT_FILTER,
+            *filtros_pago,
             ['invoice_date', '>=', fecha_inicio],
             ['invoice_date', '<=', fecha_fin],
             ['company_id', '=', ODOO_COMPANY_ID],
@@ -859,7 +869,7 @@ def resumen_integral():
         domain_move = [
             ['move_type', '=', 'out_invoice'],
             ['state', '=', 'posted'],
-            PAYMENT_FILTER,
+            *filtros_pago,
             ['invoice_date', '>=', fecha_inicio],
             ['invoice_date', '<=', fecha_fin],
             ['company_id', '=', ODOO_COMPANY_ID],

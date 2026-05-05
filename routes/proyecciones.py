@@ -7,6 +7,7 @@ import json
 from werkzeug.utils import secure_filename
 import os
 from datetime import datetime
+from utils.tiempo import ahora_mx, ahora_str
 try:
     import pandas as pd
     PANDAS_OK = True
@@ -167,7 +168,7 @@ def agregar_proyecciones_cliente():
         nivel_cliente = cliente_info['nivel'] if cliente_info else None
 
         # Obtener folio único para esta transacción
-        folio = f"FOL-{datetime.now().strftime('%Y%m%d%H%M%S')}-{id_cliente}"
+        folio = f"FOL-{ahora_str('%Y%m%d%H%M%S')}-{id_cliente}"
         total_proyeccion = 0
 
         for proyeccion in data:
@@ -221,10 +222,16 @@ def agregar_proyecciones_cliente():
             subtotal = cantidad_total * precio_aplicado
             total_proyeccion += subtotal
 
+            # Eliminar registro previo del mismo cliente+producto para hacer upsert
+            cursor.execute("""
+                DELETE FROM proyecciones_cliente
+                WHERE id_cliente = %s AND id_proyeccion = %s
+            """, (id_cliente, id_proyeccion))
+
             cursor.execute("""
                 INSERT INTO proyecciones_cliente (
                     id_cliente, id_proyeccion, precio_aplicado, folio,
-                    q1_sep_2025, q2_sep_2025, q1_oct_2025, q2_oct_2025, 
+                    q1_sep_2025, q2_sep_2025, q1_oct_2025, q2_oct_2025,
                     q1_nov_2025, q2_nov_2025, q1_dic_2025, q2_dic_2025,
                     q1_mar_2026, q2_mar_2026, q1_abr_2026, q2_abr_2026,
                     q1_may_2026, q2_may_2026
@@ -905,7 +912,7 @@ def importar_proyecciones():
         UPLOAD_FOLDER = 'temp_uploads'
         os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-        filename = secure_filename(f"proyecciones_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+        filename = secure_filename(f"proyecciones_{ahora_str('%Y%m%d_%H%M%S')}.xlsx")
         filepath = os.path.join(UPLOAD_FOLDER, filename)
         file.save(filepath)
 

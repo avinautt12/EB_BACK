@@ -3,6 +3,7 @@ import io
 import logging
 import time
 import unicodedata
+from utils.tiempo import ahora_str
 
 try:
     import pandas as pd
@@ -168,7 +169,7 @@ def get_dashboard_data() -> dict:
         "garantias_por_cliente": gar_cliente,
         "descripcion_dano":      desc_dano,
         "ubicacion_dano":        ubic_dano,
-        "ultima_actualizacion":  pd.Timestamp.now().strftime("%d/%m/%Y %H:%M"),
+        "ultima_actualizacion":  ahora_str("%d/%m/%Y %H:%M"),
     }
 
 

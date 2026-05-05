@@ -7,6 +7,7 @@ sumando todas las proyecciones de todos los distribuidores.
 import io
 import logging
 from datetime import datetime
+from utils.tiempo import ahora_mx, ahora_str
 
 from flask import Blueprint, jsonify, request, send_file
 
@@ -160,7 +161,7 @@ def _get_datos_consolidados(periodo: str = '') -> dict:
             'meses':        MESES,
             'meses_labels': MESES_LABEL,
             'periodo':      periodo or '2026-2027',
-            'generado_en':  datetime.now().strftime('%d/%m/%Y %H:%M'),
+            'generado_en':  ahora_str('%d/%m/%Y %H:%M'),
         }
 
     finally:
@@ -205,7 +206,7 @@ def exportar_excel():
         data    = _get_datos_consolidados(periodo)
         excel   = _generar_excel(data)
 
-        nombre  = f"ProyeccionesMY27_{periodo}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+        nombre  = f"ProyeccionesMY27_{periodo}_{ahora_str('%Y%m%d')}.xlsx"
         buf     = io.BytesIO(excel)
         buf.seek(0)
 

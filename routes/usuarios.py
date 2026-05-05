@@ -1,7 +1,9 @@
 from flask import Blueprint, jsonify, request
 from models.user_model import obtener_usuarios
 import re
+import logging
 from utils.seguridad import hash_password, verificar_password, generar_token
+from utils.odoo_utils import get_odoo_models, ODOO_DB, ODOO_PASSWORD, ODOO_COMPANY_ID
 from db_conexion import obtener_conexion
 
 def campo_vacio(valor):
@@ -22,7 +24,7 @@ def usuarios_para_monitor():
         # 1. Partimos de clientes (c) y hacemos LEFT JOIN a usuarios (u)
         # 2. UNION con usuarios que no tienen cliente vinculado (admins/internos)
         cursor.execute("""
-            SELECT 
+            SELECT
                 c.id AS id_cliente,
                 u.id AS id_usuario,
                 COALESCE(u.nombre, c.nombre_cliente) AS nombre,
@@ -31,10 +33,12 @@ def usuarios_para_monitor():
                 u.activo,
                 c.clave,
                 c.id_grupo AS id_grupo,
-                g.nombre_grupo
+                g.nombre_grupo,
+                CASE WHEN fp.clave_cliente IS NOT NULL THEN 1 ELSE 0 END AS tiene_proyeccion
             FROM clientes c
             LEFT JOIN usuarios u ON u.cliente_id = c.id
             LEFT JOIN grupo_clientes g ON c.id_grupo = g.id
+            LEFT JOIN (SELECT DISTINCT clave_cliente FROM forecast_proyecciones) fp ON fp.clave_cliente = c.clave
 
             UNION
 
@@ -47,7 +51,8 @@ def usuarios_para_monitor():
                 u.activo,
                 NULL AS clave,
                 NULL AS id_grupo,
-                NULL AS nombre_grupo
+                NULL AS nombre_grupo,
+                0 AS tiene_proyeccion
             FROM usuarios u
             WHERE u.cliente_id IS NULL
 
@@ -67,18 +72,16 @@ def usuarios_para_monitor():
                 rol = "Sin Usuario" # Identificador visual útil para tu monitor
 
             resultado.append({
-                # Mandamos el id_usuario original por compatibilidad, 
-                # pero agregamos id_cliente por si tu front lo necesita.
-                "id": f["id_usuario"], 
+                "id": f["id_usuario"],
                 "id_cliente": f["id_cliente"],
                 "nombre": f["nombre"],
-                "usuario": f["usuario"], # Será nulo si no tiene
+                "usuario": f["usuario"],
                 "rol": rol,
-                # Si activo es NULL (porque no hay usuario), lo pasamos como False
                 "activo": bool(f["activo"]) if f["activo"] is not None else False,
                 "clave": f["clave"],
                 "id_grupo": f["id_grupo"],
-                "nombre_grupo": f["nombre_grupo"]
+                "nombre_grupo": f["nombre_grupo"],
+                "tiene_proyeccion": bool(f["tiene_proyeccion"]),
             })
             
         return jsonify(resultado), 200
@@ -91,6 +94,92 @@ def usuarios_para_monitor():
             cursor.close()
         if conexion and conexion.is_connected():
             conexion.close()
+
+@usuarios_bp.route('/sync-odoo', methods=['POST'])
+def sync_clientes_desde_odoo():
+    """
+    Sincroniza partners de Odoo hacia la tabla local `clientes`.
+    Solo agrega registros nuevos (por clave/ref); no modifica los existentes.
+    Retorna { agregados, ya_existian, total_odoo }.
+    """
+    try:
+        uid, models, err = get_odoo_models()
+        if not uid:
+            return jsonify({'error': 'No se pudo conectar a Odoo', 'detail': err}), 500
+
+        # Partners de Odoo con customer_rank > 0 (son clientes reales)
+        partners = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'res.partner', 'search_read',
+            [[['customer_rank', '>', 0]]],
+            {'fields': ['id', 'ref', 'name'], 'limit': 0})
+
+        if not partners:
+            return jsonify({'agregados': 0, 'ya_existian': 0, 'total_odoo': 0}), 200
+
+        conexion = obtener_conexion()
+        cursor = conexion.cursor(dictionary=True)
+
+        # Claves ya existentes en local
+        cursor.execute("SELECT clave FROM clientes")
+        claves_locales = {r['clave'].strip().upper() for r in cursor.fetchall()}
+
+        agregados = 0
+        ya_existian = 0
+        actualizados = 0
+
+        for p in partners:
+            ref    = (p.get('ref') or '').strip().upper()
+            nombre = (p.get('name') or '').strip().upper()
+            clave_odoo = f"ODOO{p['id']}"
+
+            if ref:
+                # Partner ya tiene clave real
+                if ref in claves_locales:
+                    ya_existian += 1
+                elif clave_odoo in claves_locales:
+                    # Tenía clave temporal → actualizar a la real
+                    cursor.execute(
+                        "UPDATE clientes SET clave = %s, nombre_cliente = %s WHERE clave = %s",
+                        (ref, nombre, clave_odoo)
+                    )
+                    claves_locales.discard(clave_odoo)
+                    claves_locales.add(ref)
+                    actualizados += 1
+                else:
+                    cursor.execute(
+                        "INSERT IGNORE INTO clientes (clave, nombre_cliente) VALUES (%s, %s)",
+                        (ref, nombre)
+                    )
+                    claves_locales.add(ref)
+                    agregados += 1
+            else:
+                # Sin ref → clave temporal ODOO{id}
+                if clave_odoo in claves_locales or ref in claves_locales:
+                    ya_existian += 1
+                    continue
+                cursor.execute(
+                    "INSERT IGNORE INTO clientes (clave, nombre_cliente) VALUES (%s, %s)",
+                    (clave_odoo, nombre)
+                )
+                claves_locales.add(clave_odoo)
+                agregados += 1
+
+        conexion.commit()
+        cursor.close()
+        conexion.close()
+
+        logging.info('sync-odoo: %d agregados, %d actualizados, %d ya existían', agregados, actualizados, ya_existian)
+        return jsonify({
+            'agregados':    agregados,
+            'actualizados': actualizados,
+            'ya_existian':  ya_existian,
+            'total_odoo':   len(partners),
+        }), 200
+
+    except Exception as e:
+        logging.exception('sync_clientes_desde_odoo error')
+        return jsonify({'error': str(e)}), 500
+
 
 @usuarios_bp.route('', methods=['GET'])
 def listar_usuarios():
