@@ -50,14 +50,39 @@ def _get_costos_odoo() -> dict:
             return _COSTOS_CACHE['data']
 
         skus = list(FORECAST_SKU_WHITELIST)
-        productos = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+
+        # Búsqueda en product.product (variantes)
+        productos_pp = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
             'product.product', 'search_read',
             [[['default_code', 'in', skus]]],
             {'fields': ['default_code', 'standard_price'], 'limit': 0})
 
-        costos = {p['default_code']: float(p['standard_price'] or 0) for p in productos if p.get('default_code')}
+        # Normalizar: strip + mapear código → costo
+        costos: dict = {}
+        for p in productos_pp:
+            code = (p.get('default_code') or '').strip()
+            price = float(p.get('standard_price') or 0)
+            if code and price > 0:
+                costos[code] = price
+
+        # Para los SKUs sin costo, intentar product.template como fallback
+        skus_sin_costo = [s for s in skus if s not in costos]
+        if skus_sin_costo:
+            productos_pt = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+                'product.template', 'search_read',
+                [[['default_code', 'in', skus_sin_costo]]],
+                {'fields': ['default_code', 'standard_price'], 'limit': 0})
+            for p in productos_pt:
+                code = (p.get('default_code') or '').strip()
+                price = float(p.get('standard_price') or 0)
+                if code and price > 0 and code not in costos:
+                    costos[code] = price
+
         _COSTOS_CACHE = {'data': costos, 'ts': now}
-        logging.info('[costos_odoo] cargados %d costos desde Odoo', len(costos))
+        logging.info('[costos_odoo] %d/%d SKUs con costo (pp=%d, pt=%d)',
+                     len(costos), len(skus),
+                     sum(1 for p in productos_pp if float(p.get('standard_price') or 0) > 0),
+                     len([s for s in skus_sin_costo if s in costos]))
         return costos
 
     except Exception as e:
