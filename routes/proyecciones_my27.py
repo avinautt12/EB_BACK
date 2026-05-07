@@ -6,6 +6,7 @@ sumando todas las proyecciones de todos los distribuidores.
 
 import io
 import logging
+import time
 from datetime import datetime
 from utils.tiempo import ahora_mx, ahora_str
 
@@ -13,6 +14,7 @@ from flask import Blueprint, jsonify, request, send_file
 
 from db_conexion import obtener_conexion
 from routes.forecast import SKU_CATALOG, FORECAST_SKU_WHITELIST
+from utils.odoo_utils import get_odoo_models, ODOO_DB, ODOO_PASSWORD
 
 try:
     import openpyxl
@@ -29,6 +31,38 @@ proyecciones_my27_bp = Blueprint('proyecciones_my27', __name__, url_prefix='/pro
 MESES       = ['mayo', 'junio', 'julio', 'agosto', 'septiembre',
                'octubre', 'noviembre', 'diciembre', 'enero', 'febrero', 'marzo', 'abril']
 MESES_LABEL = ['May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic', 'Ene', 'Feb', 'Mar', 'Abr']
+
+_COSTOS_CACHE: dict = {'data': {}, 'ts': 0.0}
+_COSTOS_TTL = 300  # 5 minutos
+
+
+def _get_costos_odoo() -> dict:
+    """Devuelve {sku: standard_price} para todos los SKUs MY27. Cacheado 5 min."""
+    global _COSTOS_CACHE
+    now = time.time()
+    if _COSTOS_CACHE['data'] and (now - _COSTOS_CACHE['ts']) < _COSTOS_TTL:
+        return _COSTOS_CACHE['data']
+
+    try:
+        uid, models, err = get_odoo_models()
+        if not uid:
+            logging.warning('[costos_odoo] no se pudo conectar: %s', err)
+            return _COSTOS_CACHE['data']
+
+        skus = list(FORECAST_SKU_WHITELIST)
+        productos = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'product.product', 'search_read',
+            [[['default_code', 'in', skus]]],
+            {'fields': ['default_code', 'standard_price'], 'limit': 0})
+
+        costos = {p['default_code']: float(p['standard_price'] or 0) for p in productos if p.get('default_code')}
+        _COSTOS_CACHE = {'data': costos, 'ts': now}
+        logging.info('[costos_odoo] cargados %d costos desde Odoo', len(costos))
+        return costos
+
+    except Exception as e:
+        logging.warning('[costos_odoo] error: %s', e)
+        return _COSTOS_CACHE['data']
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -107,6 +141,9 @@ def _get_datos_consolidados(periodo: str = '') -> dict:
                 'meses':          {mes: int(fd[mes] or 0) for mes in MESES},
             })
 
+        # Costos desde Odoo (cacheados)
+        costos_map = _get_costos_odoo()
+
         # Construir los 92 artículos
         articulos = []
         for sku in FORECAST_SKU_WHITELIST:
@@ -114,6 +151,8 @@ def _get_datos_consolidados(periodo: str = '') -> dict:
             avail_map = cat_info.get('avail', {})
             precios   = cat_info.get('prices', {})
             t         = totales_map.get(sku)
+
+            costo_unitario = costos_map.get(sku, 0.0)
 
             meses_data = {
                 mes: {
@@ -123,6 +162,9 @@ def _get_datos_consolidados(periodo: str = '') -> dict:
                 for mes in MESES
             }
 
+            total_anual = int(t['total_anual'] or 0) if t else 0
+            costos_mes  = {mes: round(meses_data[mes]['cantidad'] * costo_unitario, 2) for mes in MESES}
+
             articulos.append({
                 'sku':               sku,
                 'producto':          (t['producto'] or '') if t else '',
@@ -131,14 +173,21 @@ def _get_datos_consolidados(periodo: str = '') -> dict:
                 'color':             (t['color']    or '') if t else '',
                 'talla':             (t['talla']    or '') if t else '',
                 'precio_dist':       float(precios.get('Distribuidor', 0)),
+                'costo_unitario':    round(costo_unitario, 2),
+                'costo_total':       round(total_anual * costo_unitario, 2),
+                'costos_mes':        costos_mes,
                 'num_distribuidores': int(t['num_distribuidores'] or 0) if t else 0,
-                'total_anual':       int(t['total_anual'] or 0) if t else 0,
+                'total_anual':       total_anual,
                 'meses':             meses_data,
                 'desglose':          desglose_map.get(sku, []),
             })
 
         totales_mes   = {mes: sum(a['meses'][mes]['cantidad'] for a in articulos) for mes in MESES}
         total_general = sum(totales_mes.values())
+        total_costo_mes   = {mes: round(sum(a['costos_mes'][mes] for a in articulos), 2) for mes in MESES}
+        total_costo_general = round(sum(a['costo_total'] for a in articulos), 2)
+        skus_con_costo      = sum(1 for a in articulos if a['costo_unitario'] > 0)
+        inversion_promedio  = round(total_costo_general / total_general, 2) if total_general > 0 else 0.0
 
         distribuidores_activos = {
             d['clave_cliente']
@@ -148,15 +197,20 @@ def _get_datos_consolidados(periodo: str = '') -> dict:
         }
 
         return {
-            'articulos':    articulos,
-            'totales_mes':  totales_mes,
-            'total_general': total_general,
+            'articulos':          articulos,
+            'totales_mes':        totales_mes,
+            'total_general':      total_general,
+            'total_costo_mes':    total_costo_mes,
+            'total_costo_general': total_costo_general,
             'kpis': {
                 'total_articulos':        len(articulos),
                 'articulos_con_pedido':   sum(1 for a in articulos if a['total_anual'] > 0),
                 'articulos_sin_pedido':   sum(1 for a in articulos if a['total_anual'] == 0),
                 'total_unidades':         total_general,
                 'distribuidores_activos': len(distribuidores_activos),
+                'skus_con_costo':         skus_con_costo,
+                'inversion_total':        total_costo_general,
+                'inversion_promedio':     inversion_promedio,
             },
             'meses':        MESES,
             'meses_labels': MESES_LABEL,
@@ -177,10 +231,12 @@ def _get_datos_consolidados(periodo: str = '') -> dict:
 def listar():
     """
     Retorna los 92 artículos MY27 con cantidades consolidadas por mes.
-    Query param: ?periodo=2026-2027
+    Query param: ?periodo=2026-2027  &refresh=1 para forzar recarga de costos
     """
     try:
         periodo = request.args.get('periodo', '2026-2027').strip()
+        if request.args.get('refresh'):
+            _COSTOS_CACHE['ts'] = 0.0  # invalidar caché de costos
         data    = _get_datos_consolidados(periodo)
         return jsonify(data), 200
     except Exception as e:
@@ -259,8 +315,12 @@ def _generar_excel(data: dict) -> bytes:
     thin_bdr  = Border(left=thin_side, right=thin_side,
                        top=thin_side,  bottom=thin_side)
 
+    # Columnas: SKU(1) Prod(2) Marca(3) Modelo(4) Color(5) Talla(6)
+    #           May-Abr (7-18)  Total(19)  CostoUnit(20)  CostoTotal(21)
+    NUM_COLS = 21
+
     # ── Título principal ─────────────────────────────────────────────────────
-    ws.merge_cells('A1:S1')
+    ws.merge_cells(f'A1:{get_column_letter(NUM_COLS)}1')
     titulo = ws['A1']
     titulo.value = f"PROYECCIONES MY27  |  Periodo: {data['periodo']}  |  Generado: {data['generado_en']}"
     cell_style(titulo, bold=True, bg=AZUL_OSCURO, fg=BLANCO, size=13, center=True)
@@ -288,15 +348,16 @@ def _generar_excel(data: dict) -> bytes:
 
     # ── Encabezados tabla (fila 4) ───────────────────────────────────────────
     encabezados = ['SKU', 'Producto', 'Marca', 'Modelo', 'Color', 'Talla'] + \
-                  MESES_LABEL + ['TOTAL AÑO']
+                  MESES_LABEL + ['TOTAL AÑO', 'COSTO UNIT.', 'COSTO TOTAL']
 
     for ci, enc in enumerate(encabezados, start=1):
         c = ws.cell(row=4, column=ci, value=enc)
-        cell_style(c, bold=True, bg=AZUL_OSCURO, fg=BLANCO, size=10, center=True)
+        bg_enc = AZUL_OSCURO if enc not in ('COSTO UNIT.', 'COSTO TOTAL') else 'FF6B4C11'
+        cell_style(c, bold=True, bg=bg_enc, fg=BLANCO, size=10, center=True)
         c.border = thin_bdr
     ws.row_dimensions[4].height = 24
 
-    # Fila de totales generales (fila 3, encima de datos)
+    # ── Fila de totales generales (fila 3) ───────────────────────────────────
     ws.cell(row=3, column=1, value='TOTALES').font = Font(bold=True, color=AZUL_OSCURO, size=10)
     for ci, mes in enumerate(MESES, start=7):
         c = ws.cell(row=3, column=ci, value=data['totales_mes'].get(mes, 0))
@@ -305,6 +366,12 @@ def _generar_excel(data: dict) -> bytes:
     c_tot = ws.cell(row=3, column=19, value=data['total_general'])
     cell_style(c_tot, bold=True, bg=NARANJA, fg=BLANCO, size=10, center=True)
     c_tot.border = thin_bdr
+    # Totales de costo en fila 3
+    ws.cell(row=3, column=20, value='')  # costo unitario no aplica en totales
+    c_ctot = ws.cell(row=3, column=21, value=data.get('total_costo_general', 0))
+    cell_style(c_ctot, bold=True, bg='FF6B4C11', fg=BLANCO, size=10, center=True)
+    c_ctot.number_format = '"$"#,##0.00'
+    c_ctot.border = thin_bdr
     ws.row_dimensions[3].height = 20
 
     # ── Datos: los 92 artículos ──────────────────────────────────────────────
@@ -344,10 +411,28 @@ def _generar_excel(data: dict) -> bytes:
             cell_style(c_tot, bg=bg_fila, center=True, size=9)
         c_tot.border = thin_bdr
 
+        # Costo unitario
+        costo_u = art.get('costo_unitario', 0)
+        c_cu = ws.cell(row=ri, column=20, value=costo_u if costo_u > 0 else '')
+        cell_style(c_cu, bg=bg_fila, center=True, size=9)
+        if costo_u > 0:
+            c_cu.number_format = '"$"#,##0.00'
+        c_cu.border = thin_bdr
+
+        # Costo total
+        costo_t = art.get('costo_total', 0)
+        c_ct = ws.cell(row=ri, column=21, value=costo_t if costo_t > 0 else '')
+        if costo_t > 0:
+            cell_style(c_ct, bold=True, bg='FFFEF3E2', center=True, size=9)
+            c_ct.number_format = '"$"#,##0.00'
+        else:
+            cell_style(c_ct, bg=bg_fila, center=True, size=9)
+        c_ct.border = thin_bdr
+
         ws.row_dimensions[ri].height = 16
 
     # Anchos de columna
-    anchos = [18, 35, 12, 20, 15, 8] + [6] * 12 + [10]
+    anchos = [18, 35, 12, 20, 15, 8] + [6] * 12 + [10, 14, 15]
     for ci, ancho in enumerate(anchos, start=1):
         ws.column_dimensions[get_column_letter(ci)].width = ancho
 
