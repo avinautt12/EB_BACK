@@ -662,13 +662,6 @@ def dashboard():
         flete_total = round(sum(fletes), 2)
         flete_prom  = round(flete_total / len(fletes), 2) if fletes else 0
 
-        # Solo vía MARITIMO -- antes mezclaba embarques AEREO que tuvieran
-        # log_dias_transito_maritimo calculado por coincidencia, inflando/
-        # desinflando el promedio "Tránsito Marítimo".
-        transitos    = [r["log_dias_transito_maritimo"] for r in rows
-                        if r.get("via_transporte", "MARITIMO") == "MARITIMO" and r.get("log_dias_transito_maritimo")]
-        transito_prom = round(sum(transitos) / len(transitos), 1) if transitos else 0
-
         avances = []
         _prog_cache: dict = {}
         for r in rows:
@@ -760,7 +753,15 @@ def dashboard():
 
         def _fmt_d(v): return str(v)[:10] if v else None
 
-        # Tránsito aéreo: booking → llegada almacén (solo AEREO con ambas fechas)
+        # Tránsito (Resumen): Booking → Llegada a Almacén -- MISMO tramo para
+        # ambas vías, filtrando solo por via_transporte, así el número de
+        # Marítimo y Aéreo se puede comparar directamente entre sí.
+        _trans_maritimo = [d for r in rows
+                        if r.get("via_transporte", "MARITIMO") == "MARITIMO"
+                        for d in [_lat_dias(r, "log_fecha_booking", "des_llegada_almacen")]
+                        if d is not None and d >= 0]
+        transito_prom = round(sum(_trans_maritimo) / len(_trans_maritimo), 1) if _trans_maritimo else None
+
         _trans_aereo = [d for r in rows
                         if r.get("via_transporte") == "AEREO"
                         for d in [_lat_dias(r, "log_fecha_booking", "des_llegada_almacen")]
@@ -1093,6 +1094,7 @@ def dashboard():
                 "flete_total_usd":                 flete_total,
                 "flete_promedio_usd":              flete_prom,
                 "transito_maritimo_promedio_dias": transito_prom,
+                "transito_maritimo_n":             len(_trans_maritimo),
                 "transito_aereo_promedio_dias":   transito_aereo_prom,
                 "transito_aereo_n":               len(_trans_aereo),
                 "pct_avance_promedio":             pct_prom,
