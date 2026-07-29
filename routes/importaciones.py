@@ -753,18 +753,19 @@ def dashboard():
 
         def _fmt_d(v): return str(v)[:10] if v else None
 
-        # Tránsito (Resumen): Booking → Llegada a Almacén -- MISMO tramo para
-        # ambas vías, filtrando solo por via_transporte, así el número de
-        # Marítimo y Aéreo se puede comparar directamente entre sí.
+        # Tránsito (Resumen): proceso completo, Entrega del proveedor →
+        # Liberación Final -- MISMO tramo para ambas vías (igual que
+        # "lat_total" por embarque), filtrando solo por via_transporte, así
+        # el número de Marítimo y Aéreo se puede comparar directamente.
         _trans_maritimo = [d for r in rows
                         if r.get("via_transporte", "MARITIMO") == "MARITIMO"
-                        for d in [_lat_dias(r, "log_fecha_booking", "des_llegada_almacen")]
+                        for d in [_lat_dias(r, "log_fecha_entrega", "rec_liberacion_final")]
                         if d is not None and d >= 0]
         transito_prom = round(sum(_trans_maritimo) / len(_trans_maritimo), 1) if _trans_maritimo else None
 
         _trans_aereo = [d for r in rows
                         if r.get("via_transporte") == "AEREO"
-                        for d in [_lat_dias(r, "log_fecha_booking", "des_llegada_almacen")]
+                        for d in [_lat_dias(r, "log_fecha_entrega", "rec_liberacion_final")]
                         if d is not None and d >= 0]
         transito_aereo_prom = round(sum(_trans_aereo) / len(_trans_aereo), 1) if _trans_aereo else None
 
