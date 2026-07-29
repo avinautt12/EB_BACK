@@ -1,4 +1,6 @@
 import json as _json
+import logging
+import re
 from flask import Blueprint, jsonify, request
 from datetime import datetime, date, timedelta
 from decimal import Decimal
@@ -141,9 +143,10 @@ CAMPOS_COSTOS = [
 # para el progreso, por eso no están en las listas CAMPOS_*. Deben permitirse
 # explícitamente en INSERT/UPDATE o se filtran silenciosamente al guardar.
 _CAMPOS_PROG = [
-    "log_fecha_entrega_prog", "log_fecha_booking_prog",
+    "log_fecha_entrega_prog", "log_fecha_booking_prog", "log_eta_puerto_prog",
     "imp_llegada_contenedor_prog", "des_fecha_cruce_prog",
     "des_fecha_entrega_almacen_prog", "rec_recepcion_odoo_prog",
+    "alm_envio_info_uva_prog",
     "rec_liberacion_verificacion_prog", "rec_liberacion_final_prog",
 ]
 
@@ -281,6 +284,7 @@ def inicializar_tablas():
                 log_confirmacion_booking        DATE,
                 log_fecha_booking_prog          DATE,
                 log_fecha_booking               DATE,
+                log_eta_puerto_prog             DATE,
                 log_eta_puerto                  DATE,
                 log_buque                       VARCHAR(255),
                 log_no_viaje                    VARCHAR(100),
@@ -368,6 +372,7 @@ def inicializar_tablas():
                 alm_fecha_limite_etiquetado     DATE,
                 alm_liberacion_etiquetado       DATE,
                 alm_liberacion_etiquetado_uva   DATE,
+                alm_envio_info_uva_prog         DATE,
                 alm_envio_info_uva              DATE,
                 alm_liberacion_uva              DATE,
                 alm_proyectado_dias_etiquetado  INT,
@@ -512,12 +517,37 @@ def inicializar_tablas():
             "ALTER TABLE importaciones ADD COLUMN IF NOT EXISTS rec_recepcion_odoo_prog DATE AFTER rec_cedula_costeo",
             "ALTER TABLE importaciones ADD COLUMN IF NOT EXISTS rec_liberacion_verificacion_prog DATE AFTER rec_folio_compra",
             "ALTER TABLE importaciones ADD COLUMN IF NOT EXISTS rec_liberacion_final_prog DATE AFTER rec_liberacion_verificacion",
+            "ALTER TABLE importaciones ADD COLUMN IF NOT EXISTS log_eta_puerto_prog DATE AFTER log_fecha_booking",
+            "ALTER TABLE importaciones ADD COLUMN IF NOT EXISTS alm_envio_info_uva_prog DATE AFTER alm_liberacion_etiquetado_uva",
         ]
+        # "ADD COLUMN IF NOT EXISTS" no es fiable en esta instalación (falla con
+        # error de sintaxis 1064 en vez de ser un no-op) — se verifica primero
+        # contra information_schema y solo se ejecuta ADD COLUMN plano para las
+        # columnas que realmente faltan. Los errores reales ya NO se silencian.
+        cursor.execute(
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_NAME = 'importaciones' AND TABLE_SCHEMA = DATABASE()"
+        )
+        columnas_existentes = {row[0] for row in cursor.fetchall()}
         for sql in migraciones:
+            if "MODIFY COLUMN" in sql:
+                try:
+                    cursor.execute(sql)
+                except Exception as e:
+                    logging.warning("Migración (MODIFY) falló: %s | %s", sql, e)
+                continue
+            m = re.search(r"ADD COLUMN(?: IF NOT EXISTS)?\s+(\w+)", sql)
+            if not m:
+                continue
+            columna = m.group(1)
+            if columna in columnas_existentes:
+                continue
+            sql_plano = sql.replace("IF NOT EXISTS ", "")
             try:
-                cursor.execute(sql)
-            except Exception:
-                pass
+                cursor.execute(sql_plano)
+                columnas_existentes.add(columna)
+            except Exception as e:
+                logging.warning("Migración falló: %s | %s", sql_plano, e)
         conn.commit()
 
         return jsonify({"ok": True, "mensaje": "Tabla importaciones creada/verificada"}), 201
@@ -936,16 +966,20 @@ def dashboard():
                 "costo_por_bicicleta":         round(costo_total_pesos / tc / float(nbici), 2) if nbici and costo_total_pesos and tc else None,
                 "notas":                       r.get("notas") or "",
                 "progreso":                    prog,
+                # Cada etapa muestra el MISMO campo que usa _estado_actual() para
+                # avanzar el badge -- así el pipeline y el badge siempre coinciden.
                 "pipeline": {
-                    "entrega":    {"proy": _fmt_d(r.get("log_fecha_entrega_prog")),          "real": _fmt_d(r.get("log_fecha_entrega")),              "delta": _days_between(r.get("log_fecha_entrega_prog"), r.get("log_fecha_entrega"))},
-                    "booking":    {"proy": _fmt_d(r.get("log_fecha_booking_prog")),          "real": _fmt_d(r.get("log_fecha_booking")),              "delta": _days_between(r.get("log_fecha_booking_prog"), r.get("log_fecha_booking"))},
-                    "transito":   {"proy": _fmt_d(r.get("imp_llegada_contenedor_prog")),     "real": _fmt_d(r.get("imp_llegada_contenedor_puerto")),  "delta": _days_between(r.get("imp_llegada_contenedor_prog"), r.get("imp_llegada_contenedor_puerto"))},
-                    "aduana":     {"proy": _fmt_d(r.get("des_fecha_cruce_prog")),            "real": _fmt_d(r.get("des_fecha_cruce_real")),           "delta": _days_between(r.get("des_fecha_cruce_prog"), r.get("des_fecha_cruce_real"))},
-                    "trans_dest": {"proy": _fmt_d(r.get("des_fecha_entrega_almacen_prog")),  "real": _fmt_d(r.get("des_llegada_almacen")),            "delta": _days_between(r.get("des_fecha_entrega_almacen_prog"), r.get("des_llegada_almacen"))},
-                    "en_almacen": {"proy": _fmt_d(r.get("rec_recepcion_odoo_prog")),         "real": _fmt_d(r.get("rec_recepcion_odoo")),             "delta": _days_between(r.get("rec_recepcion_odoo_prog"), r.get("rec_recepcion_odoo"))},
-                    "verif":      {"proy": _fmt_d(r.get("rec_liberacion_verificacion_prog")), "real": _fmt_d(r.get("rec_liberacion_verificacion")),   "delta": _days_between(r.get("rec_liberacion_verificacion_prog"), r.get("rec_liberacion_verificacion"))},
-                    "etiquetado": {"proy": _fmt_d(_alm_pf),                                 "real": _fmt_d(r.get("alm_terminacion_etiquetado")),     "delta": _days_between(_alm_pf, r.get("alm_terminacion_etiquetado"))},
-                    "liberado":   {"proy": _fmt_d(r.get("rec_liberacion_final_prog")),       "real": _fmt_d(r.get("rec_liberacion_final")),           "delta": _days_between(r.get("rec_liberacion_final_prog"), r.get("rec_liberacion_final"))},
+                    "entrega":         {"proy": _fmt_d(r.get("log_fecha_entrega_prog")),           "real": _fmt_d(r.get("log_fecha_entrega")),           "delta": _days_between(r.get("log_fecha_entrega_prog"), r.get("log_fecha_entrega"))},
+                    "booking":         {"proy": _fmt_d(r.get("log_fecha_booking_prog")),           "real": _fmt_d(r.get("log_fecha_booking")),           "delta": _days_between(r.get("log_fecha_booking_prog"), r.get("log_fecha_booking"))},
+                    "transito":        {"proy": _fmt_d(r.get("imp_llegada_contenedor_prog")),      "real": _fmt_d(r.get("imp_llegada_contenedor_puerto")),"delta": _days_between(r.get("imp_llegada_contenedor_prog"), r.get("imp_llegada_contenedor_puerto"))},
+                    "aduana":          {"proy": _fmt_d(r.get("log_eta_puerto_prog")),              "real": _fmt_d(r.get("log_eta_puerto")),              "delta": _days_between(r.get("log_eta_puerto_prog"), r.get("log_eta_puerto"))},
+                    "trans_dest":      {"proy": _fmt_d(r.get("des_fecha_cruce_prog")),             "real": _fmt_d(r.get("des_fecha_cruce_real")),        "delta": _days_between(r.get("des_fecha_cruce_prog"), r.get("des_fecha_cruce_real"))},
+                    "en_almacen":      {"proy": _fmt_d(r.get("des_fecha_entrega_almacen_prog")),   "real": _fmt_d(r.get("des_llegada_almacen")),         "delta": _days_between(r.get("des_fecha_entrega_almacen_prog"), r.get("des_llegada_almacen"))},
+                    "recepcion_odoo":  {"proy": _fmt_d(r.get("rec_recepcion_odoo_prog")),          "real": _fmt_d(r.get("rec_recepcion_odoo")),          "delta": _days_between(r.get("rec_recepcion_odoo_prog"), r.get("rec_recepcion_odoo"))},
+                    "verif":           {"proy": _fmt_d(r.get("alm_envio_info_uva_prog")),          "real": _fmt_d(r.get("alm_envio_info_uva")),          "delta": _days_between(r.get("alm_envio_info_uva_prog"), r.get("alm_envio_info_uva"))},
+                    "liberacion_verif":{"proy": _fmt_d(r.get("rec_liberacion_verificacion_prog")), "real": _fmt_d(r.get("rec_liberacion_verificacion")), "delta": _days_between(r.get("rec_liberacion_verificacion_prog"), r.get("rec_liberacion_verificacion"))},
+                    "etiquetado":      {"proy": _fmt_d(_alm_pf),                                   "real": _fmt_d(r.get("alm_terminacion_etiquetado")),  "delta": _days_between(_alm_pf, r.get("alm_terminacion_etiquetado"))},
+                    "liberado":        {"proy": _fmt_d(r.get("rec_liberacion_final_prog")),        "real": _fmt_d(r.get("rec_liberacion_final")),        "delta": _days_between(r.get("rec_liberacion_final_prog"), r.get("rec_liberacion_final"))},
                 },
                 "lat_total": _days_between(r.get("log_fecha_entrega"), r.get("rec_liberacion_final")),
                 "estado_actual": _estado_actual(r),
