@@ -662,7 +662,11 @@ def dashboard():
         flete_total = round(sum(fletes), 2)
         flete_prom  = round(flete_total / len(fletes), 2) if fletes else 0
 
-        transitos    = [r["log_dias_transito_maritimo"] for r in rows if r.get("log_dias_transito_maritimo")]
+        # Solo vía MARITIMO -- antes mezclaba embarques AEREO que tuvieran
+        # log_dias_transito_maritimo calculado por coincidencia, inflando/
+        # desinflando el promedio "Tránsito Marítimo".
+        transitos    = [r["log_dias_transito_maritimo"] for r in rows
+                        if r.get("via_transporte", "MARITIMO") == "MARITIMO" and r.get("log_dias_transito_maritimo")]
         transito_prom = round(sum(transitos) / len(transitos), 1) if transitos else 0
 
         avances = []
