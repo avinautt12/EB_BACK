@@ -210,3 +210,29 @@ def buscar_marca():
     finally:
         cursor.close()
         conexion.close()
+
+@solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/formulario', methods=['GET'])
+def buscar_formulario():
+    conexion = obtener_conexion()
+    if not conexion:
+        return jsonify({"error": "No se pudo conectar a la base de datos."}), 500
+           
+    cursor = conexion.cursor(dictionary=True, buffered=True) 
+    
+    try:
+        cursor.callproc('sp_solicitud_retroactivo_buscar_formulario')
+        datos = []
+        for resultado in cursor.stored_results():
+            datos = resultado.fetchall()
+            
+        while cursor.nextset():
+            pass
+            
+        return jsonify(datos), 200
+        
+    except Exception as e:
+        return jsonify({"error": "Error al consultar las marcas.", "detalle": str(e)}), 500
+        
+    finally:
+        cursor.close()
+        conexion.close()
