@@ -18,9 +18,19 @@ def _run_precalentar():
     try:
         from routes.caratulas import iniciar_precalentamiento
         n = iniciar_precalentamiento()
-        logger.info('[SCHEDULER] Precalentamiento Redis iniciado para %d clientes', n)
+        logger.info('[SCHEDULER] Precalentamiento Redis (monitor) iniciado para %d clientes', n)
     except Exception as e:
-        logger.error('[SCHEDULER] Error al precalentar Redis: %s', e)
+        logger.error('[SCHEDULER] Error al precalentar Redis (monitor): %s', e)
+
+
+def _run_precalentar_forecast():
+    """Precalienta el caché Redis de /forecast y /forecast/avance para todos los clientes."""
+    try:
+        from routes.forecast import iniciar_precalentamiento_forecast
+        n = iniciar_precalentamiento_forecast()
+        logger.info('[SCHEDULER] Precalentamiento Redis (forecast) iniciado para %d pares', n)
+    except Exception as e:
+        logger.error('[SCHEDULER] Error al precalentar Redis (forecast): %s', e)
 
 
 def _run_sync_diario():
@@ -104,6 +114,25 @@ def init_scheduler():
         IntervalTrigger(minutes=25),
         id='precalentar_periodico',
         name='Pre-calentar Redis Monitor Pedidos (cada 25 min)',
+        replace_existing=True,
+    )
+
+    # Pre-calentamiento Forecast: disparo inicial a los 30 s (después del monitor)
+    _scheduler.add_job(
+        _run_precalentar_forecast,
+        'date',
+        run_date=datetime.now(MEXICO_TZ) + timedelta(seconds=30),
+        id='precalentar_forecast_startup',
+        name='Pre-calentar Redis Forecast al arranque (30 s delay)',
+        replace_existing=True,
+    )
+
+    # Pre-calentamiento Forecast: recurrente cada 20 min (TTL Redis = 25 min)
+    _scheduler.add_job(
+        _run_precalentar_forecast,
+        IntervalTrigger(minutes=20),
+        id='precalentar_forecast_periodico',
+        name='Pre-calentar Redis Forecast (cada 20 min)',
         replace_existing=True,
     )
 

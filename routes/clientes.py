@@ -3,10 +3,8 @@ from db_conexion import obtener_conexion
 import jwt
 from datetime import date, datetime
 
-from utils.jwt_utils import verificar_token
+from utils.jwt_utils import verificar_token, SECRET_KEY
 from functools import wraps
-
-SECRET_KEY = "123456"
 
 clientes_bp = Blueprint('clientes', __name__, url_prefix='')
 

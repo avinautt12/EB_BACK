@@ -32,14 +32,99 @@ except ImportError:
 
 forecast_bp = Blueprint('forecast', __name__, url_prefix='')
 
-# ── Caché en memoria para el cruce Odoo (TTL = 3 minutos) ────────────────────
-# Evita repetir las llamadas XML-RPC lentas cuando el usuario recarga la vista
-# o cambia de pestaña dentro del mismo periodo.
+# ── Redis (L2) + memoria (L1) para evitar llamadas repetidas a Odoo ──────────
+import os as _os
 import time as _time
+import json as _json
+
+_REDIS_URL      = _os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
+_FORECAST_R_TTL = 1500   # 25 min en Redis
+_AVANCE_R_TTL   = 1500
+_FORECAST_TTL   = 1500   # 25 min en memoria L1 (pre-warming renueva c/20 min)
+_AVANCE_TTL     = 1500
+
+try:
+    import redis as _redis_lib
+    _redis = _redis_lib.from_url(_REDIS_URL, decode_responses=True, socket_connect_timeout=2)
+    _redis.ping()
+    logging.info('[forecast] Redis activo: %s', _REDIS_URL)
+except Exception as _re:
+    _redis = None
+    logging.warning('[forecast] Redis no disponible: %s', _re)
+
 _avance_cache: dict   = {}   # key: (clave, periodo) → (timestamp, result_list)
 _forecast_cache: dict = {}   # key: (clave, periodo) → (timestamp, result_list)
-_AVANCE_TTL   = 180          # segundos
-_FORECAST_TTL = 180          # segundos
+
+
+def _rkey_forecast(clave: str, periodo: str) -> str:
+    return f'forecast:{clave}:{periodo}'
+
+def _rkey_avance(clave: str, periodo: str) -> str:
+    return f'forecast_avance:{clave}:{periodo}'
+
+
+def _redis_get(key: str):
+    """Devuelve el objeto deserializado o None."""
+    if not _redis:
+        return None
+    try:
+        raw = _redis.get(key)
+        return _json.loads(raw) if raw else None
+    except Exception:
+        return None
+
+
+def _redis_set(key: str, data, ttl: int) -> None:
+    if not _redis:
+        return
+    try:
+        _redis.setex(key, ttl, _json.dumps(data))
+    except Exception:
+        pass
+
+
+def iniciar_precalentamiento_forecast(host: str = 'http://localhost:5000') -> int:
+    """
+    Lanza threads daemon que llaman /forecast y /forecast/avance para todos
+    los clientes+periodos que tienen datos guardados en forecast_proyecciones.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    import requests as _req
+
+    try:
+        conn = obtener_conexion()
+        cur = conn.cursor(dictionary=True)
+        # Solo periodos activos (últimos 2 años)
+        cur.execute("""
+            SELECT DISTINCT clave_cliente, periodo
+            FROM forecast_proyecciones
+            WHERE clave_cliente IS NOT NULL AND clave_cliente != ''
+              AND periodo IS NOT NULL
+            ORDER BY periodo DESC
+        """)
+        pairs = [(r['clave_cliente'], r['periodo']) for r in cur.fetchall()]
+        cur.close()
+        conn.close()
+    except Exception as _e:
+        logging.warning('[forecast] precalentamiento: no se pudo leer pares: %s', _e)
+        return 0
+
+    def _warm(clave: str, periodo: str) -> None:
+        try:
+            _req.get(f'{host}/forecast',       params={'clave': clave, 'periodo': periodo}, timeout=120)
+            _req.get(f'{host}/forecast/avance', params={'clave': clave, 'periodo': periodo}, timeout=120)
+        except Exception as _e:
+            logging.debug('[forecast] warm error %s/%s: %s', clave, periodo, _e)
+
+    def _run():
+        logging.info('[forecast] Precalentamiento iniciado para %d pares clave+periodo', len(pairs))
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for clave, periodo in pairs:
+                pool.submit(_warm, clave, periodo)
+        logging.info('[forecast] Precalentamiento forecast terminado')
+
+    threading.Thread(target=_run, daemon=True).start()
+    return len(pairs)
 
 # Orden de meses en el periodo comercial Mayo–Abril
 MESES = ['mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre',
@@ -3178,6 +3263,9 @@ def importar_forecast():
         conn.close()
 
     _forecast_cache.pop((clave, periodo), None)
+    if _redis:
+        try: _redis.delete(_rkey_forecast(clave, periodo))
+        except Exception: pass
 
     result = {'guardados': saved, 'clave_cliente': clave, 'periodo': periodo}
     if errors:
@@ -3200,11 +3288,17 @@ def listar_forecast():
 
     _update_whitelist_skus()
 
-    # ── Caché rápida ──────────────────────────────────────────────────────────
+    # ── L1 (memoria) ──────────────────────────────────────────────────────────
     _fc_key = (clave, periodo)
     _fc_hit  = _forecast_cache.get(_fc_key)
     if _fc_hit and (_time.time() - _fc_hit[0]) < _FORECAST_TTL:
         return jsonify(_fc_hit[1]), 200
+
+    # ── L2 (Redis) ────────────────────────────────────────────────────────────
+    _r_hit = _redis_get(_rkey_forecast(clave, periodo))
+    if _r_hit is not None:
+        _forecast_cache[_fc_key] = (_time.time(), _r_hit)
+        return jsonify(_r_hit), 200
 
     # MySQL nivel → TIER_NAMES key
     NIVEL_TO_TIER = {
@@ -3390,6 +3484,7 @@ def listar_forecast():
                     r['actualizado_en'] = r['actualizado_en'].isoformat()
 
         _forecast_cache[_fc_key] = (_time.time(), rows)
+        _redis_set(_rkey_forecast(clave, periodo), rows, _FORECAST_R_TTL)
         return jsonify(rows), 200
     except Exception as e:
         logging.exception('[forecast] listar_forecast error: %s', e)
@@ -3686,14 +3781,17 @@ def avance_forecast():
             if n:
                 norm_to_sku[n] = fr['sku']
 
-        # 3. Query Odoo sale.order.line — with in-memory cache (TTL = 3 min).
-        #    This avoids repeating the slow XML-RPC round-trips on every tab switch.
+        # 3. Query Odoo sale.order.line — L1 (mem) → L2 (Redis) → Odoo
         orders_by_sku: dict = {}
         _cache_key = (clave, periodo)
         _cached = _avance_cache.get(_cache_key)
         if _cached and (_time.time() - _cached[0]) < _AVANCE_TTL:
             orders_by_sku = _cached[1]
-            logging.debug('avance_forecast: caché HIT para %s/%s', clave, periodo)
+            logging.debug('avance_forecast: caché L1 HIT para %s/%s', clave, periodo)
+        elif (_r_avance := _redis_get(_rkey_avance(clave, periodo))) is not None:
+            orders_by_sku = _r_avance
+            _avance_cache[_cache_key] = (_time.time(), orders_by_sku)
+            logging.debug('avance_forecast: caché L2 (Redis) HIT para %s/%s', clave, periodo)
         else:
           try:
             from utils.odoo_utils import get_odoo_models, ODOO_DB, ODOO_PASSWORD
@@ -3756,8 +3854,9 @@ def avance_forecast():
                             )
             else:
                 logging.warning('avance_forecast: no se pudo conectar a Odoo – %s', err_oo)
-            # Guardar en caché (aunque esté vacío, para no repetir en fallo)
+            # Guardar en L1 + L2 (aunque esté vacío, para no repetir en fallo)
             _avance_cache[_cache_key] = (_time.time(), orders_by_sku)
+            _redis_set(_rkey_avance(clave, periodo), orders_by_sku, _AVANCE_R_TTL)
           except Exception as _ex_oo:
             logging.exception('avance_forecast: error al consultar Odoo: %s', _ex_oo)
 
@@ -3793,6 +3892,13 @@ def avance_forecast():
     finally:
         cur.close()
         conn.close()
+
+
+@forecast_bp.route('/precalentar-forecast', methods=['POST'])
+def precalentar_forecast_route():
+    """Dispara el precalentamiento Redis de /forecast y /forecast/avance para todos los clientes."""
+    total = iniciar_precalentamiento_forecast()
+    return jsonify({'status': 'iniciado', 'pares': total}), 202
 
 
 @forecast_bp.route('/forecast/periodos/integral', methods=['GET'])
