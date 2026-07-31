@@ -60,7 +60,7 @@ def get_dashboard_data(desde: str | None = None, hasta: str | None = None) -> di
 
         # Latencia de cierre: días desde creación hasta que el ticket fue Cerrado o Rechazado
         cursor.execute(f"""
-            SELECT ROUND(AVG(DATEDIFF(fecha_actualizacion, fecha_creacion)), 1) AS lat_cierre
+            SELECT ROUND(AVG(DATEDIFF(COALESCE(fecha_estatus, DATE(fecha_actualizacion)), DATE(fecha_creacion))), 1) AS lat_cierre
             FROM garantia_formularios
             WHERE estatus IN ('Cerrado', 'Rechazado') {rango_and}
         """, rango_params)
@@ -96,13 +96,23 @@ def get_dashboard_data(desde: str | None = None, hasta: str | None = None) -> di
         """, rango_params)
         gar_cliente = {r['cli']: r['cnt'] for r in cursor.fetchall()}
 
-        # ── Latencia promedio por distribuidor (top 30) ──────────────────────
+        # ── Latencia de atención promedio por distribuidor (top 30) ──────────
+        # Mismo criterio que /garantias/latencias y el Kardex: días desde creación
+        # hasta el primer comentario de validación de documentos por ticket,
+        # promediado solo entre los tickets que sí tienen validación registrada.
         cursor.execute(f"""
-            SELECT distribuidor AS cli,
-                   ROUND(AVG(DATEDIFF(NOW(), fecha_creacion)), 1) AS lat
-            FROM garantia_formularios
-            WHERE distribuidor IS NOT NULL AND distribuidor != '' {rango_and}
-            GROUP BY distribuidor ORDER BY lat DESC LIMIT 30
+            SELECT cli, ROUND(AVG(dias), 1) AS lat FROM (
+                SELECT f.id, f.distribuidor AS cli,
+                       MIN(CASE WHEN c.tipo = 'validacion' AND DATEDIFF(c.fecha, f.fecha_creacion) >= 0
+                                THEN DATEDIFF(c.fecha, f.fecha_creacion)
+                                ELSE NULL END) AS dias
+                FROM garantia_formularios f
+                LEFT JOIN garantia_comentarios c ON c.formulario_id = f.id
+                WHERE f.distribuidor IS NOT NULL AND f.distribuidor != '' {rango_and}
+                GROUP BY f.id, f.distribuidor
+            ) t
+            WHERE dias IS NOT NULL
+            GROUP BY cli ORDER BY lat DESC LIMIT 30
         """, rango_params)
         lat_cliente = {r['cli']: r['lat'] for r in cursor.fetchall()}
 
