@@ -332,7 +332,14 @@ def actualizar_dato_usuario(form_id):
 
 @garantias_bp.route("/mis-tickets", methods=["GET"])
 def mis_tickets():
-    """Devuelve los tickets del usuario autenticado (filtra por su correo registrado)."""
+    """Devuelve los tickets del usuario autenticado.
+
+    Filtra por el cliente asociado a la cuenta (usuarios.cliente_id -> clientes.nombre_cliente
+    == garantia_formularios.distribuidor), no solo por el correo con el que se llenó cada
+    formulario -- un mismo cliente puede tener varias cuentas/usuarios (ej. la real y una de
+    pruebas) y todas deben ver el mismo conjunto de garantías del cliente. Se conserva el
+    match por correo como respaldo adicional (OR), no como sustituto.
+    """
     auth_header = request.headers.get('Authorization', '')
     raw_token = auth_header.split(' ')[1] if ' ' in auth_header else None
     if not raw_token:
@@ -349,19 +356,34 @@ def mis_tickets():
         return jsonify({"error": "Sin conexion a BD"}), 500
     try:
         cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT correo FROM usuarios WHERE id = %s", (user_id,))
+        cursor.execute("SELECT correo, cliente_id FROM usuarios WHERE id = %s", (user_id,))
         user = cursor.fetchone()
         if not user:
             return jsonify({"error": "Usuario no encontrado"}), 404
         email = user['correo']
 
-        cursor.execute("""
-            SELECT id, folio, email, distribuidor, contacto, puesto, marca,
-                   estatus, estatus_pieza, fecha_creacion
-            FROM garantia_formularios
-            WHERE email = %s
-            ORDER BY fecha_creacion DESC
-        """, (email,))
+        nombre_cliente = None
+        if user.get('cliente_id'):
+            cursor.execute("SELECT nombre_cliente FROM clientes WHERE id = %s", (user['cliente_id'],))
+            cli = cursor.fetchone()
+            nombre_cliente = cli['nombre_cliente'] if cli else None
+
+        if nombre_cliente:
+            cursor.execute("""
+                SELECT id, folio, email, distribuidor, contacto, puesto, marca,
+                       estatus, estatus_pieza, fecha_creacion
+                FROM garantia_formularios
+                WHERE distribuidor = %s OR email = %s
+                ORDER BY fecha_creacion DESC
+            """, (nombre_cliente, email))
+        else:
+            cursor.execute("""
+                SELECT id, folio, email, distribuidor, contacto, puesto, marca,
+                       estatus, estatus_pieza, fecha_creacion
+                FROM garantia_formularios
+                WHERE email = %s
+                ORDER BY fecha_creacion DESC
+            """, (email,))
         rows = cursor.fetchall()
         for r in rows:
             if r.get('fecha_creacion'):
