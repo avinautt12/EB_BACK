@@ -1190,14 +1190,43 @@ def detalle_compras_odoo():
         if not partners:
             return jsonify({'data': [], 'rows': [], 'meta': {'total': 0}}), 200
 
-        # Expandimos child_ids: los contactos hijo de un partner son sub-cuentas
-        # del mismo cliente (portales B2B, direcciones de entrega, personas de
-        # contacto) y sus órdenes pertenecen al mismo distribuidor.
+        # Expandimos child_ids excluyendo hijos que tienen su propio ref registrado
+        # como cliente independiente en nuestra DB (evita doble conteo entre sucursales).
+        _clientes_registrados: set = set()
+        try:
+            _conn_reg = obtener_conexion()
+            _cur_reg = _conn_reg.cursor()
+            _cur_reg.execute(
+                "SELECT UPPER(TRIM(clave)) FROM clientes "
+                "WHERE clave IS NOT NULL AND clave != ''"
+            )
+            _clientes_registrados = {row[0] for row in _cur_reg.fetchall()}
+            _cur_reg.close()
+            _conn_reg.close()
+        except Exception:
+            pass  # fallback: incluye todos los hijos (comportamiento anterior)
+
         all_partner_ids = set()
         for p in partners:
             all_partner_ids.add(p['id'])
-            for child_id in (p.get('child_ids') or []):
-                all_partner_ids.add(child_id)
+            child_ids_list = p.get('child_ids') or []
+            if child_ids_list:
+                try:
+                    children_data = models.execute_kw(
+                        ODOO_DB, uid, ODOO_PASSWORD,
+                        'res.partner', 'read',
+                        [child_ids_list],
+                        {'fields': ['id', 'ref']}
+                    )
+                    for child in children_data:
+                        child_ref = (child.get('ref') or '').strip().upper()
+                        # Solo incluir hijos que NO son clientes independientes registrados
+                        if not child_ref or child_ref not in _clientes_registrados:
+                            all_partner_ids.add(child['id'])
+                except Exception:
+                    # Fallback: incluir todos los hijos del partner
+                    for cid in child_ids_list:
+                        all_partner_ids.add(cid)
         partner_ids = list(all_partner_ids)
 
         # ── 2) Traer órdenes de venta desde la fecha de inicio de temporada del cliente ──
