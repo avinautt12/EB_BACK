@@ -1190,8 +1190,10 @@ def detalle_compras_odoo():
         if not partners:
             return jsonify({'data': [], 'rows': [], 'meta': {'total': 0}}), 200
 
-        # Expandimos child_ids excluyendo hijos que tienen su propio ref registrado
-        # como cliente independiente en nuestra DB (evita doble conteo entre sucursales).
+        # Expandimos child_ids excluyendo solo los hijos cuyo ref en Odoo es
+        # DISTINTO al del padre Y está registrado como cliente independiente en nuestra DB.
+        # Esto cubre el caso sucursal (4E013 hijo de JE537) sin romper las cuentas B2B
+        # del portal de Odoo, que tienen el mismo ref que su padre (ej. GC411 → hijo GC411).
         _clientes_registrados: set = set()
         try:
             _conn_reg = obtener_conexion()
@@ -1209,6 +1211,7 @@ def detalle_compras_odoo():
         all_partner_ids = set()
         for p in partners:
             all_partner_ids.add(p['id'])
+            parent_ref = (p.get('ref') or '').strip().upper()
             child_ids_list = p.get('child_ids') or []
             if child_ids_list:
                 try:
@@ -1220,8 +1223,14 @@ def detalle_compras_odoo():
                     )
                     for child in children_data:
                         child_ref = (child.get('ref') or '').strip().upper()
-                        # Solo incluir hijos que NO son clientes independientes registrados
-                        if not child_ref or child_ref not in _clientes_registrados:
+                        # Excluir solo si: tiene ref distinto al padre Y ese ref es un
+                        # cliente independiente registrado (caso sucursal separada).
+                        es_sucursal_independiente = (
+                            child_ref
+                            and child_ref != parent_ref
+                            and child_ref in _clientes_registrados
+                        )
+                        if not es_sucursal_independiente:
                             all_partner_ids.add(child['id'])
                 except Exception:
                     # Fallback: incluir todos los hijos del partner
