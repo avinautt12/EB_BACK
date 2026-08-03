@@ -622,7 +622,7 @@ def sync_monitor_odoo():
                 ['invoice_date', '>=', FECHA_INICIO],
                 ['payment_state', 'not in', ['reversed', 'invoicing_legacy']],
             ]],
-            {'fields': ['id', 'name', 'invoice_date', 'partner_id', 'invoice_line_ids'], 'limit': 0}
+            {'fields': ['id', 'name', 'invoice_date', 'partner_id', 'partner_shipping_id', 'invoice_line_ids'], 'limit': 0}
         )
 
         if not facturas:
@@ -638,6 +638,7 @@ def sync_monitor_odoo():
                     'invoice_name': f['name'],
                     'invoice_date': f['invoice_date'],
                     'partner_id': f['partner_id'][0] if f.get('partner_id') else None,
+                    'shipping_partner_id': f['partner_shipping_id'][0] if f.get('partner_shipping_id') else None,
                 }
 
         if not all_line_ids:
@@ -716,10 +717,13 @@ def sync_monitor_odoo():
         }
 
         partner_ids = list({ctx['partner_id'] for ctx in line_context.values() if ctx['partner_id']})
+        # Incluir también los partners de dirección de entrega para poder detectar sucursales
+        shipping_ids = {ctx['shipping_partner_id'] for ctx in line_context.values() if ctx.get('shipping_partner_id')}
+        all_partner_ids_sync = list(set(partner_ids) | shipping_ids)
         partners_raw = models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
             'res.partner', 'read',
-            [partner_ids],
+            [all_partner_ids_sync],
             {'fields': ['id', 'ref', 'name', 'parent_id']}
         )
         partners_map = {p['id']: p for p in partners_raw}
@@ -736,7 +740,14 @@ def sync_monitor_odoo():
         conexion = obtener_conexion()
         cursor = conexion.cursor(dictionary=True)
         cursor.execute("SELECT clave, nombre_cliente, evac FROM clientes")
-        buscar_evac = _construir_buscar_evac(cursor.fetchall())
+        clientes_rows = cursor.fetchall()
+        buscar_evac = _construir_buscar_evac(clientes_rows)
+
+        # Claves registradas como clientes independientes (para detectar sucursales en facturas)
+        _clientes_registrados_sync = {
+            r['clave'].strip().upper() for r in clientes_rows
+            if r.get('clave') and r['clave'].strip()
+        }
 
         # ── 8. Truncar e insertar ─────────────────────────────────────────────
         # El código del producto se extrae del display_name: "[CODE] Nombre producto"
@@ -804,6 +815,16 @@ def sync_monitor_odoo():
             contacto_nombre = (partner.get('name') or '').strip()
             if not contacto_referencia:
                 contacto_referencia = _NOMBRE_A_CLAVE.get(contacto_nombre.upper().strip(), '')
+
+            # Si la dirección de entrega es un cliente independiente registrado con ref
+            # distinto al de facturación, usar su ref (cubre sucursales como 4E013/JE537).
+            shipping_pid = ctx.get('shipping_partner_id')
+            if shipping_pid and shipping_pid != ctx['partner_id']:
+                ship_partner = partners_map.get(shipping_pid, {})
+                ship_ref = (ship_partner.get('ref') or '').strip().upper()
+                if ship_ref and ship_ref != contacto_referencia and ship_ref in _clientes_registrados_sync:
+                    contacto_referencia = ship_ref
+                    contacto_nombre = (ship_partner.get('name') or contacto_nombre).strip()
 
             precio = float(line.get('price_unit') or 0)
             cantidad = int(float(line.get('quantity') or 0))
