@@ -428,6 +428,51 @@ def validar_documento(id_venta):
 # adjuntos, el admin lo corrige directo aquí -- no pasa por el flujo de
 # rechazo/reenvío de archivos. Recalcula monto_pagar/monto_aplicar con el
 # mismo porcentaje ya guardado (el % depende del plan MSI, no del precio).
+@solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/nota-credito/<int:id_venta>', methods=['POST'])
+def corregir_nota_credito(id_venta):
+    print("REQUEST")
+    print(request)
+    if not _requiere_admin(request):
+        return jsonify({"error": "No autorizado"}), 403
+
+    body = request.get_json(force=True, silent=True) or {}
+    nueva_nota_credito = body.get('nota_credito')
+    if nueva_nota_credito is None:
+        return jsonify({"error": "Falta nota_credito."}), 400
+
+    conexion = obtener_conexion()
+    if not conexion:
+        return jsonify({"error": "No se pudo conectar a la base de datos."}), 500
+
+    cursor = conexion.cursor(dictionary=True, buffered=True)
+    try:
+        fila = data.obtener_venta_para_nota_credito(cursor, id_venta)
+        if not fila:
+            return jsonify({"error": "Solicitud no encontrada."}), 404
+
+        historial = _parsear_historial(fila['historial_json'])
+        historial.append(_entrada_historial(
+            'nota_credito', f"Nota de crédito corregida de ${fila['nota_credito']} a ${nueva_nota_credito}"
+        ))
+
+        data.actualizar_nota_credito(cursor, id_venta, nueva_nota_credito, json.dumps(historial))
+        conexion.commit()
+
+        return jsonify({
+            "ok": True,
+            "id": id_venta,
+            "nota_credito": str(nueva_nota_credito),
+        }), 200
+
+    except Exception as e:
+        conexion.rollback()
+        logging.exception("Error al corregir nota de crédito de solicitud %s: %s", id_venta, e)
+        return jsonify({"error": "Error al actualizar la nota de crédito.", "detalle": str(e)}), 500
+    finally:
+        cursor.close()
+        conexion.close()
+
+
 @solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/precio/<int:id_venta>', methods=['POST'])
 def corregir_precio(id_venta):
     if not _requiere_admin(request):
