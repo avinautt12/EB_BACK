@@ -430,8 +430,6 @@ def validar_documento(id_venta):
 # mismo porcentaje ya guardado (el % depende del plan MSI, no del precio).
 @solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/nota-credito/<int:id_venta>', methods=['POST'])
 def corregir_nota_credito(id_venta):
-    print("REQUEST")
-    print(request)
     if not _requiere_admin(request):
         return jsonify({"error": "No autorizado"}), 403
 
