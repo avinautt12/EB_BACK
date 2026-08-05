@@ -133,9 +133,10 @@ def buscar_caratula_evac():
             # La clave ordinal "Integral 4" no coincide con el id de grupo_clientes (ej: 12).
             _m_integral = _re_evac.match(r'^integral\s+(\d+)$', clave.strip(), _re_evac.IGNORECASE)
             if _m_integral:
-                # es_integral=1 para devolver solo la fila resumen del grupo,
-                # no los miembros individuales que también tienen grupo_integral seteado.
-                conditions.append("grupo_integral = %s AND es_integral = 1")
+                # Buscar por clave ordinal ("Integral 4") O por id real de grupo (grupo_integral=12).
+                # El admin busca por nombre ordinal; el token del usuario trae el id real.
+                conditions.append("(LOWER(clave) = LOWER(%s) OR grupo_integral = %s) AND es_integral = 1")
+                params.append(clave.strip())
                 params.append(int(_m_integral.group(1)))
             else:
                 conditions.append("clave = %s")
