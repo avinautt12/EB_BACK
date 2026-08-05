@@ -33,6 +33,18 @@ def verificar_token(token):
     except jwt.InvalidTokenError:
         return None  # Token inválido
 
+def verificar_token_con_gracia(token, minutos_gracia=60):
+    """Verifica el token ignorando la expiración si no lleva más de `minutos_gracia` expirado."""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'], options={"verify_exp": False})
+        exp = payload.get('exp', 0)
+        ahora = datetime.datetime.utcnow().timestamp()
+        if exp > 0 and (ahora - exp) > minutos_gracia * 60:
+            return None  # Expirado más allá de la gracia permitida
+        return payload
+    except jwt.InvalidTokenError:
+        return None
+
 def registrar_auditoria(cursor, accion, tabla, id_registro, descripcion):
     """
     Extrae el usuario del token actual, calcula la hora de México y guarda el log.
