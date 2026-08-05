@@ -182,9 +182,10 @@ def obtener_nombres():
         conexion = obtener_conexion()
         cursor = conexion.cursor(dictionary=True)
 
-        # Consulta directa
+        # Incluye grupo_integral y es_integral para que el frontend pueda
+        # expandir la búsqueda a todos los miembros del mismo grupo integral
         query = """
-        SELECT clave, nombre_cliente
+        SELECT clave, nombre_cliente, grupo_integral, es_integral
         FROM previo
         """
         cursor.execute(query)
