@@ -182,10 +182,15 @@ def obtener_nombres():
         conexion = obtener_conexion()
         cursor = conexion.cursor(dictionary=True)
 
-        # COALESCE une el id de grupo para individuales (c.id_grupo) e integrales (p.grupo_integral),
-        # permitiendo al frontend expandir la búsqueda a todos los miembros del grupo.
+        # Cuando previo.nombre_cliente == previo.clave (ej: "4E013"), usa el nombre real de clientes.
+        # COALESCE(p.grupo_integral, c.id_grupo) unifica el grupo para individuales e integrales.
         query = """
-        SELECT p.clave, p.nombre_cliente, p.es_integral, p.grupo_integral,
+        SELECT p.clave,
+               CASE WHEN p.nombre_cliente = p.clave
+                    THEN COALESCE(c.nombre_cliente, p.nombre_cliente)
+                    ELSE p.nombre_cliente
+               END AS nombre_cliente,
+               p.es_integral, p.grupo_integral,
                COALESCE(p.grupo_integral, c.id_grupo) AS id_grupo
         FROM previo p
         LEFT JOIN clientes c ON p.clave = c.clave AND p.es_integral = 0
