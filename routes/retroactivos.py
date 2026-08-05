@@ -2668,7 +2668,8 @@ def ejecutar_sincronizacion_y_calculos():
         _integrales_sync = {
             'Integral 1': ['EC216', 'JC539'],
             'Integral 2': ['GC411', 'MC679', 'MC677', 'LC657'],
-            'Integral 3': ['LC625', 'LC627', 'LC626'],
+            'Integral 3': ['LC625', 'LC627', 'LC626', '84920'],
+            'Integral 4': ['JE537', '4E013'],
         }
         for clave_int, hijas in _integrales_sync.items():
             fmt = ','.join(['%s'] * len(hijas))
@@ -2836,7 +2837,8 @@ def ejecutar_sincronizacion_y_calculos():
         integrales_map = {
             'Integral 1': ['EC216', 'JC539'],
             'Integral 2': ['GC411', 'MC679', 'MC677', 'LC657'],
-            'Integral 3': ['LC625', 'LC627', 'LC626']
+            'Integral 3': ['LC625', 'LC627', 'LC626', '84920'],
+            'Integral 4': ['JE537', '4E013'],
         }
 
         for clave_padre, claves_hijas in integrales_map.items():

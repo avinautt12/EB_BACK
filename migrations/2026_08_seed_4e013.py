@@ -42,10 +42,20 @@ def run():
     f_fin    = padre['f_fin']
     print(f"{CLAVE_PADRE} encontrado — evac={evac}, nivel={nivel}, f_inicio={f_inicio}, f_fin={f_fin}")
 
-    # ── 2. INSERT en clientes (idempotente) ────────────────────────────────────
-    cur.execute("SELECT id FROM clientes WHERE clave = %s", (CLAVE_NUEVA,))
-    if cur.fetchone():
-        print(f"[SKIP] clientes.{CLAVE_NUEVA} ya existe.")
+    # ── 2. UPSERT en clientes ──────────────────────────────────────────────────
+    cur.execute("SELECT id, evac, nivel FROM clientes WHERE clave = %s", (CLAVE_NUEVA,))
+    existing = cur.fetchone()
+    if existing and existing['evac'] and existing['nivel']:
+        print(f"[SKIP] clientes.{CLAVE_NUEVA} ya existe con datos completos.")
+    elif existing:
+        # Existe pero le faltan datos — actualizar
+        cur.execute(
+            """UPDATE clientes SET evac=%s, nombre_cliente=%s, nivel=%s,
+               f_inicio=%s, f_fin=%s, id_grupo=%s WHERE clave=%s""",
+            (evac, NOMBRE_NUEVO, nivel, f_inicio, f_fin, id_grupo, CLAVE_NUEVA)
+        )
+        conn.commit()
+        print(f"[OK]   UPDATE clientes: evac={evac}, nivel={nivel} (fila existente estaba incompleta)")
     else:
         cur.execute(
             """INSERT INTO clientes
@@ -63,9 +73,40 @@ def run():
     cur.execute("SELECT * FROM previo WHERE clave = %s LIMIT 1", (CLAVE_PADRE,))
     previo_padre = cur.fetchone()
 
-    cur.execute("SELECT id FROM previo WHERE clave = %s", (CLAVE_NUEVA,))
-    if cur.fetchone():
-        print(f"[SKIP] previo.{CLAVE_NUEVA} ya existe.")
+    cur.execute("SELECT id, compromiso_scott, evac FROM previo WHERE clave = %s", (CLAVE_NUEVA,))
+    prev_existing = cur.fetchone()
+    if prev_existing and prev_existing['compromiso_scott'] and prev_existing['evac']:
+        print(f"[SKIP] previo.{CLAVE_NUEVA} ya existe con datos completos.")
+    elif prev_existing and previo_padre:
+        # Existe pero vacía — actualizar compromisos desde padre
+        cur.execute("""
+            UPDATE previo SET
+                evac=%s, nombre_cliente=%s, nivel=%s,
+                compra_minima_anual=%s, compra_minima_inicial=%s,
+                compromiso_scott=%s,
+                compromiso_jul_ago=%s, compromiso_sep_oct=%s,
+                compromiso_nov_dic=%s, compromiso_ene_feb=%s,
+                compromiso_mar_abr=%s, compromiso_may_jun=%s,
+                compromiso_apparel_syncros_vittoria=%s,
+                compromiso_jul_ago_app=%s, compromiso_sep_oct_app=%s,
+                compromiso_nov_dic_app=%s, compromiso_ene_feb_app=%s,
+                compromiso_mar_abr_app=%s, compromiso_may_jun_app=%s
+            WHERE clave=%s
+        """, (
+            previo_padre['evac'], NOMBRE_NUEVO, previo_padre['nivel'],
+            previo_padre['compra_minima_anual'], previo_padre['compra_minima_inicial'],
+            previo_padre['compromiso_scott'],
+            previo_padre['compromiso_jul_ago'], previo_padre['compromiso_sep_oct'],
+            previo_padre['compromiso_nov_dic'], previo_padre['compromiso_ene_feb'],
+            previo_padre['compromiso_mar_abr'], previo_padre['compromiso_may_jun'],
+            previo_padre['compromiso_apparel_syncros_vittoria'],
+            previo_padre['compromiso_jul_ago_app'], previo_padre['compromiso_sep_oct_app'],
+            previo_padre['compromiso_nov_dic_app'], previo_padre['compromiso_ene_feb_app'],
+            previo_padre['compromiso_mar_abr_app'], previo_padre['compromiso_may_jun_app'],
+            CLAVE_NUEVA
+        ))
+        conn.commit()
+        print(f"[OK]   UPDATE previo.{CLAVE_NUEVA} (fila existente estaba vacía, compromisos copiados de {CLAVE_PADRE})")
     elif previo_padre:
         previo_padre.pop('id', None)
         previo_padre['clave']          = CLAVE_NUEVA

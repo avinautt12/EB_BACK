@@ -103,32 +103,49 @@ def buscar_caratula_evac():
         nombre_a_buscar = nombre_cliente
         columna_a_buscar = "nombre_cliente" # Por defecto buscamos en nombre_cliente
         
+        import re as _re_evac
+
         # Si la búsqueda es por nombre y contiene "Integral", es un grupo.
         if nombre_cliente and "integral" in nombre_cliente.lower():
             cursor.execute("SELECT id FROM grupo_clientes WHERE nombre_grupo = %s", (nombre_cliente,))
             grupo = cursor.fetchone()
-            
+
             if grupo:
-                # Si es un grupo, CAMBIAMOS la columna y el valor a buscar
-                nombre_a_buscar = f"Integral {grupo['id']}"
-                columna_a_buscar = "clave" # ¡Aquí está la magia!
-                logging.info("Búsqueda de GRUPO: traducido '%s' a buscar '%s' en la columna '%s'", nombre_cliente, nombre_a_buscar, columna_a_buscar)
+                # Usar grupo_integral (id real de grupo_clientes) en lugar de
+                # la clave ordinal "Integral N", que no coincide con el id del grupo.
+                nombre_a_buscar = str(grupo['id'])
+                columna_a_buscar = "grupo_integral"
+                logging.info("Búsqueda de GRUPO: usando grupo_integral = %s para '%s'", grupo['id'], nombre_cliente)
+            else:
+                # Búsqueda directa por clave de integral (ej. "Integral 4")
+                nombre_a_buscar = nombre_cliente
+                columna_a_buscar = "clave"
+                logging.info("Búsqueda de INTEGRAL por clave directa: '%s'", nombre_cliente)
 
         # Construir consulta dinámica
         query = "SELECT * FROM previo WHERE "
         params = []
         conditions = []
-        
-        if clave:
-            conditions.append("clave = %s")
-            params.append(clave)
 
-        # Usamos la columna y el nombre correctos para la búsqueda
-        if nombre_a_buscar:
-            # Usamos f-string para insertar el nombre de la columna dinámicamente
-            conditions.append(f"{columna_a_buscar} LIKE %s")
-            params.append(f"%{nombre_a_buscar}%")
-        
+        if clave:
+            # Si la clave es "Integral {id}" (enviada por el frontend usando id_grupo del token),
+            # usar la columna grupo_integral (id real) en lugar de clave (nombre ordinal).
+            # La clave ordinal "Integral 4" no coincide con el id de grupo_clientes (ej: 12).
+            _m_integral = _re_evac.match(r'^integral\s+(\d+)$', clave.strip(), _re_evac.IGNORECASE)
+            if _m_integral:
+                conditions.append("grupo_integral = %s")
+                params.append(int(_m_integral.group(1)))
+            else:
+                conditions.append("clave = %s")
+                params.append(clave)
+        elif nombre_a_buscar:
+            if columna_a_buscar == "grupo_integral":
+                conditions.append("grupo_integral = %s")
+                params.append(int(nombre_a_buscar))
+            else:
+                conditions.append(f"{columna_a_buscar} LIKE %s")
+                params.append(f"%{nombre_a_buscar}%")
+
         query += " AND ".join(conditions)
         
         cursor.execute(query, tuple(params))
@@ -1190,10 +1207,8 @@ def detalle_compras_odoo():
         if not partners:
             return jsonify({'data': [], 'rows': [], 'meta': {'total': 0}}), 200
 
-        # Expandimos child_ids excluyendo solo los hijos cuyo ref en Odoo es
-        # DISTINTO al del padre Y está registrado como cliente independiente en nuestra DB.
-        # Esto cubre el caso sucursal (4E013 hijo de JE537) sin romper las cuentas B2B
-        # del portal de Odoo, que tienen el mismo ref que su padre (ej. GC411 → hijo GC411).
+        # Expandimos child_ids excluyendo hijos que tienen su propio ref registrado
+        # como cliente independiente en nuestra DB (evita doble conteo entre sucursales).
         _clientes_registrados: set = set()
         try:
             _conn_reg = obtener_conexion()
@@ -1211,7 +1226,6 @@ def detalle_compras_odoo():
         all_partner_ids = set()
         for p in partners:
             all_partner_ids.add(p['id'])
-            parent_ref = (p.get('ref') or '').strip().upper()
             child_ids_list = p.get('child_ids') or []
             if child_ids_list:
                 try:
@@ -1223,14 +1237,8 @@ def detalle_compras_odoo():
                     )
                     for child in children_data:
                         child_ref = (child.get('ref') or '').strip().upper()
-                        # Excluir solo si: tiene ref distinto al padre Y ese ref es un
-                        # cliente independiente registrado (caso sucursal separada).
-                        es_sucursal_independiente = (
-                            child_ref
-                            and child_ref != parent_ref
-                            and child_ref in _clientes_registrados
-                        )
-                        if not es_sucursal_independiente:
+                        # Solo incluir hijos que NO son clientes independientes registrados
+                        if not child_ref or child_ref not in _clientes_registrados:
                             all_partner_ids.add(child['id'])
                 except Exception:
                     # Fallback: incluir todos los hijos del partner
@@ -1242,9 +1250,18 @@ def detalle_compras_odoo():
         # Excluimos únicamente borradores (state='draft') — órdenes que aún no han
         # sido confirmadas y no deben aparecer en el monitor.
         # Las órdenes canceladas (state='cancel') SÍ se muestran con estatus "Cancelado".
+        #
+        # Para incluir "anticipos de temporada" (órdenes creadas antes del inicio pero
+        # facturadas dentro de la temporada), extendemos el rango 90 días hacia atrás.
+        # 90 días cubre el periodo típico de anticipos (mayo-junio para temporada jul).
+        # Usar el año completo (ene) trae demasiadas órdenes y dispara cientos de
+        # llamadas extra a Odoo para verificar facturas, causando timeouts de 5+ min.
         try:
+            from datetime import datetime as _dt, timedelta as _td
+            _fecha_inicio_dt = _dt.strptime(fecha_inicio_temporada, '%Y-%m-%d')
+            _fecha_inicio_anticipos = (_fecha_inicio_dt - _td(days=90)).strftime('%Y-%m-%d')
             _domain_orders = [['partner_id', 'in', partner_ids],
-                               ['date_order', '>=', fecha_inicio_temporada],
+                               ['date_order', '>=', _fecha_inicio_anticipos],
                                ['state', '!=', 'draft']]
             if fecha_fin_temporada:
                 _domain_orders.append(['date_order', '<=', fecha_fin_temporada])
@@ -1252,11 +1269,59 @@ def detalle_compras_odoo():
                 ODOO_DB, uid, ODOO_PASSWORD,
                 'sale.order', 'search_read',
                 [_domain_orders],
-                {'fields': ['id', 'name', 'date_order', 'partner_id', 'order_line', 'amount_total', 'state', 'tag_ids'],
+                {'fields': ['id', 'name', 'date_order', 'partner_id', 'order_line',
+                            'amount_total', 'state', 'tag_ids', 'invoice_ids'],
                  'order': 'date_order desc', 'limit': 0}
             )
         except Exception as ex:
             return jsonify({'error': f'Error consultando sale.order: {str(ex)}'}), 500
+
+        if not orders:
+            return jsonify({'data': [], 'rows': [], 'meta': {'total': 0}}), 200
+
+        # Filtrar anticipos: de las órdenes pre-temporada, conservar solo las que
+        # tienen TODAS sus facturas dentro de la temporada (ninguna antes de f_inicio).
+        # Esto distingue anticipos MY27 (creados en mayo-jun, facturados en jul+)
+        # de carryovers MY26 (órdenes antiguas con una pequeña factura residual en jul).
+        _presea_invoice_ids: list[int] = []
+        _presea_by_inv: dict[int, int] = {}  # invoice_id → order_id
+        for _o in orders:
+            if (_o.get('date_order') or '')[:10] < fecha_inicio_temporada:
+                for _inv_id in (_o.get('invoice_ids') or []):
+                    _presea_invoice_ids.append(_inv_id)
+                    _presea_by_inv[_inv_id] = _o['id']
+
+        _valid_presea_ids: set[int] = set()
+        if _presea_invoice_ids:
+            try:
+                _inv_rows = models.execute_kw(
+                    ODOO_DB, uid, ODOO_PASSWORD,
+                    'account.move', 'read',
+                    [list(set(_presea_invoice_ids))],
+                    {'fields': ['id', 'invoice_date', 'state']}
+                )
+                # Agrupar facturas por orden para evaluar el conjunto completo
+                _inv_by_order: dict[int, list] = {}
+                for _inv in _inv_rows:
+                    _oid = _presea_by_inv[_inv['id']]
+                    _inv_by_order.setdefault(_oid, []).append(_inv)
+
+                for _oid, _invs in _inv_by_order.items():
+                    posted = [i for i in _invs if i.get('state') == 'posted']
+                    if not posted:
+                        continue
+                    # Antipo MY27: TODAS las facturas publicadas son de la temporada actual.
+                    # Si alguna es anterior, es un carryover MY26 → excluir.
+                    if all((i.get('invoice_date') or '') >= fecha_inicio_temporada for i in posted):
+                        _valid_presea_ids.add(_oid)
+            except Exception:
+                pass  # si falla, excluimos las pre-temporada (comportamiento conservador)
+
+        orders = [
+            _o for _o in orders
+            if (_o.get('date_order') or '')[:10] >= fecha_inicio_temporada
+            or _o['id'] in _valid_presea_ids
+        ]
 
         if not orders:
             return jsonify({'data': [], 'rows': [], 'meta': {'total': 0}}), 200
@@ -1364,6 +1429,7 @@ def detalle_compras_odoo():
                 'name': pname,
                 'display_name': display_name,
             }
+
 
         # ── 5) Leer facturas en batch ─────────────────────────────────────────────
         order_names = [o['name'] for o in orders if o.get('name')]
@@ -1948,34 +2014,44 @@ def detalle_compras_odoo():
             resultado.append(order_obj)
 
         # ── 12) Leer acumulado_anticipado desde previo ────────────────────────────
-        # Campo exacto que muestra la carátula como "Entregado".
-        # Para grupos usa la fila resumen ("Integral N", es_integral=1).
-        # Para clientes individuales usa la fila con su clave.
+        # Para grupos: suma las claves individuales de los miembros del grupo.
+        # Usar "Integral {id}" era incorrecto porque el id de grupo_clientes (ej: 12)
+        # no coincide con el número ordinal del integral en previo (ej: "Integral 4").
+        # Para clientes individuales: lee la fila por clave directamente.
         avance_previo = None
         try:
             _conn_ap = obtener_conexion()
             _cur_ap = _conn_ap.cursor(dictionary=True)
-            _clave_ap = f"Integral {grupo_odoo}" if grupo_odoo else cliente
             if temporada_param:
-                # Temporada histórica: leer el snapshot archivado, no el previo en vivo
+                # Temporada histórica: snapshot por claves individuales
+                if grupo_odoo and _claves:
+                    _ph_ap = ','.join(['%s'] * len(_claves))
+                    _cur_ap.execute(
+                        f"SELECT COALESCE(SUM(acumulado_anticipado), 0) AS total "
+                        f"FROM previo_historico "
+                        f"WHERE clave IN ({_ph_ap}) AND temporada = %s",
+                        (*_claves, temporada_param)
+                    )
+                else:
+                    _cur_ap.execute(
+                        "SELECT acumulado_anticipado AS total FROM previo_historico "
+                        "WHERE clave = %s AND temporada = %s "
+                        "ORDER BY fecha_snapshot DESC LIMIT 1",
+                        (cliente, temporada_param)
+                    )
+            elif grupo_odoo and _claves:
+                # Grupo: suma previo de todos los miembros (evita depender del nombre ordinal)
+                _ph_ap = ','.join(['%s'] * len(_claves))
                 _cur_ap.execute(
-                    "SELECT acumulado_anticipado AS total FROM previo_historico "
-                    "WHERE clave = %s AND temporada = %s "
-                    "ORDER BY fecha_snapshot DESC LIMIT 1",
-                    (_clave_ap, temporada_param)
-                )
-            elif grupo_odoo:
-                # La fila resumen del integral tiene clave = "Integral {id}"
-                _cur_ap.execute(
-                    "SELECT acumulado_anticipado AS total FROM previo "
-                    "WHERE clave = %s LIMIT 1",
-                    (_clave_ap,)
+                    f"SELECT COALESCE(SUM(acumulado_anticipado), 0) AS total "
+                    f"FROM previo WHERE clave IN ({_ph_ap})",
+                    tuple(_claves)
                 )
             else:
                 _cur_ap.execute(
                     "SELECT acumulado_anticipado AS total FROM previo "
                     "WHERE clave = %s AND (es_integral = 0 OR es_integral IS NULL) LIMIT 1",
-                    (_clave_ap,)
+                    (cliente,)
                 )
             _row_ap = _cur_ap.fetchone()
             if _row_ap and _row_ap.get('total') is not None:
