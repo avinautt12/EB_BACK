@@ -182,11 +182,13 @@ def obtener_nombres():
         conexion = obtener_conexion()
         cursor = conexion.cursor(dictionary=True)
 
-        # Incluye grupo_integral y es_integral para que el frontend pueda
-        # expandir la búsqueda a todos los miembros del mismo grupo integral
+        # COALESCE une el id de grupo para individuales (c.id_grupo) e integrales (p.grupo_integral),
+        # permitiendo al frontend expandir la búsqueda a todos los miembros del grupo.
         query = """
-        SELECT clave, nombre_cliente, grupo_integral, es_integral
-        FROM previo
+        SELECT p.clave, p.nombre_cliente, p.es_integral, p.grupo_integral,
+               COALESCE(p.grupo_integral, c.id_grupo) AS id_grupo
+        FROM previo p
+        LEFT JOIN clientes c ON p.clave = c.clave AND p.es_integral = 0
         """
         cursor.execute(query)
         resultados = cursor.fetchall()
