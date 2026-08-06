@@ -1033,14 +1033,11 @@ def get_inventario_megamo():
 # GET /proyecciones-my27/cobertura-megamo — análisis FIFO de cobertura
 # ─────────────────────────────────────────────────────────────────────────────
 
-@proyecciones_my27_bp.route('/cobertura-megamo', methods=['GET'])
-def get_cobertura_megamo():
+def _compute_cobertura(periodo: str) -> list:
     """
-    GET /proyecciones-my27/cobertura-megamo?periodo=2026-2027
-    Devuelve análisis FIFO de cobertura: stock entrante vs proyecciones globales por SKU.
+    Calcula el análisis FIFO de cobertura para un periodo dado.
+    Devuelve la lista de dicts de cobertura (o lista vacía si no hay inventario).
     """
-    periodo = request.args.get('periodo', '2026-2027').strip()
-
     conn = obtener_conexion()
     cur  = conn.cursor(dictionary=True)
 
@@ -1054,26 +1051,48 @@ def get_cobertura_megamo():
     if not inventario_rows:
         cur.close()
         conn.close()
-        return jsonify({'periodo': periodo, 'cobertura': [], 'mensaje': 'No hay inventario cargado para este periodo'}), 200
+        return []
 
     inventario = {r['sku']: r for r in inventario_rows}
     skus_inv   = list(inventario.keys())
 
-    # 2. Proyecciones globales por SKU (suma de todos los distribuidores)
-    cols_mes = ', '.join(f'COALESCE(SUM({m}), 0) AS {m}' for m in MESES_ORDEN)
-    cur.execute(f"""
-        SELECT fp.sku, {cols_mes},
-               COALESCE(p.nombre_producto, fp.producto, fp.sku) AS producto
-        FROM forecast_proyecciones fp
-        LEFT JOIN odoo_catalogo p ON p.referencia_interna = fp.sku
-        WHERE fp.periodo = %s AND fp.sku IN ({','.join(['%s']*len(skus_inv))})
-        GROUP BY fp.sku, producto
-    """, (periodo, *skus_inv))
-    proyecciones_rows = cur.fetchall()
-    cur.close()
-    conn.close()
+    # 2. Proyecciones globales por SKU
+    proy_by_sku = {}
+    monitor_cached = _redis_get(_rkey_my27(periodo))
 
-    proy_by_sku = {r['sku']: r for r in proyecciones_rows}
+    if monitor_cached:
+        for art in monitor_cached.get('articulos', []):
+            sku = art['sku']
+            if sku not in inventario:
+                continue
+            proy_by_sku[sku] = {mes: art['meses'][mes]['cantidad'] for mes in MESES_ORDEN}
+            proy_by_sku[sku]['sku']      = sku
+            proy_by_sku[sku]['producto'] = art.get('producto', sku)
+        cur.close()
+        conn.close()
+    else:
+        cols_mes = ', '.join(f'COALESCE(SUM({m}), 0) AS {m}' for m in MESES_ORDEN)
+        cur.execute(f"""
+            SELECT fp.sku, {cols_mes}, MAX(fp.producto) AS producto
+            FROM forecast_proyecciones fp
+            WHERE fp.periodo = %s AND fp.sku IN ({','.join(['%s']*len(skus_inv))})
+            GROUP BY fp.sku
+        """, (periodo, *skus_inv))
+        proyecciones_rows = cur.fetchall()
+
+        if proyecciones_rows:
+            skus_proy = [r['sku'] for r in proyecciones_rows]
+            cur.execute(f"""
+                SELECT referencia_interna, nombre_producto
+                FROM odoo_catalogo
+                WHERE referencia_interna IN ({','.join(['%s']*len(skus_proy))})
+            """, skus_proy)
+            nombres_odoo = {r['referencia_interna']: r['nombre_producto'] for r in cur.fetchall()}
+            for r in proyecciones_rows:
+                r['producto'] = nombres_odoo.get(r['sku']) or r.get('producto') or r['sku']
+        cur.close()
+        conn.close()
+        proy_by_sku = {r['sku']: r for r in proyecciones_rows}
 
     # 3. Calcular cobertura FIFO por SKU
     resultado = []
@@ -1083,7 +1102,6 @@ def get_cobertura_megamo():
         cantidad_entrante = inv_rec['cantidad']
 
         if not proy_rec:
-            # SKU en inventario pero sin proyecciones — mostrar igual
             resultado.append({
                 'sku': sku,
                 'producto': inv_rec.get('descripcion') or sku,
@@ -1145,7 +1163,171 @@ def get_cobertura_megamo():
             'cobertura': cobertura_meses,
         })
 
-    # Ordenar: primero los que tienen proyecciones, luego por SKU
     resultado.sort(key=lambda x: (x['total_proyectado'] == 0, x['sku']))
+    return resultado
 
+
+@proyecciones_my27_bp.route('/cobertura-megamo', methods=['GET'])
+def get_cobertura_megamo():
+    """
+    GET /proyecciones-my27/cobertura-megamo?periodo=2026-2027
+    Devuelve análisis FIFO de cobertura: stock entrante vs proyecciones globales por SKU.
+    """
+    periodo  = request.args.get('periodo', '2026-2027').strip()
+    resultado = _compute_cobertura(periodo)
+    if not resultado:
+        return jsonify({'periodo': periodo, 'cobertura': [],
+                        'mensaje': 'No hay inventario cargado para este periodo'}), 200
     return jsonify({'periodo': periodo, 'cobertura': resultado}), 200
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /proyecciones-my27/exportar-cobertura  — descarga Excel de inventario
+# ─────────────────────────────────────────────────────────────────────────────
+
+@proyecciones_my27_bp.route('/exportar-cobertura', methods=['GET'])
+def exportar_cobertura():
+    """
+    Exporta el análisis de cobertura FIFO (Inventario Entrante) a Excel.
+    Query param: ?periodo=2026-2027
+    """
+    if not OPENPYXL_OK:
+        return jsonify({'error': 'openpyxl no disponible'}), 500
+
+    try:
+        periodo = request.args.get('periodo', '2026-2027').strip()
+
+        cobertura = _compute_cobertura(periodo)
+        if not cobertura:
+            return jsonify({'error': 'No hay datos de inventario para exportar'}), 404
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = 'Inventario Entrante'
+
+        # Estilos
+        C_HEADER   = PatternFill('solid', fgColor='1A1A1A')
+        C_GREEN    = PatternFill('solid', fgColor='1B4A2A')
+        C_RED      = PatternFill('solid', fgColor='4A1A1A')
+        C_AMBER    = PatternFill('solid', fgColor='3A2E0A')
+        C_NEUTRAL  = PatternFill('solid', fgColor='1E1E1E')
+        C_MES_HDR  = PatternFill('solid', fgColor='252525')
+        F_WHITE    = Font(color='FFFCF2', bold=True, size=10)
+        F_NORMAL   = Font(color='CCCCCC', size=9)
+        F_GREEN    = Font(color='4CAF50', bold=True, size=9)
+        F_RED      = Font(color='E53935', bold=True, size=9)
+        F_AMBER    = Font(color='EB5E28', bold=True, size=9)
+        F_MUTED    = Font(color='888888', size=9)
+        AL_C       = Alignment(horizontal='center', vertical='center')
+        AL_L       = Alignment(horizontal='left',   vertical='center', wrap_text=False)
+
+        thin = Side(style='thin', color='2A2A2A')
+        brd  = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        # ── Cabecera ──
+        fixed_cols = ['SKU', 'Producto', 'Inventario']
+        mes_labels = MESES_LABEL  # 12 meses
+        tail_cols  = ['Total Proyectado', 'Total Cubierto', 'Déficit', 'Sobrante', 'Estado']
+        headers    = fixed_cols + mes_labels + tail_cols
+
+        ws.append(headers)
+        for col_idx, h in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_idx)
+            cell.fill   = C_HEADER
+            cell.font   = F_WHITE
+            cell.border = brd
+            cell.alignment = AL_C
+
+        # ── Filas ──
+        for row_i, sku_data in enumerate(cobertura, 2):
+            deficit_total = sku_data.get('total_deficit', 0)
+            sobrante      = sku_data.get('sobrante', 0)
+            estado_str    = ('Sin demanda'    if sku_data['total_proyectado'] == 0
+                             else 'Cubierto'  if deficit_total == 0
+                             else 'Faltante')
+
+            row_vals = [
+                sku_data['sku'],
+                sku_data.get('producto', ''),
+                sku_data['cantidad_entrante'],
+            ]
+            for mes in MESES_ORDEN:
+                mc = next((c for c in sku_data['cobertura'] if c['mes'] == mes), None)
+                row_vals.append(mc['proyectado'] if mc else 0)
+            row_vals += [
+                sku_data['total_proyectado'],
+                sku_data['total_cubierto'],
+                deficit_total,
+                sobrante,
+                estado_str,
+            ]
+
+            ws.append(row_vals)
+
+            # Color de fila base
+            if sku_data['total_proyectado'] == 0:
+                row_fill = C_NEUTRAL
+            elif deficit_total == 0:
+                row_fill = C_GREEN
+            elif deficit_total > 0:
+                row_fill = C_RED
+            else:
+                row_fill = C_NEUTRAL
+
+            for col_idx in range(1, len(headers) + 1):
+                cell = ws.cell(row=row_i, column=col_idx)
+                cell.fill   = row_fill
+                cell.border = brd
+                cell.alignment = AL_C
+
+                # Fuente según posición
+                if col_idx == 1:  # SKU
+                    cell.font = Font(color='EB5E28', bold=True, size=9,
+                                     name='Courier New')
+                elif col_idx == 2:  # Producto
+                    cell.font = F_MUTED
+                    cell.alignment = AL_L
+                elif col_idx == 3:  # Inventario
+                    cell.font = F_WHITE
+                elif col_idx in range(4, 4 + 12):  # Meses
+                    v = cell.value or 0
+                    cell.font = (F_NORMAL if v == 0 else
+                                 Font(color='FFFCF2', size=9))
+                elif col_idx == len(headers) - 2:  # Déficit
+                    cell.font = F_RED if (cell.value or 0) > 0 else F_MUTED
+                elif col_idx == len(headers) - 1:  # Sobrante
+                    cell.font = F_AMBER if (cell.value or 0) > 0 else F_MUTED
+                elif col_idx == len(headers):       # Estado
+                    cell.font = (F_GREEN if estado_str == 'Cubierto'
+                                 else F_RED if estado_str == 'Faltante'
+                                 else F_MUTED)
+                else:
+                    cell.font = F_NORMAL
+
+        # Anchos de columna
+        ws.column_dimensions[get_column_letter(1)].width = 16   # SKU
+        ws.column_dimensions[get_column_letter(2)].width = 30   # Producto
+        ws.column_dimensions[get_column_letter(3)].width = 13   # Inventario
+        for c in range(4, 4 + 12):
+            ws.column_dimensions[get_column_letter(c)].width = 8
+        for c in range(4 + 12, len(headers) + 1):
+            ws.column_dimensions[get_column_letter(c)].width = 15
+
+        ws.row_dimensions[1].height = 22
+        ws.freeze_panes = 'D2'
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+
+        nombre = f"InventarioEntrante_{periodo}_{ahora_str('%Y%m%d')}.xlsx"
+        return send_file(
+            buf,
+            as_attachment=True,
+            download_name=nombre,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+
+    except Exception as e:
+        logging.exception('[proyecciones_my27] exportar_cobertura error: %s', e)
+        return jsonify({'error': str(e)}), 500
