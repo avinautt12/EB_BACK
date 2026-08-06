@@ -16,7 +16,7 @@ from flask import Blueprint, jsonify, request, send_file
 from db_conexion import obtener_conexion
 from routes.forecast import (SKU_CATALOG, FORECAST_SKU_WHITELIST,
                              _SCOTT_CORRECT_NAMES, _SCOTT_COLORS, _SCOTT_TALLAS,
-                             _ensure_scott_names)
+                             _ensure_scott_names, _redis_get, _redis_set)
 from utils.odoo_utils import get_odoo_models, ODOO_DB, ODOO_PASSWORD
 
 try:
@@ -35,6 +35,11 @@ MESES       = ['mayo', 'junio', 'julio', 'agosto', 'septiembre',
                'octubre', 'noviembre', 'diciembre', 'enero', 'febrero', 'marzo', 'abril']
 MESES_LABEL = ['May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic', 'Ene', 'Feb', 'Mar', 'Abr']
 MESES_ORDEN = MESES  # alias — mismo orden cronológico MY27
+
+_MY27_R_TTL  = 600  # 10 min Redis — monitor completo
+
+def _rkey_my27(periodo: str) -> str:
+    return f'proy_my27:{periodo}'
 
 _COSTOS_CACHE: dict = {'data': {}, 'ts': 0.0}
 _COSTOS_TTL = 300  # 5 minutos
@@ -590,11 +595,19 @@ def listar():
     """
     try:
         periodo = request.args.get('periodo', '2026-2027').strip()
-        if request.args.get('refresh'):
+        force   = bool(request.args.get('refresh'))
+
+        if force:
             _COSTOS_CACHE['ts'] = 0.0
             _MEGAMO_PRECIOS_CACHE['ts'] = 0.0
             _ORDENES_CACHE['ts'] = 0.0
-        data    = _get_datos_consolidados(periodo)
+        else:
+            cached = _redis_get(_rkey_my27(periodo))
+            if cached is not None:
+                return jsonify(cached), 200
+
+        data = _get_datos_consolidados(periodo)
+        _redis_set(_rkey_my27(periodo), data, _MY27_R_TTL)
         return jsonify(data), 200
     except Exception as e:
         logging.exception('[proyecciones_my27] listar error: %s', e)
