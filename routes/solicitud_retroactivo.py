@@ -86,12 +86,12 @@ def _entrada_historial(tipo, descripcion):
 # rechaza 1 de los 4 documentos, la solicitud se ve como 'rechazado' en su
 # conjunto (decisión de producto: más simple de entender para el cliente que
 # un estado "parcial"), pero el cliente solo tiene que resubir ESE archivo
-# (ver PUT /venta/<id>), no los 4. Solo es 'validado' cuando los 4 quedaron
+# (ver PUT /venta/<id>), no los 4. Solo es 'validado' cuando los obligatorios quedaron
 # marcados 'valido'. Sin nada rechazado y sin completar, sigue 'pendiente'.
 def _calcular_estatus(validacion_docs):
     if 'rechazado' in validacion_docs.values():
         return 'rechazado'
-    if all(validacion_docs.get(k) == 'valido' for k in ARCHIVOS_REQUERIDOS):
+    if validacion_docs.get('ticket_compra') == 'valido' and validacion_docs.get('voucher') == 'valido':
         return 'validado'
     return 'pendiente'
 
@@ -115,12 +115,17 @@ def registrar_venta():
             "campos": faltantes
         }), 400
 
-    # 2. Validar que los 4 archivos estén presentes
+    # 2. Validar que los archivos obligatorios estén presentes (PDF y XML son opcionales)
     for key_archivo in ARCHIVOS_REQUERIDOS.keys():
-        if key_archivo not in request.files:
-            return jsonify({"error": f"No se recibió el archivo: {key_archivo}"}), 400
+        file = request.files.get(key_archivo)
 
-        file = request.files[key_archivo]
+        # Si es PDF o XML y no viene archivo, se permite omitirlo
+        if key_archivo in ['factura_pdf', 'factura_xml']:
+            if not file or not file.filename:
+                continue
+
+        if not file:
+            return jsonify({"error": f"No se recibió el archivo: {key_archivo}"}), 400
 
         if not file.filename:
             return jsonify({"error": f"Nombre de archivo vacío para: {key_archivo}"}), 400
@@ -135,11 +140,14 @@ def registrar_venta():
     # archivos huérfanos -- la key en BD no le pertenecía a ningún objeto en
     # S3. Ahora se sube primero y se usa la key que S3 realmente asignó.
     archivos_procesados = {}
-    keys_archivos = {}
+    keys_archivos = {k: None for k in ARCHIVOS_REQUERIDOS.keys()}
 
     try:
         for key_archivo in ARCHIVOS_REQUERIDOS.keys():
-            file = request.files[key_archivo]
+            file = request.files.get(key_archivo)
+            if not file or not file.filename:
+                continue
+
             resultado = subir_archivo_s3(file)
 
             keys_archivos[key_archivo] = resultado["key"]
@@ -232,7 +240,7 @@ def buscar_msi():
     conexion = obtener_conexion()
     if not conexion:
         return jsonify({"error": "No se pudo conectar a la base de datos."}), 500
-           
+            
     cursor = conexion.cursor(dictionary=True, buffered=True) 
     
     try:
@@ -251,7 +259,7 @@ def buscar_marca():
     conexion = obtener_conexion()
     if not conexion:
         return jsonify({"error": "No se pudo conectar a la base de datos."}), 500
-           
+            
     cursor = conexion.cursor(dictionary=True, buffered=True) 
     
     try:
@@ -270,7 +278,7 @@ def buscar_formulario():
     conexion = obtener_conexion()
     if not conexion:
         return jsonify({"error": "No se pudo conectar a la base de datos."}), 500
-           
+            
     cursor = conexion.cursor(dictionary=True, buffered=True) 
     
     try:
@@ -623,6 +631,8 @@ def editar_venta(id_venta):
     faltantes_archivos = []
     for key_archivo in docs_a_resubir:
         file = request.files.get(key_archivo)
+        if key_archivo in ['factura_pdf', 'factura_xml'] and (not file or not file.filename):
+            continue
         if not file or not file.filename:
             faltantes_archivos.append(key_archivo)
         elif not allowed_file(file.filename):
@@ -640,7 +650,11 @@ def editar_venta(id_venta):
     keys_archivos = {}
     try:
         for key_archivo in docs_a_resubir:
-            file = request.files[key_archivo]
+            file = request.files.get(key_archivo)
+            if key_archivo in ['factura_pdf', 'factura_xml'] and (not file or not file.filename):
+                keys_archivos[key_archivo] = None
+                continue
+                
             resultado = subir_archivo_s3(file)
             keys_archivos[key_archivo] = resultado["key"]
             archivos_procesados[key_archivo] = {
