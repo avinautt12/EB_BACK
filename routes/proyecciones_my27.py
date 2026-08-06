@@ -34,6 +34,7 @@ proyecciones_my27_bp = Blueprint('proyecciones_my27', __name__, url_prefix='/pro
 MESES       = ['mayo', 'junio', 'julio', 'agosto', 'septiembre',
                'octubre', 'noviembre', 'diciembre', 'enero', 'febrero', 'marzo', 'abril']
 MESES_LABEL = ['May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic', 'Ene', 'Feb', 'Mar', 'Abr']
+MESES_ORDEN = MESES  # alias — mismo orden cronológico MY27
 
 _COSTOS_CACHE: dict = {'data': {}, 'ts': 0.0}
 _COSTOS_TTL = 300  # 5 minutos
@@ -872,3 +873,266 @@ def _generar_excel(data: dict) -> bytes:
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /proyecciones-my27/inventario-megamo — subir Excel de stock entrante
+# ─────────────────────────────────────────────────────────────────────────────
+
+@proyecciones_my27_bp.route('/inventario-megamo', methods=['POST'])
+def subir_inventario_megamo():
+    """
+    POST /proyecciones-my27/inventario-megamo
+    Form fields:
+      - file: archivo Excel (.xlsx/.xls)
+      - periodo: string, ej. '2026-2027' (default '2026-2027')
+    """
+    import openpyxl
+
+    periodo = request.form.get('periodo', '2026-2027').strip()
+    f = request.files.get('file')
+    if not f:
+        return jsonify({'error': 'Se requiere el campo "file"'}), 400
+
+    ext = (f.filename or '').lower()
+    if not (ext.endswith('.xlsx') or ext.endswith('.xls')):
+        return jsonify({'error': 'Solo se aceptan archivos .xlsx o .xls'}), 400
+
+    content = f.read()
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+    except Exception as e:
+        return jsonify({'error': f'No se pudo leer el archivo: {e}'}), 400
+
+    ws = wb.active
+
+    # Detectar fila de headers
+    header_row = None
+    col_sku = 1
+    col_cant = 2
+    col_desc = None
+    for ri in range(1, 6):
+        row_vals = [ws.cell(ri, ci).value for ci in range(1, ws.max_column + 1)]
+        row_upper = [str(v).strip().upper() if v else '' for v in row_vals]
+        if 'SKU' in row_upper:
+            header_row = ri
+            col_sku  = row_upper.index('SKU') + 1
+            # Buscar CANTIDAD / CANT / QTY / UNIDADES
+            for kw in ('CANTIDAD', 'CANT', 'QTY', 'UNIDADES', 'PIEZAS'):
+                if kw in row_upper:
+                    col_cant = row_upper.index(kw) + 1
+                    break
+            for kw in ('DESCRIPCION', 'DESCRIPCIÓN', 'NOMBRE', 'PRODUCTO'):
+                if kw in row_upper:
+                    col_desc = row_upper.index(kw) + 1
+                    break
+            break
+
+    data_start = (header_row + 1) if header_row else 1
+
+    registros = []
+    errores   = []
+    for ri in range(data_start, ws.max_row + 1):
+        sku_val  = ws.cell(ri, col_sku).value
+        cant_val = ws.cell(ri, col_cant).value
+        desc_val = ws.cell(ri, col_desc).value if col_desc else None
+
+        if not sku_val:
+            continue
+        sku = str(sku_val).strip().upper()
+        if not sku:
+            continue
+        try:
+            cantidad = int(float(str(cant_val).replace(',', '')))
+        except (TypeError, ValueError):
+            errores.append(f'Fila {ri}: cantidad inválida para SKU {sku} ({cant_val})')
+            continue
+        if cantidad <= 0:
+            continue
+
+        registros.append({
+            'sku': sku,
+            'cantidad': cantidad,
+            'descripcion': str(desc_val).strip()[:500] if desc_val else None,
+        })
+
+    if not registros:
+        return jsonify({'error': 'No se encontraron filas válidas en el archivo', 'errores': errores}), 400
+
+    conn = obtener_conexion()
+    cur  = conn.cursor()
+    insertados = 0
+    actualizados = 0
+    for rec in registros:
+        cur.execute("""
+            INSERT INTO forecast_inventario_megamo (periodo, sku, cantidad, descripcion)
+            VALUES (%s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                cantidad    = VALUES(cantidad),
+                descripcion = VALUES(descripcion),
+                subido_en   = NOW()
+        """, (periodo, rec['sku'], rec['cantidad'], rec['descripcion']))
+        if cur.rowcount == 1:
+            insertados += 1
+        else:
+            actualizados += 1
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return jsonify({
+        'ok': True,
+        'periodo': periodo,
+        'insertados': insertados,
+        'actualizados': actualizados,
+        'total': insertados + actualizados,
+        'errores': errores,
+    }), 200
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /proyecciones-my27/inventario-megamo — devuelve inventario actual
+# ─────────────────────────────────────────────────────────────────────────────
+
+@proyecciones_my27_bp.route('/inventario-megamo', methods=['GET'])
+def get_inventario_megamo():
+    """GET /proyecciones-my27/inventario-megamo?periodo=2026-2027"""
+    periodo = request.args.get('periodo', '2026-2027').strip()
+    conn = obtener_conexion()
+    cur  = conn.cursor(dictionary=True)
+    cur.execute("""
+        SELECT sku, cantidad, descripcion, subido_en
+        FROM forecast_inventario_megamo
+        WHERE periodo = %s
+        ORDER BY sku
+    """, (periodo,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    for r in rows:
+        if r.get('subido_en'):
+            r['subido_en'] = r['subido_en'].isoformat()
+    return jsonify({'periodo': periodo, 'inventario': rows}), 200
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /proyecciones-my27/cobertura-megamo — análisis FIFO de cobertura
+# ─────────────────────────────────────────────────────────────────────────────
+
+@proyecciones_my27_bp.route('/cobertura-megamo', methods=['GET'])
+def get_cobertura_megamo():
+    """
+    GET /proyecciones-my27/cobertura-megamo?periodo=2026-2027
+    Devuelve análisis FIFO de cobertura: stock entrante vs proyecciones globales por SKU.
+    """
+    periodo = request.args.get('periodo', '2026-2027').strip()
+
+    conn = obtener_conexion()
+    cur  = conn.cursor(dictionary=True)
+
+    # 1. Inventario entrante
+    cur.execute("""
+        SELECT sku, cantidad, descripcion
+        FROM forecast_inventario_megamo
+        WHERE periodo = %s
+    """, (periodo,))
+    inventario_rows = cur.fetchall()
+    if not inventario_rows:
+        cur.close()
+        conn.close()
+        return jsonify({'periodo': periodo, 'cobertura': [], 'mensaje': 'No hay inventario cargado para este periodo'}), 200
+
+    inventario = {r['sku']: r for r in inventario_rows}
+    skus_inv   = list(inventario.keys())
+
+    # 2. Proyecciones globales por SKU (suma de todos los distribuidores)
+    cols_mes = ', '.join(f'COALESCE(SUM({m}), 0) AS {m}' for m in MESES_ORDEN)
+    cur.execute(f"""
+        SELECT fp.sku, {cols_mes},
+               COALESCE(p.nombre_producto, fp.producto, fp.sku) AS producto
+        FROM forecast_proyecciones fp
+        LEFT JOIN odoo_catalogo p ON p.referencia_interna = fp.sku
+        WHERE fp.periodo = %s AND fp.sku IN ({','.join(['%s']*len(skus_inv))})
+        GROUP BY fp.sku, producto
+    """, (periodo, *skus_inv))
+    proyecciones_rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    proy_by_sku = {r['sku']: r for r in proyecciones_rows}
+
+    # 3. Calcular cobertura FIFO por SKU
+    resultado = []
+    for sku in skus_inv:
+        inv_rec  = inventario[sku]
+        proy_rec = proy_by_sku.get(sku)
+        cantidad_entrante = inv_rec['cantidad']
+
+        if not proy_rec:
+            # SKU en inventario pero sin proyecciones — mostrar igual
+            resultado.append({
+                'sku': sku,
+                'producto': inv_rec.get('descripcion') or sku,
+                'cantidad_entrante': cantidad_entrante,
+                'total_proyectado': 0,
+                'total_cubierto': 0,
+                'total_deficit': 0,
+                'sobrante': cantidad_entrante,
+                'cobertura': [{
+                    'mes': m, 'proyectado': 0, 'cubierto': 0,
+                    'deficit': 0, 'estado': 'sin_demanda'
+                } for m in MESES_ORDEN],
+            })
+            continue
+
+        disponible = cantidad_entrante
+        cobertura_meses = []
+        total_proyectado = 0
+        total_cubierto   = 0
+
+        for mes in MESES_ORDEN:
+            proy_mes = int(proy_rec.get(mes) or 0)
+            total_proyectado += proy_mes
+
+            if proy_mes == 0:
+                cobertura_meses.append({
+                    'mes': mes, 'proyectado': 0, 'cubierto': 0,
+                    'deficit': 0, 'estado': 'sin_demanda'
+                })
+                continue
+
+            if disponible >= proy_mes:
+                cubierto = proy_mes
+                disponible -= proy_mes
+                estado = 'completo'
+            elif disponible > 0:
+                cubierto   = disponible
+                disponible = 0
+                estado     = 'parcial'
+            else:
+                cubierto = 0
+                estado   = 'sin_cobertura'
+
+            deficit = proy_mes - cubierto
+            total_cubierto += cubierto
+            cobertura_meses.append({
+                'mes': mes, 'proyectado': proy_mes, 'cubierto': cubierto,
+                'deficit': deficit, 'estado': estado
+            })
+
+        resultado.append({
+            'sku': sku,
+            'producto': proy_rec.get('producto') or inv_rec.get('descripcion') or sku,
+            'cantidad_entrante': cantidad_entrante,
+            'total_proyectado': total_proyectado,
+            'total_cubierto': total_cubierto,
+            'total_deficit': total_proyectado - total_cubierto,
+            'sobrante': max(0, disponible),
+            'cobertura': cobertura_meses,
+        })
+
+    # Ordenar: primero los que tienen proyecciones, luego por SKU
+    resultado.sort(key=lambda x: (x['total_proyectado'] == 0, x['sku']))
+
+    return jsonify({'periodo': periodo, 'cobertura': resultado}), 200
