@@ -146,6 +146,20 @@ def obtener_dashboard_por_anio_modelo(cursor):
     return cursor.fetchall()
 
 
+def obtener_dashboard_por_producto(cursor):
+    cursor.execute("""
+        SELECT
+            COALESCE(TRIM(modelo_bicicleta), 'Sin producto') AS producto,
+            COUNT(*) AS total_solicitudes,
+            COALESCE(SUM(monto_pagar), 0) AS monto_total_pagar,
+            COALESCE(SUM(monto_aplicar), 0) AS monto_total_aplicar
+        FROM solicitud_retroactivo_venta
+        GROUP BY COALESCE(TRIM(modelo_bicicleta), 'Sin producto')
+        ORDER BY monto_total_pagar DESC
+    """)
+    return cursor.fetchall()
+
+
 def obtener_venta_para_validacion(cursor, id_venta):
     cursor.execute(
         "SELECT validacion_docs_json, historial_json FROM solicitud_retroactivo_venta WHERE id = %s",
