@@ -976,7 +976,9 @@ def dashboard():
                 # avanzar el badge -- así el pipeline y el badge siempre coinciden.
                 "pipeline": {
                     "entrega":         {"proy": _fmt_d(r.get("log_fecha_entrega_prog")),           "real": _fmt_d(r.get("log_fecha_entrega")),           "delta": _days_between(r.get("log_fecha_entrega_prog"), r.get("log_fecha_entrega"))},
-                    "booking":         {"proy": _fmt_d(r.get("log_fecha_booking_prog")),           "real": _fmt_d(r.get("log_fecha_booking")),           "delta": _days_between(r.get("log_fecha_booking_prog"), r.get("log_fecha_booking"))},
+                    # "proy" aquí NO es proyectado -- muestra ETA Puerto (Real, 14) para
+                    # comparar contra Booking Real (13b): días de tránsito Booking -> Puerto.
+                    "booking":         {"proy": _fmt_d(r.get("log_eta_puerto")),                    "real": _fmt_d(r.get("log_fecha_booking")),           "delta": _days_between(r.get("log_fecha_booking"), r.get("log_eta_puerto"))},
                     "transito":        {"proy": _fmt_d(r.get("imp_llegada_contenedor_prog")),      "real": _fmt_d(r.get("imp_llegada_contenedor_puerto")),"delta": _days_between(r.get("imp_llegada_contenedor_prog"), r.get("imp_llegada_contenedor_puerto"))},
                     "aduana":          {"proy": _fmt_d(r.get("log_eta_puerto_prog")),              "real": _fmt_d(r.get("log_eta_puerto")),              "delta": _days_between(r.get("log_eta_puerto_prog"), r.get("log_eta_puerto"))},
                     "trans_dest":      {"proy": _fmt_d(r.get("des_fecha_cruce_prog")),             "real": _fmt_d(r.get("des_fecha_cruce_real")),        "delta": _days_between(r.get("des_fecha_cruce_prog"), r.get("des_fecha_cruce_real"))},
