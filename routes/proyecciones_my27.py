@@ -36,6 +36,41 @@ MESES       = ['mayo', 'junio', 'julio', 'agosto', 'septiembre',
 MESES_LABEL = ['May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic', 'Ene', 'Feb', 'Mar', 'Abr']
 MESES_ORDEN = MESES  # alias — mismo orden cronológico MY27
 
+# Lista de prioridad para distribución de inventario.
+# Los clientes no en esta lista reciben stock después de la prioridad 27.
+PRIORIDAD_CLIENTES = [
+    (1,  'LC657', 'Víctor Hugo Villanueva Guzman'),
+    (2,  'MC677', 'BICICLETAS SCJM'),
+    (3,  'MC679', 'Adventure Bike Rider S. A. DE C. V. (GPE)'),
+    (4,  'GC411', 'Adventure Bike Rider S. A. DE C. V.'),
+    (5,  'HE420', 'Xavier James Lord Santos'),
+    (6,  'EC216', 'Marco Tulio (Morelia)'),
+    (7,  'JC539', 'Marco Tulio Andrade Navarro (León)'),
+    (8,  'MD670', 'LIVING FOR BIKES'),
+    (9,  'GD380', 'Cycling Riding de Mexico SA de CV (Metepec)'),
+    (10, 'HA433', 'Lucia Salazar Lopez'),
+    (11, 'ID506', 'Angelica Osorio Gasperin'),
+    (12, '4e013', 'CHRISTIAN BOCCALETTI.'),
+    (13, 'JE537', 'Christian Boccaletti.'),
+    (14, 'LC625', 'Naruco S. A. de C. V. Arcos'),
+    (15, 'LC626', 'Naruco S. A. de C. V. SJR'),
+    (16, 'LC627', 'Naruco S. A. de C. V. (Jurica)'),
+    (17, '84920', 'Naruco Corregidora'),
+    (18, 'MD697', 'Fernando Pontón Rocha'),
+    (19, 'EA219', 'Victor Alejandro Garnier Morga'),
+    (20, 'HF427', 'Opciones Creativas SA de CV'),
+    (21, 'FA271', 'Juan Manuel Ruacho Rangel'),
+    (22, 'AG873', 'Alta Gama 87'),
+    (23, 'LD664', 'Bikes 95 Cycling Club S. A. De C. V.'),
+    (24, '5GEG6', 'FELIPE ENRIQUEZ ROJAS'),
+    (25, 'IA500', 'Jesus Manuel Medrano Velarde'),
+    (26, 'DC192', 'ANA CECILIA LOPEZ LOPEZ'),
+    (27, 'JC554', 'ZIRANDA MADRIGAL EUGENA'),
+]
+# Lookup rápido: clave_cliente → (prioridad, nombre_canonical)
+_PRIORIDAD_MAP: dict = {clave: (prio, nombre)
+                        for prio, clave, nombre in PRIORIDAD_CLIENTES}
+
 _MY27_R_TTL  = 600  # 10 min Redis — monitor completo
 
 def _rkey_my27(periodo: str) -> str:
@@ -1257,6 +1292,117 @@ def _compute_cobertura(periodo: str) -> list:
     return resultado
 
 
+def _compute_distribucion_prioritaria(periodo: str) -> list:
+    """
+    Para cada SKU con total_disponible > 0 o proyecciones:
+      - Distribuye total_disponible (Odoo + entrante) a clientes en orden de prioridad.
+      - Algoritmo FIFO por mes: el cliente prioritario llena primero cada mes
+        de su demanda antes de que el siguiente cliente reciba algo.
+      - Clientes no en PRIORIDAD_CLIENTES aparecen después del lugar 27,
+        ordenados por clave_cliente.
+    """
+    # 1. Cobertura con stock combinado
+    cobertura = _compute_cobertura(periodo)
+    sku_info  = {c['sku']: c for c in cobertura}
+
+    # 2. Demanda por cliente por SKU — solo clientes con al menos 1 unidad
+    conn = obtener_conexion()
+    cur  = conn.cursor(dictionary=True)
+    cols = ', '.join(
+        f'COALESCE(SUM(fp.{m}), 0) AS {m}' for m in MESES_ORDEN
+    )
+    cur.execute(f"""
+        SELECT
+            fp.sku,
+            fp.clave_cliente,
+            COALESCE(c.nombre_cliente, fp.clave_cliente) AS nombre_cliente,
+            {cols},
+            (COALESCE(SUM(fp.mayo),0)+COALESCE(SUM(fp.junio),0)+
+             COALESCE(SUM(fp.julio),0)+COALESCE(SUM(fp.agosto),0)+
+             COALESCE(SUM(fp.septiembre),0)+COALESCE(SUM(fp.octubre),0)+
+             COALESCE(SUM(fp.noviembre),0)+COALESCE(SUM(fp.diciembre),0)+
+             COALESCE(SUM(fp.enero),0)+COALESCE(SUM(fp.febrero),0)+
+             COALESCE(SUM(fp.marzo),0)+COALESCE(SUM(fp.abril),0)) AS total_demanda
+        FROM forecast_proyecciones fp
+        LEFT JOIN clientes c ON c.clave = fp.clave_cliente
+        WHERE fp.periodo = %s
+        GROUP BY fp.sku, fp.clave_cliente, nombre_cliente
+        HAVING total_demanda > 0
+    """, (periodo,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    # 3. Agrupar por SKU y ordenar por prioridad
+    from collections import defaultdict
+    sku_clientes: dict = defaultdict(list)
+    for r in rows:
+        prio_info = _PRIORIDAD_MAP.get(r['clave_cliente'])
+        sku_clientes[r['sku']].append({
+            'clave_cliente':  r['clave_cliente'],
+            'nombre_cliente': r['nombre_cliente'],
+            'prioridad':      prio_info[0] if prio_info else 999,
+            'meses':          {m: int(r.get(m) or 0) for m in MESES_ORDEN},
+            'total_demanda':  int(r.get('total_demanda') or 0),
+        })
+    for sku in sku_clientes:
+        sku_clientes[sku].sort(
+            key=lambda x: (x['prioridad'], x['clave_cliente'])
+        )
+
+    # 4. Distribuir stock por SKU
+    resultado = []
+    for sku, info in sku_info.items():
+        if info['total_proyectado'] == 0 and info['total_disponible'] == 0:
+            continue
+
+        stock_restante = info['total_disponible']
+        clientes_dist  = sku_clientes.get(sku, [])
+        distribuciones = []
+
+        for cliente in clientes_dist:
+            asignado      = 0
+            detalle_meses = []
+
+            for mes in MESES_ORDEN:
+                demanda = cliente['meses'].get(mes, 0)
+                if demanda == 0:
+                    continue
+                asig_mes = min(demanda, max(0, stock_restante))
+                stock_restante -= asig_mes
+                asignado       += asig_mes
+                detalle_meses.append({
+                    'mes':      mes,
+                    'demanda':  demanda,
+                    'asignado': asig_mes,
+                    'pendiente': demanda - asig_mes,
+                })
+
+            distribuciones.append({
+                'clave_cliente':  cliente['clave_cliente'],
+                'nombre_cliente': cliente['nombre_cliente'],
+                'prioridad':      cliente['prioridad'],
+                'total_demanda':  cliente['total_demanda'],
+                'asignado':       asignado,
+                'pendiente':      cliente['total_demanda'] - asignado,
+                'detalle_meses':  detalle_meses,
+            })
+
+        resultado.append({
+            'sku':               sku,
+            'producto':          info.get('producto', sku),
+            'odoo_disponible':   info['odoo_disponible'],
+            'cantidad_entrante': info['cantidad_entrante'],
+            'total_disponible':  info['total_disponible'],
+            'total_proyectado':  info['total_proyectado'],
+            'stock_restante':    max(0, stock_restante),
+            'distribuciones':    distribuciones,
+        })
+
+    resultado.sort(key=lambda x: (x['total_disponible'] == 0, x['sku']))
+    return resultado
+
+
 @proyecciones_my27_bp.route('/cobertura-megamo', methods=['GET'])
 def get_cobertura_megamo():
     """
@@ -1420,4 +1566,20 @@ def exportar_cobertura():
 
     except Exception as e:
         logging.exception('[proyecciones_my27] exportar_cobertura error: %s', e)
+        return jsonify({'error': str(e)}), 500
+
+
+@proyecciones_my27_bp.route('/distribucion-prioritaria', methods=['GET'])
+def get_distribucion_prioritaria():
+    """
+    GET /proyecciones-my27/distribucion-prioritaria?periodo=2026-2027
+    Distribución FIFO del stock disponible (Odoo + entrante) a clientes
+    en orden de prioridad definido en PRIORIDAD_CLIENTES.
+    """
+    periodo = request.args.get('periodo', '2026-2027').strip()
+    try:
+        result = _compute_distribucion_prioritaria(periodo)
+        return jsonify({'periodo': periodo, 'distribuciones': result}), 200
+    except Exception as e:
+        logging.exception('[distribucion_prioritaria] error: %s', e)
         return jsonify({'error': str(e)}), 500
