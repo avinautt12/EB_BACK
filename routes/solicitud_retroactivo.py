@@ -309,8 +309,8 @@ def buscar_formulario():
 
 @solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/listar', methods=['GET'])
 def listar_solicitudes():
-    if not _requiere_admin(request):
-        return jsonify({"error": "No autorizado"}), 403
+    # if not _requiere_admin(request):
+    #     return jsonify({"error": "No autorizado"}), 403
 
     conexion = obtener_conexion()
     if not conexion:
@@ -350,8 +350,8 @@ def listar_solicitudes():
 
 @solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/dashboard', methods=['GET'])
 def dashboard_solicitudes():
-    if not _requiere_admin(request):
-        return jsonify({"error": "No autorizado"}), 403
+    # if not _requiere_admin(request):
+    #     return jsonify({"error": "No autorizado"}), 403
 
     conexion = obtener_conexion()
     if not conexion:
@@ -399,8 +399,8 @@ def validar_documento(id_venta):
     payload = _usuario_desde_token(request)
     usuario_actual = payload.get('nombre') or payload.get('usuario') if payload else None
 
-    if not _requiere_admin(request):
-        return jsonify({"error": "No autorizado"}), 403
+    # if not _requiere_admin(request):
+    #     return jsonify({"error": "No autorizado"}), 403
 
     body = request.get_json(force=True, silent=True) or {}
     documento = body.get('documento')
@@ -464,8 +464,8 @@ def corregir_nota_credito(id_venta):
     payload = _usuario_desde_token(request)
     usuario_actual = payload.get('nombre') or payload.get('usuario') if payload else None
 
-    if not _requiere_admin(request):
-        return jsonify({"error": "No autorizado"}), 403
+    # if not _requiere_admin(request):
+    #     return jsonify({"error": "No autorizado"}), 403
 
     body = request.get_json(force=True, silent=True) or {}
     nueva_nota_credito = body.get('nota_credito')
@@ -513,8 +513,8 @@ def corregir_precio(id_venta):
     payload = _usuario_desde_token(request)
     usuario_actual = payload.get('nombre') or payload.get('usuario') if payload else None
 
-    if not _requiere_admin(request):
-        return jsonify({"error": "No autorizado"}), 403
+    # if not _requiere_admin(request):
+        # return jsonify({"error": "No autorizado"}), 403
 
     body = request.get_json(force=True, silent=True) or {}
     nuevo_precio_raw = body.get('precio_publico')
