@@ -1092,7 +1092,7 @@ def _get_odoo_prices_for_skus(refs: list) -> dict:
         prods = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
             'product.product', 'search_read',
             [[['default_code', 'in', refs]]],
-            {'fields': ['id', 'default_code', 'lst_price', 'product_tmpl_id'], 'limit': 0}
+            {'fields': ['id', 'default_code', 'lst_price', 'product_tmpl_id']}
         )
         prod_id_by_ref = {}
         tmpl_id_by_ref = {}
@@ -1152,8 +1152,7 @@ def _get_odoo_prices_for_skus(refs: list) -> dict:
                 ]],
                 {'fields': ['applied_on', 'product_id', 'product_tmpl_id',
                             'compute_price', 'fixed_price', 'percent_price',
-                            'price_discount', 'price_surcharge'],
-                 'limit': 0}
+                            'price_discount', 'price_surcharge']}
             )
             for ref in refs:
                 if ref not in result:
@@ -1215,27 +1214,24 @@ def _get_single_pricelist_prices(pricelist_id: int, refs: list) -> dict:
         prods = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
             'product.product', 'search_read',
             [[['default_code', 'in', refs]]],
-            {'fields': ['id', 'default_code', 'lst_price', 'product_tmpl_id'], 'limit': 0}
+            {'fields': ['id', 'default_code', 'lst_price', 'product_tmpl_id']}
         )
-        # Usar sets para manejar SKUs duplicados en Odoo (mismo default_code, dos product.product)
-        prod_ids_by_ref:  dict = {}  # ref → set of all product IDs
-        tmpl_ids_by_ref:  dict = {}  # ref → set of all template IDs
-        list_price_by_ref: dict = {}
+        prod_id_by_ref    = {}
+        tmpl_id_by_ref    = {}
+        list_price_by_ref = {}
         for p in prods:
             ref = (p.get('default_code') or '').strip()
             if ref in result:
-                prod_ids_by_ref.setdefault(ref, set()).add(p['id'])
-                lst = float(p.get('lst_price') or 0.0)
-                if lst > list_price_by_ref.get(ref, 0.0):
-                    list_price_by_ref[ref] = lst   # conservar el lst_price más alto
+                prod_id_by_ref[ref]    = p['id']
+                list_price_by_ref[ref] = float(p.get('lst_price') or 0.0)
                 if p.get('product_tmpl_id'):
-                    tmpl_ids_by_ref.setdefault(ref, set()).add(p['product_tmpl_id'][0])
+                    tmpl_id_by_ref[ref] = p['product_tmpl_id'][0]
 
-        if not prod_ids_by_ref:
+        if not prod_id_by_ref:
             return result
 
-        all_prod_ids = list({pid for ids in prod_ids_by_ref.values() for pid in ids})
-        all_tmpl_ids = list({tid for ids in tmpl_ids_by_ref.values() for tid in ids})
+        all_prod_ids = list(prod_id_by_ref.values())
+        all_tmpl_ids = list(set(tmpl_id_by_ref.values()))
         PRIORITY = {'0_product_variant': 0, '1_product': 1,
                     '2_product_category': 2, '3_global': 3}
 
@@ -1251,15 +1247,14 @@ def _get_single_pricelist_prices(pricelist_id: int, refs: list) -> dict:
             ]],
             {'fields': ['applied_on', 'product_id', 'product_tmpl_id',
                         'compute_price', 'fixed_price', 'percent_price',
-                        'price_discount', 'price_surcharge'],
-             'limit': 0}
+                        'price_discount', 'price_surcharge']}
         )
 
         for ref in refs:
-            prod_ids   = prod_ids_by_ref.get(ref, set())
-            tmpl_ids   = tmpl_ids_by_ref.get(ref, set())
+            prod_id    = prod_id_by_ref.get(ref)
+            tmpl_id    = tmpl_id_by_ref.get(ref)
             list_price = list_price_by_ref.get(ref, 0.0)
-            if not prod_ids:
+            if not prod_id:
                 continue
             best_item, best_prio = None, 999
             for item in items:
@@ -1268,10 +1263,10 @@ def _get_single_pricelist_prices(pricelist_id: int, refs: list) -> dict:
                     continue
                 ao = item.get('applied_on')
                 if ao == '0_product_variant':
-                    if not item.get('product_id') or item['product_id'][0] not in prod_ids:
+                    if not item.get('product_id') or item['product_id'][0] != prod_id:
                         continue
                 elif ao == '1_product':
-                    if not item.get('product_tmpl_id') or item['product_tmpl_id'][0] not in tmpl_ids:
+                    if not item.get('product_tmpl_id') or item['product_tmpl_id'][0] != tmpl_id:
                         continue
                 best_item, best_prio = item, prio
             if best_item:

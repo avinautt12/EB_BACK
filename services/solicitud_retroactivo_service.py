@@ -82,7 +82,7 @@ def listar_ventas(cursor):
             v.nombre_sucursal, v.correo_electronico, v.nombre_completo,
             v.fecha_venta, v.modelo_bicicleta, v.numero_serie,
             v.precio_publico, v.porcentaje, v.monto_pagar, v.monto_aplicar, v.nota_credito,
-            v.validacion_docs_json, v.historial_json,
+            v.validacion_docs_json, v.historial_json, {ANIO_MODELO_SQL} AS anio_modelo,
             v.ticket_compra_key, v.voucher_key, v.factura_pdf_key, v.factura_xml_key,
             v.fecha_registro
         FROM solicitud_retroactivo_venta v
