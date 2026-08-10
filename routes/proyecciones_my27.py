@@ -62,7 +62,7 @@ def _get_stock_disponible_odoo() -> dict:
     """
     global _STOCK_ODOO_CACHE
     now = time.time()
-    if _STOCK_ODOO_CACHE['data'] and (now - _STOCK_ODOO_CACHE['ts']) < _STOCK_ODOO_TTL:
+    if _STOCK_ODOO_CACHE['ts'] > 0.0 and (now - _STOCK_ODOO_CACHE['ts']) < _STOCK_ODOO_TTL:
         return _STOCK_ODOO_CACHE['data']
 
     try:
@@ -1101,36 +1101,36 @@ def get_inventario_megamo():
 
 def _compute_cobertura(periodo: str) -> list:
     """
-    Calcula el análisis FIFO de cobertura para un periodo dado.
-    Devuelve la lista de dicts de cobertura (o lista vacía si no hay inventario).
+    Calcula el análisis FIFO de cobertura para todos los SKUs de FORECAST_SKU_WHITELIST.
+    Cada SKU reporta:
+      - cantidad_entrante: stock subido por Excel (tabla forecast_inventario_megamo)
+      - odoo_disponible:   stock a la mano en Odoo (qty_on_hand - reserved)
+      - total_disponible:  suma de ambos (base para el FIFO)
+    Solo omite SKUs que no tienen proyecciones NI stock de ningún tipo.
     """
     conn = obtener_conexion()
     cur  = conn.cursor(dictionary=True)
 
-    # 1. Inventario entrante
+    # 1. Inventario entrante desde BD (puede estar vacío — no abortamos)
     cur.execute("""
         SELECT sku, cantidad, descripcion
         FROM forecast_inventario_megamo
         WHERE periodo = %s
     """, (periodo,))
     inventario_rows = cur.fetchall()
-    if not inventario_rows:
-        cur.close()
-        conn.close()
-        return []
-
     inventario = {r['sku']: r for r in inventario_rows}
-    skus_inv   = list(inventario.keys())
 
-    # 2. Proyecciones globales por SKU
-    proy_by_sku = {}
+    # 2. Stock disponible Odoo (cacheado 5 min)
+    odoo_stock = _get_stock_disponible_odoo()
+
+    # 3. Proyecciones globales por SKU — todos los SKUs del catálogo
+    skus_all = list(FORECAST_SKU_WHITELIST)
+    proy_by_sku: dict = {}
+
     monitor_cached = _redis_get(_rkey_my27(periodo))
-
     if monitor_cached:
         for art in monitor_cached.get('articulos', []):
             sku = art['sku']
-            if sku not in inventario:
-                continue
             proy_by_sku[sku] = {mes: art['meses'][mes]['cantidad'] for mes in MESES_ORDEN}
             proy_by_sku[sku]['sku']      = sku
             proy_by_sku[sku]['producto'] = art.get('producto', sku)
@@ -1138,44 +1138,65 @@ def _compute_cobertura(periodo: str) -> list:
         conn.close()
     else:
         cols_mes = ', '.join(f'COALESCE(SUM({m}), 0) AS {m}' for m in MESES_ORDEN)
+        ph = ','.join(['%s'] * len(skus_all))
         cur.execute(f"""
             SELECT fp.sku, {cols_mes}, MAX(fp.producto) AS producto
             FROM forecast_proyecciones fp
-            WHERE fp.periodo = %s AND fp.sku IN ({','.join(['%s']*len(skus_inv))})
+            WHERE fp.periodo = %s AND fp.sku IN ({ph})
             GROUP BY fp.sku
-        """, (periodo, *skus_inv))
+        """, (periodo, *skus_all))
         proyecciones_rows = cur.fetchall()
 
         if proyecciones_rows:
             skus_proy = [r['sku'] for r in proyecciones_rows]
+            ph2 = ','.join(['%s'] * len(skus_proy))
             cur.execute(f"""
                 SELECT referencia_interna, nombre_producto
                 FROM odoo_catalogo
-                WHERE referencia_interna IN ({','.join(['%s']*len(skus_proy))})
+                WHERE referencia_interna IN ({ph2})
             """, skus_proy)
-            nombres_odoo = {r['referencia_interna']: r['nombre_producto'] for r in cur.fetchall()}
+            nombres_odoo = {r['referencia_interna']: r['nombre_producto']
+                            for r in cur.fetchall()}
             for r in proyecciones_rows:
                 r['producto'] = nombres_odoo.get(r['sku']) or r.get('producto') or r['sku']
+
         cur.close()
         conn.close()
         proy_by_sku = {r['sku']: r for r in proyecciones_rows}
 
-    # 3. Calcular cobertura FIFO por SKU
+    # 4. Construir resultado para TODOS los SKUs
     resultado = []
-    for sku in skus_inv:
-        inv_rec  = inventario[sku]
+    for sku in skus_all:
+        inv_rec  = inventario.get(sku, {})
         proy_rec = proy_by_sku.get(sku)
-        cantidad_entrante = inv_rec['cantidad']
+
+        cantidad_entrante = int(inv_rec.get('cantidad', 0) or 0)
+        odoo_disponible   = int(odoo_stock.get(sku, 0))
+        total_disponible  = cantidad_entrante + odoo_disponible
+
+        # Omitir SKUs sin ningún tipo de stock NI proyección
+        if total_disponible == 0 and not proy_rec:
+            continue
+
+        # Nombre del producto: proyección → descripcion del Excel → sku
+        nombre_prod = (
+            (proy_rec.get('producto') if proy_rec else None)
+            or inv_rec.get('descripcion')
+            or sku
+        )
 
         if not proy_rec:
+            # Sin proyección pero tiene stock (Odoo o entrante)
             resultado.append({
-                'sku': sku,
-                'producto': inv_rec.get('descripcion') or sku,
+                'sku':               sku,
+                'producto':          nombre_prod,
                 'cantidad_entrante': cantidad_entrante,
-                'total_proyectado': 0,
-                'total_cubierto': 0,
-                'total_deficit': 0,
-                'sobrante': cantidad_entrante,
+                'odoo_disponible':   odoo_disponible,
+                'total_disponible':  total_disponible,
+                'total_proyectado':  0,
+                'total_cubierto':    0,
+                'total_deficit':     0,
+                'sobrante':          total_disponible,
                 'cobertura': [{
                     'mes': m, 'proyectado': 0, 'cubierto': 0,
                     'deficit': 0, 'estado': 'sin_demanda'
@@ -1183,8 +1204,9 @@ def _compute_cobertura(periodo: str) -> list:
             })
             continue
 
-        disponible = cantidad_entrante
-        cobertura_meses = []
+        # FIFO sobre total_disponible
+        disponible       = total_disponible
+        cobertura_meses  = []
         total_proyectado = 0
         total_cubierto   = 0
 
@@ -1200,9 +1222,9 @@ def _compute_cobertura(periodo: str) -> list:
                 continue
 
             if disponible >= proy_mes:
-                cubierto = proy_mes
+                cubierto   = proy_mes
                 disponible -= proy_mes
-                estado = 'completo'
+                estado     = 'completo'
             elif disponible > 0:
                 cubierto   = disponible
                 disponible = 0
@@ -1219,14 +1241,16 @@ def _compute_cobertura(periodo: str) -> list:
             })
 
         resultado.append({
-            'sku': sku,
-            'producto': proy_rec.get('producto') or inv_rec.get('descripcion') or sku,
+            'sku':               sku,
+            'producto':          nombre_prod,
             'cantidad_entrante': cantidad_entrante,
-            'total_proyectado': total_proyectado,
-            'total_cubierto': total_cubierto,
-            'total_deficit': total_proyectado - total_cubierto,
-            'sobrante': max(0, disponible),
-            'cobertura': cobertura_meses,
+            'odoo_disponible':   odoo_disponible,
+            'total_disponible':  total_disponible,
+            'total_proyectado':  total_proyectado,
+            'total_cubierto':    total_cubierto,
+            'total_deficit':     total_proyectado - total_cubierto,
+            'sobrante':          max(0, disponible),
+            'cobertura':         cobertura_meses,
         })
 
     resultado.sort(key=lambda x: (x['total_proyectado'] == 0, x['sku']))
