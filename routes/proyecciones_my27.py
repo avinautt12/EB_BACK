@@ -50,6 +50,71 @@ _MEGAMO_PRECIOS_TTL  = 300
 _ORDENES_CACHE: dict = {'data': {}, 'periodo': '', 'ts': 0.0}
 _ORDENES_TTL = 180  # 3 minutos
 
+_STOCK_ODOO_CACHE: dict = {'data': {}, 'ts': 0.0}
+_STOCK_ODOO_TTL = 300  # 5 minutos
+
+
+def _get_stock_disponible_odoo() -> dict:
+    """
+    Retorna {sku: disponible} donde disponible = max(0, qty_on_hand - reserved_quantity).
+    Solo considera ubicaciones internas (usage='internal').
+    Cacheado 5 minutos en memoria.
+    """
+    global _STOCK_ODOO_CACHE
+    now = time.time()
+    if _STOCK_ODOO_CACHE['data'] and (now - _STOCK_ODOO_CACHE['ts']) < _STOCK_ODOO_TTL:
+        return _STOCK_ODOO_CACHE['data']
+
+    try:
+        uid, models, err = get_odoo_models()
+        if not uid:
+            logging.warning('[stock_odoo] no se pudo conectar: %s', err)
+            return _STOCK_ODOO_CACHE['data']
+
+        skus = list(FORECAST_SKU_WHITELIST)
+
+        # Paso 1: IDs de variantes
+        prods = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'product.product', 'search_read',
+            [[['default_code', 'in', skus]]],
+            {'fields': ['id', 'default_code'], 'limit': 0})
+        prod_id_to_sku = {p['id']: (p.get('default_code') or '').strip()
+                          for p in prods}
+        prod_ids = list(prod_id_to_sku.keys())
+        if not prod_ids:
+            _STOCK_ODOO_CACHE = {'data': {}, 'ts': now}
+            return {}
+
+        # Paso 2: Quants en ubicaciones internas
+        quants = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'stock.quant', 'search_read',
+            [[['product_id', 'in', prod_ids],
+              ['location_id.usage', '=', 'internal']]],
+            {'fields': ['product_id', 'quantity', 'reserved_quantity'], 'limit': 0})
+
+        # Paso 3: Agregar por SKU
+        result: dict = {}
+        for q in quants:
+            raw_pid = q.get('product_id')
+            pid = raw_pid[0] if isinstance(raw_pid, list) else raw_pid
+            sku = prod_id_to_sku.get(pid)
+            if not sku:
+                continue
+            qty = max(0.0, float(q.get('quantity') or 0))
+            res = max(0.0, float(q.get('reserved_quantity') or 0))
+            disponible = max(0, int(qty - res))
+            result[sku] = result.get(sku, 0) + disponible
+
+        _STOCK_ODOO_CACHE = {'data': result, 'ts': now}
+        logging.info('[stock_odoo] %d SKUs con stock disponible en Odoo (>0: %d)',
+                     len(result), sum(1 for v in result.values() if v > 0))
+        return result
+
+    except Exception as e:
+        logging.warning('[stock_odoo] error: %s', e)
+        return _STOCK_ODOO_CACHE['data']
+
+
 # Mapeo nivel → pricelist ID en Odoo
 _NIVEL_TO_PL_ID: dict = {
     'Distribuidor':        13,
@@ -601,6 +666,7 @@ def listar():
             _COSTOS_CACHE['ts'] = 0.0
             _MEGAMO_PRECIOS_CACHE['ts'] = 0.0
             _ORDENES_CACHE['ts'] = 0.0
+            _STOCK_ODOO_CACHE['ts'] = 0.0
         else:
             cached = _redis_get(_rkey_my27(periodo))
             if cached is not None:
