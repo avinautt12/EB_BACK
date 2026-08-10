@@ -1307,31 +1307,33 @@ def _compute_distribucion_prioritaria(periodo: str) -> list:
 
     # 2. Demanda por cliente por SKU — solo clientes con al menos 1 unidad
     conn = obtener_conexion()
-    cur  = conn.cursor(dictionary=True)
-    cols = ', '.join(
-        f'COALESCE(SUM(fp.{m}), 0) AS {m}' for m in MESES_ORDEN
-    )
-    cur.execute(f"""
-        SELECT
-            fp.sku,
-            fp.clave_cliente,
-            COALESCE(c.nombre_cliente, fp.clave_cliente) AS nombre_cliente,
-            {cols},
-            (COALESCE(SUM(fp.mayo),0)+COALESCE(SUM(fp.junio),0)+
-             COALESCE(SUM(fp.julio),0)+COALESCE(SUM(fp.agosto),0)+
-             COALESCE(SUM(fp.septiembre),0)+COALESCE(SUM(fp.octubre),0)+
-             COALESCE(SUM(fp.noviembre),0)+COALESCE(SUM(fp.diciembre),0)+
-             COALESCE(SUM(fp.enero),0)+COALESCE(SUM(fp.febrero),0)+
-             COALESCE(SUM(fp.marzo),0)+COALESCE(SUM(fp.abril),0)) AS total_demanda
-        FROM forecast_proyecciones fp
-        LEFT JOIN clientes c ON c.clave = fp.clave_cliente
-        WHERE fp.periodo = %s
-        GROUP BY fp.sku, fp.clave_cliente, nombre_cliente
-        HAVING total_demanda > 0
-    """, (periodo,))
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
+    try:
+        cur  = conn.cursor(dictionary=True)
+        cols = ', '.join(
+            f'COALESCE(SUM(fp.{m}), 0) AS {m}' for m in MESES_ORDEN
+        )
+        cur.execute(f"""
+            SELECT
+                fp.sku,
+                fp.clave_cliente,
+                COALESCE(c.nombre_cliente, fp.clave_cliente) AS nombre_cliente,
+                {cols},
+                (COALESCE(SUM(fp.mayo),0)+COALESCE(SUM(fp.junio),0)+
+                 COALESCE(SUM(fp.julio),0)+COALESCE(SUM(fp.agosto),0)+
+                 COALESCE(SUM(fp.septiembre),0)+COALESCE(SUM(fp.octubre),0)+
+                 COALESCE(SUM(fp.noviembre),0)+COALESCE(SUM(fp.diciembre),0)+
+                 COALESCE(SUM(fp.enero),0)+COALESCE(SUM(fp.febrero),0)+
+                 COALESCE(SUM(fp.marzo),0)+COALESCE(SUM(fp.abril),0)) AS total_demanda
+            FROM forecast_proyecciones fp
+            LEFT JOIN clientes c ON c.clave = fp.clave_cliente
+            WHERE fp.periodo = %s
+            GROUP BY fp.sku, fp.clave_cliente, nombre_cliente
+            HAVING total_demanda > 0
+        """, (periodo,))
+        rows = cur.fetchall()
+        cur.close()
+    finally:
+        conn.close()
 
     # 3. Agrupar por SKU y ordenar por prioridad
     from collections import defaultdict
