@@ -50,7 +50,7 @@ PRIORIDAD_CLIENTES = [
     (9,  'GD380', 'Cycling Riding de Mexico SA de CV (Metepec)'),
     (10, 'HA433', 'Lucia Salazar Lopez'),
     (11, 'ID506', 'Angelica Osorio Gasperin'),
-    (12, '4e013', 'CHRISTIAN BOCCALETTI.'),
+    (12, '4E013', 'CHRISTIAN BOCCALETTI.'),
     (13, 'JE537', 'Christian Boccaletti.'),
     (14, 'LC625', 'Naruco S. A. de C. V. Arcos'),
     (15, 'LC626', 'Naruco S. A. de C. V. SJR'),
@@ -68,7 +68,7 @@ PRIORIDAD_CLIENTES = [
     (27, 'JC554', 'ZIRANDA MADRIGAL EUGENA'),
 ]
 # Lookup rápido: clave_cliente → (prioridad, nombre_canonical)
-_PRIORIDAD_MAP: dict = {clave: (prio, nombre)
+_PRIORIDAD_MAP: dict = {clave.strip().upper(): (prio, nombre)
                         for prio, clave, nombre in PRIORIDAD_CLIENTES}
 
 _MY27_R_TTL  = 600  # 10 min Redis — monitor completo
@@ -1142,62 +1142,63 @@ def _compute_cobertura(periodo: str) -> list:
       - odoo_disponible:   stock a la mano en Odoo (qty_on_hand - reserved)
       - total_disponible:  suma de ambos (base para el FIFO)
     Solo omite SKUs que no tienen proyecciones NI stock de ningún tipo.
+    Odoo stock se obtiene primero, antes de abrir la conexión MySQL.
     """
-    conn = obtener_conexion()
-    cur  = conn.cursor(dictionary=True)
-
-    # 1. Inventario entrante desde BD (puede estar vacío — no abortamos)
-    cur.execute("""
-        SELECT sku, cantidad, descripcion
-        FROM forecast_inventario_megamo
-        WHERE periodo = %s
-    """, (periodo,))
-    inventario_rows = cur.fetchall()
-    inventario = {r['sku']: r for r in inventario_rows}
-
-    # 2. Stock disponible Odoo (cacheado 5 min)
+    # 1. Stock disponible Odoo (cacheado 5 min) — hoisted before DB open
     odoo_stock = _get_stock_disponible_odoo()
 
-    # 3. Proyecciones globales por SKU — todos los SKUs del catálogo
-    skus_all = list(FORECAST_SKU_WHITELIST)
-    proy_by_sku: dict = {}
+    conn = obtener_conexion()
+    try:
+        cur = conn.cursor(dictionary=True)
 
-    monitor_cached = _redis_get(_rkey_my27(periodo))
-    if monitor_cached:
-        for art in monitor_cached.get('articulos', []):
-            sku = art['sku']
-            proy_by_sku[sku] = {mes: art['meses'][mes]['cantidad'] for mes in MESES_ORDEN}
-            proy_by_sku[sku]['sku']      = sku
-            proy_by_sku[sku]['producto'] = art.get('producto', sku)
-        cur.close()
-        conn.close()
-    else:
-        cols_mes = ', '.join(f'COALESCE(SUM({m}), 0) AS {m}' for m in MESES_ORDEN)
-        ph = ','.join(['%s'] * len(skus_all))
-        cur.execute(f"""
-            SELECT fp.sku, {cols_mes}, MAX(fp.producto) AS producto
-            FROM forecast_proyecciones fp
-            WHERE fp.periodo = %s AND fp.sku IN ({ph})
-            GROUP BY fp.sku
-        """, (periodo, *skus_all))
-        proyecciones_rows = cur.fetchall()
+        # 2. Inventario entrante desde BD (puede estar vacío — no abortamos)
+        cur.execute("""
+            SELECT sku, cantidad, descripcion
+            FROM forecast_inventario_megamo
+            WHERE periodo = %s
+        """, (periodo,))
+        inventario_rows = cur.fetchall()
+        inventario = {r['sku']: r for r in inventario_rows}
 
-        if proyecciones_rows:
-            skus_proy = [r['sku'] for r in proyecciones_rows]
-            ph2 = ','.join(['%s'] * len(skus_proy))
+        # 3. Proyecciones globales por SKU — todos los SKUs del catálogo
+        skus_all = list(FORECAST_SKU_WHITELIST)
+        proy_by_sku: dict = {}
+
+        monitor_cached = _redis_get(_rkey_my27(periodo))
+        if monitor_cached:
+            for art in monitor_cached.get('articulos', []):
+                sku = art['sku']
+                proy_by_sku[sku] = {mes: art['meses'][mes]['cantidad'] for mes in MESES_ORDEN}
+                proy_by_sku[sku]['sku']      = sku
+                proy_by_sku[sku]['producto'] = art.get('producto', sku)
+            # no explicit cur/conn close here — finally handles it
+        else:
+            cols_mes = ', '.join(f'COALESCE(SUM({m}), 0) AS {m}' for m in MESES_ORDEN)
+            ph = ','.join(['%s'] * len(skus_all))
             cur.execute(f"""
-                SELECT referencia_interna, nombre_producto
-                FROM odoo_catalogo
-                WHERE referencia_interna IN ({ph2})
-            """, skus_proy)
-            nombres_odoo = {r['referencia_interna']: r['nombre_producto']
-                            for r in cur.fetchall()}
-            for r in proyecciones_rows:
-                r['producto'] = nombres_odoo.get(r['sku']) or r.get('producto') or r['sku']
+                SELECT fp.sku, {cols_mes}, MAX(fp.producto) AS producto
+                FROM forecast_proyecciones fp
+                WHERE fp.periodo = %s AND fp.sku IN ({ph})
+                GROUP BY fp.sku
+            """, (periodo, *skus_all))
+            proyecciones_rows = cur.fetchall()
 
-        cur.close()
+            if proyecciones_rows:
+                skus_proy = [r['sku'] for r in proyecciones_rows]
+                ph2 = ','.join(['%s'] * len(skus_proy))
+                cur.execute(f"""
+                    SELECT referencia_interna, nombre_producto
+                    FROM odoo_catalogo
+                    WHERE referencia_interna IN ({ph2})
+                """, skus_proy)
+                nombres_odoo = {r['referencia_interna']: r['nombre_producto']
+                                for r in cur.fetchall()}
+                for r in proyecciones_rows:
+                    r['producto'] = nombres_odoo.get(r['sku']) or r.get('producto') or r['sku']
+
+            proy_by_sku = {r['sku']: r for r in proyecciones_rows}
+    finally:
         conn.close()
-        proy_by_sku = {r['sku']: r for r in proyecciones_rows}
 
     # 4. Construir resultado para TODOS los SKUs
     resultado = []
@@ -1339,7 +1340,7 @@ def _compute_distribucion_prioritaria(periodo: str) -> list:
     from collections import defaultdict
     sku_clientes: dict = defaultdict(list)
     for r in rows:
-        prio_info = _PRIORIDAD_MAP.get(r['clave_cliente'])
+        prio_info = _PRIORIDAD_MAP.get((r['clave_cliente'] or '').strip().upper())
         sku_clientes[r['sku']].append({
             'clave_cliente':  r['clave_cliente'],
             'nombre_cliente': r['nombre_cliente'],
@@ -1463,7 +1464,7 @@ def exportar_cobertura():
         brd  = Border(left=thin, right=thin, top=thin, bottom=thin)
 
         # ── Cabecera ──
-        fixed_cols = ['SKU', 'Producto', 'Inventario']
+        fixed_cols = ['SKU', 'Producto', 'Odoo disp.', 'Entrante', 'Total disp.']
         mes_labels = MESES_LABEL  # 12 meses
         tail_cols  = ['Total Proyectado', 'Total Cubierto', 'Déficit', 'Sobrante', 'Estado']
         headers    = fixed_cols + mes_labels + tail_cols
@@ -1487,7 +1488,9 @@ def exportar_cobertura():
             row_vals = [
                 sku_data['sku'],
                 sku_data.get('producto', ''),
+                sku_data.get('odoo_disponible', 0),
                 sku_data['cantidad_entrante'],
+                sku_data.get('total_disponible', 0),
             ]
             for mes in MESES_ORDEN:
                 mc = next((c for c in sku_data['cobertura'] if c['mes'] == mes), None)
@@ -1525,9 +1528,13 @@ def exportar_cobertura():
                 elif col_idx == 2:  # Producto
                     cell.font = F_MUTED
                     cell.alignment = AL_L
-                elif col_idx == 3:  # Inventario
+                elif col_idx == 3:  # Odoo disp.
                     cell.font = F_WHITE
-                elif col_idx in range(4, 4 + 12):  # Meses
+                elif col_idx == 4:  # Entrante
+                    cell.font = F_WHITE
+                elif col_idx == 5:  # Total disp.
+                    cell.font = Font(color='EB5E28', bold=True, size=9)
+                elif col_idx in range(6, 6 + 12):  # Meses
                     v = cell.value or 0
                     cell.font = (F_NORMAL if v == 0 else
                                  Font(color='FFFCF2', size=9))
@@ -1545,10 +1552,12 @@ def exportar_cobertura():
         # Anchos de columna
         ws.column_dimensions[get_column_letter(1)].width = 16   # SKU
         ws.column_dimensions[get_column_letter(2)].width = 30   # Producto
-        ws.column_dimensions[get_column_letter(3)].width = 13   # Inventario
-        for c in range(4, 4 + 12):
+        ws.column_dimensions[get_column_letter(3)].width = 11   # Odoo disp.
+        ws.column_dimensions[get_column_letter(4)].width = 11   # Entrante
+        ws.column_dimensions[get_column_letter(5)].width = 11   # Total disp.
+        for c in range(6, 6 + 12):
             ws.column_dimensions[get_column_letter(c)].width = 8
-        for c in range(4 + 12, len(headers) + 1):
+        for c in range(6 + 12, len(headers) + 1):
             ws.column_dimensions[get_column_letter(c)].width = 15
 
         ws.row_dimensions[1].height = 22
