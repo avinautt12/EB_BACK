@@ -362,12 +362,14 @@ def dashboard_solicitudes():
         por_campana = data.obtener_dashboard_por_campana(cursor)
         por_cliente = data.obtener_dashboard_por_cliente(cursor)
         por_anio_modelo = data.obtener_dashboard_por_anio_modelo(cursor)
+        por_producto = data.obtener_dashboard_por_producto(cursor)
 
         return jsonify({
             "totales_generales": totales_generales,
             "por_campana": por_campana,
             "por_cliente": por_cliente,
-            "por_anio_modelo": por_anio_modelo
+            "por_anio_modelo": por_anio_modelo,
+            "por_producto": por_producto
         }), 200
 
     except Exception as e:
