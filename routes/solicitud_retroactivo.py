@@ -78,15 +78,8 @@ def _parsear_historial(raw):
         return []
 
 
-def _entrada_historial(tipo, descripcion, usuario=None):
-    entrada = {
-        "fecha": datetime.now().isoformat(),
-        "tipo": tipo,
-        "descripcion": descripcion
-    }
-    if usuario:
-        entrada["usuario"] = usuario
-    return entrada
+def _entrada_historial(tipo, descripcion):
+    return {"fecha": datetime.now().isoformat(), "tipo": tipo, "descripcion": descripcion}
 
 
 # GUÍA: validación por archivo, no por solicitud completa -- si el admin
@@ -121,9 +114,6 @@ def registrar_venta():
             "error": "Campos de texto faltantes",
             "campos": faltantes
         }), 400
-
-    usuario_actual = _usuario_desde_token(request)
-    nombre_usuario = usuario_actual.get('nombre') or usuario_actual.get('usuario') if usuario_actual else None
 
     # 2. Validar que los archivos obligatorios estén presentes (PDF y XML son opcionales)
     for key_archivo in ARCHIVOS_REQUERIDOS.keys():
@@ -226,11 +216,7 @@ def registrar_venta():
         if nueva:
             data.guardar_historial_inicial(
                 cursor, nueva['id'],
-                json.dumps([_entrada_historial(
-                    'creacion',
-                    'Solicitud registrada',
-                    nombre_usuario
-                )])
+                json.dumps([_entrada_historial('creacion', 'Solicitud registrada')])
             )
             conexion.commit()
 
@@ -396,9 +382,6 @@ def dashboard_solicitudes():
 
 @solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/validar-documento/<int:id_venta>', methods=['POST'])
 def validar_documento(id_venta):
-    payload = _usuario_desde_token(request)
-    usuario_actual = payload.get('nombre') or payload.get('usuario') if payload else None
-
     # if not _requiere_admin(request):
     #     return jsonify({"error": "No autorizado"}), 403
 
@@ -427,11 +410,7 @@ def validar_documento(id_venta):
         etiqueta_doc = ARCHIVOS_REQUERIDOS[documento]
         etiqueta_estatus = 'validado' if estatus_doc == 'valido' else 'rechazado'
         historial = _parsear_historial(fila['historial_json'])
-        historial.append(_entrada_historial(
-            'validacion',
-            f"{etiqueta_doc}: {etiqueta_estatus}",
-            usuario_actual
-        ))
+        historial.append(_entrada_historial('validacion', f"{etiqueta_doc}: {etiqueta_estatus}"))
 
         data.actualizar_validacion_documento(cursor, id_venta, json.dumps(validacion_docs), json.dumps(historial))
         conexion.commit()
@@ -461,9 +440,6 @@ def validar_documento(id_venta):
 # mismo porcentaje ya guardado (el % depende del plan MSI, no del precio).
 @solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/nota-credito/<int:id_venta>', methods=['POST'])
 def corregir_nota_credito(id_venta):
-    payload = _usuario_desde_token(request)
-    usuario_actual = payload.get('nombre') or payload.get('usuario') if payload else None
-
     # if not _requiere_admin(request):
     #     return jsonify({"error": "No autorizado"}), 403
 
@@ -484,9 +460,7 @@ def corregir_nota_credito(id_venta):
 
         historial = _parsear_historial(fila['historial_json'])
         historial.append(_entrada_historial(
-            'nota_credito',
-            f"Nota de crédito corregida de {fila['nota_credito']} a {nueva_nota_credito}",
-            usuario_actual
+            'nota_credito', f"Nota de crédito corregida de ${fila['nota_credito']} a ${nueva_nota_credito}"
         ))
 
         data.actualizar_nota_credito(cursor, id_venta, nueva_nota_credito, json.dumps(historial))
@@ -496,7 +470,6 @@ def corregir_nota_credito(id_venta):
             "ok": True,
             "id": id_venta,
             "nota_credito": str(nueva_nota_credito),
-            "historial": historial
         }), 200
 
     except Exception as e:
@@ -510,11 +483,8 @@ def corregir_nota_credito(id_venta):
 
 @solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/precio/<int:id_venta>', methods=['POST'])
 def corregir_precio(id_venta):
-    payload = _usuario_desde_token(request)
-    usuario_actual = payload.get('nombre') or payload.get('usuario') if payload else None
-
     # if not _requiere_admin(request):
-        # return jsonify({"error": "No autorizado"}), 403
+    #     return jsonify({"error": "No autorizado"}), 403
 
     body = request.get_json(force=True, silent=True) or {}
     nuevo_precio_raw = body.get('precio_publico')
@@ -543,9 +513,7 @@ def corregir_precio(id_venta):
 
         historial = _parsear_historial(fila['historial_json'])
         historial.append(_entrada_historial(
-            'precio',
-            f"Precio corregido de ${fila['precio_publico']} a ${nuevo_precio}",
-            usuario_actual
+            'precio', f"Precio corregido de ${fila['precio_publico']} a ${nuevo_precio}"
         ))
 
         data.actualizar_precio(cursor, id_venta, nuevo_precio, monto, monto, json.dumps(historial))
@@ -556,8 +524,7 @@ def corregir_precio(id_venta):
             "id": id_venta,
             "precio_publico": str(nuevo_precio),
             "monto_pagar": str(monto),
-            "monto_aplicar": str(monto),
-            "historial": historial
+            "monto_aplicar": str(monto)
         }), 200
 
     except Exception as e:
@@ -618,7 +585,6 @@ def mis_solicitudes():
 @solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/venta/<int:id_venta>', methods=['PUT'])
 def editar_venta(id_venta):
     payload = _usuario_desde_token(request)
-    usuario_actual = payload.get('nombre') or payload.get('usuario') if payload else None
     if not payload:
         return jsonify({"error": "No autorizado"}), 401
 
@@ -727,11 +693,7 @@ def editar_venta(id_venta):
             validacion_docs.pop(key_archivo, None)
 
         etiquetas_resubidas = ', '.join(ARCHIVOS_REQUERIDOS[k] for k in docs_a_resubir)
-        historial.append(_entrada_historial(
-            'reenvio',
-            f"Cliente reenvió: {etiquetas_resubidas}",
-            usuario_actual
-        ))
+        historial.append(_entrada_historial('reenvio', f"Cliente reenvió: {etiquetas_resubidas}"))
 
         columnas_archivo = ', '.join(f"{k}_key = %s" for k in docs_a_resubir)
         valores_archivo = [keys_archivos[k] for k in docs_a_resubir]
