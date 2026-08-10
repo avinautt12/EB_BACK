@@ -441,7 +441,7 @@ def validar_documento(id_venta):
 @solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/nota-credito/<int:id_venta>', methods=['POST'])
 def corregir_nota_credito(id_venta):
     # if not _requiere_admin(request):
-    #     return jsonify({"error": "No autorizado"}), 403
+    # return jsonify({"error": "No autorizado"}), 403
 
     body = request.get_json(force=True, silent=True) or {}
     nueva_nota_credito = body.get('nota_credito')
