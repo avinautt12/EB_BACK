@@ -1561,7 +1561,7 @@ def exportar_cobertura():
             ws.column_dimensions[get_column_letter(c)].width = 15
 
         ws.row_dimensions[1].height = 22
-        ws.freeze_panes = 'D2'
+        ws.freeze_panes = 'F2'
 
         buf = io.BytesIO()
         wb.save(buf)
