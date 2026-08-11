@@ -99,27 +99,22 @@ def _calcular_estatus(validacion_docs):
 def registrar_venta():
     # 1. Recuperar los campos del formulario
     campos_obligatorios = [
-        'id_usuario', 'id_formulario', 'id_msi', 'nombre_sucursal',
-        'correo_electronico', 'nombre_completo', 'fecha_venta',
+        'id_usuario', 'id_formulario', 'id_msi',
+        'correo_electronico', 'fecha_venta',
         'modelo_bicicleta', 'numero_serie', 'precio_publico'
     ]
 
     datos = {campo: request.form.get(campo) for campo in campos_obligatorios}
     datos['id_marca_bicicleta'] = request.form.get('id_marca_bicicleta')
-
-    # Validar que ningún campo obligatorio esté vacío
-    faltantes = [campo for campo, valor in datos.items() if campo in campos_obligatorios and not valor]
-    if faltantes:
-        return jsonify({
-            "error": "Campos de texto faltantes",
-            "campos": faltantes
-        }), 400
+    datos['id_cliente'] = request.form.get('id_cliente')
+    datos['id_tienda'] = request.form.get('id_tienda')
+    datos['nombre_completo'] = request.form.get('nombre_completo')
+    datos['nombre_sucursal'] = request.form.get('nombre_sucursal')
 
     # 2. Validar que los archivos obligatorios estén presentes (PDF y XML son opcionales)
     for key_archivo in ARCHIVOS_REQUERIDOS.keys():
         file = request.files.get(key_archivo)
 
-        # Si es PDF o XML y no viene archivo, se permite omitirlo
         if key_archivo in ['factura_pdf', 'factura_xml']:
             if not file or not file.filename:
                 continue
@@ -133,12 +128,7 @@ def registrar_venta():
         if not allowed_file(file.filename):
             return jsonify({"error": f"Tipo de archivo no permitido para: {key_archivo}"}), 400
 
-    # 3. Subida de archivos a AWS S3 PRIMERO. GUÍA: antes, la key que se
-    # guardaba en BD se fabricaba a mano (f"retroactivos/{numero_serie}_...")
-    # y NUNCA era la key real que subir_archivo_s3 le da al objeto (esa usa
-    # UUID + AWS_S3_PREFIX). Cualquier venta registrada así quedaba con
-    # archivos huérfanos -- la key en BD no le pertenecía a ningún objeto en
-    # S3. Ahora se sube primero y se usa la key que S3 realmente asignó.
+    # 3. Subida de archivos a AWS S3 PRIMERO
     archivos_procesados = {}
     keys_archivos = {k: None for k in ARCHIVOS_REQUERIDOS.keys()}
 
@@ -162,7 +152,7 @@ def registrar_venta():
         logging.exception("Error al subir archivos a S3: %s", e)
         return jsonify({"error": "Ocurrió un error al subir los archivos."}), 500
 
-    # 4. Operaciones de Base de Datos, ya con las keys reales de S3
+    # 4. Operaciones de Base de Datos
     conexion = obtener_conexion()
     if not conexion:
         return jsonify({"error": "No se pudo conectar a la base de datos."}), 500
@@ -170,22 +160,39 @@ def registrar_venta():
     cursor = conexion.cursor(dictionary=True, buffered=True)
 
     try:
+        # Resolver nombre_completo y nombre_sucursal si se enviaron IDs de cliente/tienda
+        if datos.get('id_cliente') or datos.get('id_tienda'):
+            nom_cli, nom_suc = data.obtener_nombres_cliente_y_tienda(cursor, datos.get('id_cliente'), datos.get('id_tienda'))
+            if nom_cli:
+                datos['nombre_completo'] = nom_cli
+            if nom_suc:
+                datos['nombre_sucursal'] = nom_suc
+
+        if not datos.get('nombre_completo'):
+            datos['nombre_completo'] = request.form.get('nombre_completo') or 'Cliente'
+        if not datos.get('nombre_sucursal'):
+            datos['nombre_sucursal'] = request.form.get('nombre_sucursal') or 'Matriz'
+
+        faltantes = [campo for campo, valor in datos.items() if campo in campos_obligatorios and not valor]
+        if faltantes:
+            return jsonify({
+                "error": "Campos de texto faltantes",
+                "campos": faltantes
+            }), 400
+
         raw_marca = datos.get('id_marca_bicicleta')
         id_marca = int(raw_marca) if raw_marca and str(raw_marca).isdigit() else None
 
-        # Consulta del porcentaje desde la función SQL
         id_msi_seleccionado = int(datos['id_msi'])
         resultado = data.obtener_porcentaje_msi(cursor, id_msi_seleccionado)
 
         porcentaje_val = resultado['porcentaje'] if resultado and resultado['porcentaje'] is not None else 0
         porcentaje = Decimal(str(porcentaje_val))
 
-        # Cálculos numéricos
         precio_publico = Decimal(str(datos['precio_publico']).replace(',', ''))
         monto_pagar = (precio_publico * porcentaje) / Decimal(100)
         monto_aplicar = monto_pagar
 
-        # Parámetros para el Stored Procedure
         parametros = (
             int(datos['id_usuario']),
             int(datos['id_formulario']),
@@ -210,8 +217,6 @@ def registrar_venta():
         data.crear_venta(cursor, parametros)
         conexion.commit()
 
-        # numero_serie es UNIQUE, así se identifica la fila recién creada sin
-        # depender de que el SP regrese el id (no lo hace).
         nueva = data.obtener_id_por_numero_serie(cursor, datos['numero_serie'])
         if nueva:
             data.guardar_historial_inicial(
@@ -286,7 +291,47 @@ def buscar_formulario():
         return jsonify(datos), 200
 
     except Exception as e:
-        return jsonify({"error": "Error al consultar las marcas.", "detalle": str(e)}), 500
+        return jsonify({"error": "Error al consultar los formularios.", "detalle": str(e)}), 500
+
+    finally:
+        cursor.close()
+        conexion.close()
+
+
+@solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/razones-sociales', methods=['GET'])
+def buscar_razones_sociales():
+    conexion = obtener_conexion()
+    if not conexion:
+        return jsonify({"error": "No se pudo conectar a la base de datos."}), 500
+            
+    cursor = conexion.cursor(dictionary=True, buffered=True) 
+    
+    try:
+        datos = data.buscar_razones_sociales(cursor)
+        return jsonify(datos), 200
+
+    except Exception as e:
+        return jsonify({"error": "Error al consultar las razones sociales.", "detalle": str(e)}), 500
+
+    finally:
+        cursor.close()
+        conexion.close()
+
+
+@solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/tiendas/<int:cliente_id>', methods=['GET'])
+def buscar_tiendas(cliente_id):
+    conexion = obtener_conexion()
+    if not conexion:
+        return jsonify({"error": "No se pudo conectar a la base de datos."}), 500
+            
+    cursor = conexion.cursor(dictionary=True, buffered=True) 
+    
+    try:
+        datos = data.buscar_tiendas_por_cliente(cursor, cliente_id)
+        return jsonify(datos), 200
+
+    except Exception as e:
+        return jsonify({"error": "Error al consultar las tiendas.", "detalle": str(e)}), 500
 
     finally:
         cursor.close()
@@ -295,8 +340,8 @@ def buscar_formulario():
 
 @solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/listar', methods=['GET'])
 def listar_solicitudes():
-    # if not _requiere_admin(request):
-    #     return jsonify({"error": "No autorizado"}), 403
+    if not _requiere_admin(request):
+        return jsonify({"error": "No autorizado"}), 403
 
     conexion = obtener_conexion()
     if not conexion:
@@ -336,8 +381,8 @@ def listar_solicitudes():
 
 @solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/dashboard', methods=['GET'])
 def dashboard_solicitudes():
-    # if not _requiere_admin(request):
-    #     return jsonify({"error": "No autorizado"}), 403
+    if not _requiere_admin(request):
+        return jsonify({"error": "No autorizado"}), 403
 
     conexion = obtener_conexion()
     if not conexion:
@@ -382,8 +427,8 @@ def dashboard_solicitudes():
 
 @solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/validar-documento/<int:id_venta>', methods=['POST'])
 def validar_documento(id_venta):
-    # if not _requiere_admin(request):
-    #     return jsonify({"error": "No autorizado"}), 403
+    if not _requiere_admin(request):
+        return jsonify({"error": "No autorizado"}), 403
 
     body = request.get_json(force=True, silent=True) or {}
     documento = body.get('documento')
@@ -440,8 +485,8 @@ def validar_documento(id_venta):
 # mismo porcentaje ya guardado (el % depende del plan MSI, no del precio).
 @solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/nota-credito/<int:id_venta>', methods=['POST'])
 def corregir_nota_credito(id_venta):
-    # if not _requiere_admin(request):
-    # return jsonify({"error": "No autorizado"}), 403
+    if not _requiere_admin(request):
+        return jsonify({"error": "No autorizado"}), 403
 
     body = request.get_json(force=True, silent=True) or {}
     nueva_nota_credito = body.get('nota_credito')
@@ -483,8 +528,8 @@ def corregir_nota_credito(id_venta):
 
 @solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/precio/<int:id_venta>', methods=['POST'])
 def corregir_precio(id_venta):
-    # if not _requiere_admin(request):
-    #     return jsonify({"error": "No autorizado"}), 403
+    if not _requiere_admin(request):
+        return jsonify({"error": "No autorizado"}), 403
 
     body = request.get_json(force=True, silent=True) or {}
     nuevo_precio_raw = body.get('precio_publico')

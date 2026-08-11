@@ -74,6 +74,74 @@ def buscar_formulario(cursor):
     return datos
 
 
+def buscar_razones_sociales(cursor):
+    cursor.execute("""
+        SELECT DISTINCT c.id, c.nombre_cliente, c.clave
+        FROM clientes c
+        INNER JOIN usuarios u ON u.cliente_id = c.id
+        WHERE u.rol_id = 2
+          AND c.nombre_cliente IS NOT NULL
+          AND c.nombre_cliente != ''
+        ORDER BY c.nombre_cliente ASC
+    """)
+    datos = cursor.fetchall()
+    if not datos:
+        cursor.execute("""
+            SELECT DISTINCT c.id, c.nombre_cliente, c.clave
+            FROM clientes c
+            INNER JOIN usuarios u ON u.cliente_id = c.id
+            WHERE u.rol_id = 2
+            ORDER BY c.nombre_cliente ASC
+        """)
+        datos = cursor.fetchall()
+    return datos
+
+
+def asegurar_tabla_tiendas(cursor):
+    try:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tiendas (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                nombre VARCHAR(255) NOT NULL,
+                cliente_id INT NOT NULL,
+                KEY idx_cliente (cliente_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """)
+    except Exception:
+        pass
+
+
+def buscar_tiendas_por_cliente(cursor, cliente_id):
+    asegurar_tabla_tiendas(cursor)
+    cursor.execute("""
+        SELECT id, nombre, cliente_id
+        FROM tiendas
+        WHERE cliente_id = %s
+        ORDER BY nombre ASC
+    """, (cliente_id,))
+    return cursor.fetchall()
+
+
+def obtener_nombres_cliente_y_tienda(cursor, cliente_id, tienda_id):
+    nombre_cliente = None
+    nombre_sucursal = None
+
+    if cliente_id:
+        cursor.execute("SELECT nombre_cliente FROM clientes WHERE id = %s", (cliente_id,))
+        res_c = cursor.fetchone()
+        if res_c:
+            nombre_cliente = res_c.get('nombre_cliente')
+
+    if tienda_id:
+        asegurar_tabla_tiendas(cursor)
+        cursor.execute("SELECT nombre FROM tiendas WHERE id = %s", (tienda_id,))
+        res_t = cursor.fetchone()
+        if res_t:
+            nombre_sucursal = res_t.get('nombre')
+
+    return nombre_cliente, nombre_sucursal
+
+
 def listar_ventas(cursor):
     cursor.execute(f"""
         SELECT
