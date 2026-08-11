@@ -81,10 +81,17 @@ TRIMESTRES_DIST = [
 ]
 MESES_PASADOS_DIST: frozenset = frozenset(['mayo', 'junio', 'julio'])
 
-_MY27_R_TTL  = 600  # 10 min Redis — monitor completo
+_MY27_R_TTL     = 1800  # 30 min Redis — monitor completo
+_COBERTURA_R_TTL = 300  # 5 min Redis — cobertura inventario
+_STOCK_ODOO_R_TTL = 600  # 10 min Redis — stock Odoo (sobrevive restarts)
 
 def _rkey_my27(periodo: str) -> str:
     return f'proy_my27:{periodo}'
+
+def _rkey_cobertura(periodo: str) -> str:
+    return f'cobertura_megamo:{periodo}'
+
+_RKEY_STOCK_ODOO = 'stock_odoo:my27'
 
 _COSTOS_CACHE: dict = {'data': {}, 'ts': 0.0}
 _COSTOS_TTL = 300  # 5 minutos
@@ -103,12 +110,20 @@ def _get_stock_disponible_odoo() -> dict:
     """
     Retorna {sku: disponible} donde disponible = max(0, qty_on_hand - reserved_quantity).
     Solo considera ubicaciones internas (usage='internal').
-    Cacheado 5 minutos en memoria.
+    Caché doble: memoria (5 min) + Redis (10 min, sobrevive restarts de Flask).
     """
     global _STOCK_ODOO_CACHE
     now = time.time()
+
+    # 1. Memoria (más rápido)
     if _STOCK_ODOO_CACHE['ts'] > 0.0 and (now - _STOCK_ODOO_CACHE['ts']) < _STOCK_ODOO_TTL:
         return _STOCK_ODOO_CACHE['data']
+
+    # 2. Redis (sobrevive restarts)
+    cached = _redis_get(_RKEY_STOCK_ODOO)
+    if cached is not None:
+        _STOCK_ODOO_CACHE = {'data': cached, 'ts': now}
+        return cached
 
     try:
         uid, models, err = get_odoo_models()
@@ -138,8 +153,6 @@ def _get_stock_disponible_odoo() -> dict:
             {'fields': ['product_id', 'quantity', 'reserved_quantity'], 'limit': 0})
 
         # Paso 3: Agregar por SKU — sumar qty neta (incluyendo negativos) antes de max(0)
-        # Bug anterior: max(0, qty) por quant ignoraba quants negativas (ajustes de inventario)
-        # inflando el total. La suma neta por SKU es la correcta.
         totals: dict = {}
         for q in quants:
             raw_pid = q.get('product_id')
@@ -156,6 +169,7 @@ def _get_stock_disponible_odoo() -> dict:
             result[sku] = max(0, int(t['qty'] - t['res']))
 
         _STOCK_ODOO_CACHE = {'data': result, 'ts': now}
+        _redis_set(_RKEY_STOCK_ODOO, result, _STOCK_ODOO_R_TTL)
         logging.info('[stock_odoo] %d SKUs con stock disponible en Odoo (>0: %d)',
                      len(result), sum(1 for v in result.values() if v > 0))
         return result
@@ -1110,6 +1124,16 @@ def subir_inventario_megamo():
     cur.close()
     conn.close()
 
+    # Invalidar caché de cobertura para que el próximo GET recalcule con el nuevo inventario
+    try:
+        import redis as _redis_lib
+        import os as _os
+        _r = _redis_lib.Redis(host=_os.getenv('REDIS_HOST', 'localhost'),
+                              port=int(_os.getenv('REDIS_PORT', 6379)), db=0)
+        _r.delete(_rkey_cobertura(periodo))
+    except Exception:
+        pass
+
     return jsonify({
         'ok': True,
         'periodo': periodo,
@@ -1444,12 +1468,21 @@ def get_cobertura_megamo():
     """
     GET /proyecciones-my27/cobertura-megamo?periodo=2026-2027
     Devuelve análisis FIFO de cobertura: stock entrante vs proyecciones globales por SKU.
+    Cacheado 5 min en Redis para evitar recálculo en cada request.
     """
-    periodo  = request.args.get('periodo', '2026-2027').strip()
+    periodo = request.args.get('periodo', '2026-2027').strip()
+    rkey = _rkey_cobertura(periodo)
+
+    cached = _redis_get(rkey)
+    if cached is not None:
+        return jsonify({'periodo': periodo, 'cobertura': cached}), 200
+
     resultado = _compute_cobertura(periodo)
     if not resultado:
         return jsonify({'periodo': periodo, 'cobertura': [],
                         'mensaje': 'No hay inventario cargado para este periodo'}), 200
+
+    _redis_set(rkey, resultado, _COBERTURA_R_TTL)
     return jsonify({'periodo': periodo, 'cobertura': resultado}), 200
 
 
@@ -1626,4 +1659,109 @@ def get_distribucion_prioritaria():
         return jsonify({'periodo': periodo, 'distribuciones': result}), 200
     except Exception as e:
         logging.exception('[distribucion_prioritaria] error: %s', e)
+        return jsonify({'error': str(e)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /proyecciones-my27/generar-orden-odoo — crea pedido de venta en Odoo
+# ─────────────────────────────────────────────────────────────────────────────
+
+@proyecciones_my27_bp.route('/generar-orden-odoo', methods=['POST'])
+def generar_orden_odoo():
+    """
+    POST /proyecciones-my27/generar-orden-odoo
+    Body: {
+      "clave_cliente": "LC657",
+      "mes": "agosto",
+      "lineas": [{"sku": "286383-704", "cantidad": 5}, ...]
+    }
+    Crea un pedido de venta en Odoo con los productos seleccionados,
+    vinculando el partner por ref=clave_cliente y etiquetando el mes.
+    """
+    data = request.get_json(force=True) or {}
+    clave_cliente = (data.get('clave_cliente') or '').strip().upper()
+    mes           = (data.get('mes') or '').strip().lower()
+    lineas        = [l for l in (data.get('lineas') or []) if int(l.get('cantidad') or 0) > 0]
+
+    if not clave_cliente or not mes or not lineas:
+        return jsonify({'error': 'Se requieren clave_cliente, mes y al menos una línea con cantidad > 0'}), 400
+
+    try:
+        uid, models, err = get_odoo_models()
+        if not uid:
+            return jsonify({'error': f'No se pudo conectar a Odoo: {err}'}), 503
+
+        # 1. Partner por ref = clave_cliente
+        partners = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'res.partner', 'search_read',
+            [[['ref', '=', clave_cliente]]],
+            {'fields': ['id', 'name'], 'limit': 1})
+        if not partners:
+            return jsonify({'error': f'No se encontró contacto en Odoo con ref={clave_cliente}'}), 404
+        partner_id   = partners[0]['id']
+        partner_name = partners[0]['name']
+
+        # 2. Tag del mes — buscar o crear "Reserva Agosto" etc.
+        mes_label = f"Reserva {mes.capitalize()}"
+        existing_tags = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'crm.tag', 'search_read',
+            [[['name', '=', mes_label]]],
+            {'fields': ['id'], 'limit': 1})
+        tag_id = (existing_tags[0]['id'] if existing_tags
+                  else models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+                      'crm.tag', 'create', [{'name': mes_label}]))
+
+        # 3. product.product por default_code (SKU)
+        skus = [(l.get('sku') or '').strip() for l in lineas]
+        prods = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'product.product', 'search_read',
+            [[['default_code', 'in', skus]]],
+            {'fields': ['id', 'default_code', 'lst_price'], 'limit': 0})
+        sku_to_prod = {(p.get('default_code') or '').strip(): p for p in prods}
+
+        # 4. Construir order_line
+        order_lines      = []
+        skus_no_encontrados = []
+        for l in lineas:
+            sku      = (l.get('sku') or '').strip()
+            cantidad = int(l.get('cantidad') or 0)
+            prod     = sku_to_prod.get(sku)
+            if not prod:
+                skus_no_encontrados.append(sku)
+                continue
+            order_lines.append((0, 0, {
+                'product_id':      prod['id'],
+                'product_uom_qty': cantidad,
+                'price_unit':      float(prod.get('lst_price') or 0),
+            }))
+
+        if not order_lines:
+            return jsonify({'error': 'Ningún SKU fue encontrado en el catálogo de Odoo'}), 400
+
+        # 5. Crear sale.order
+        order_vals = {
+            'partner_id': partner_id,
+            'tag_ids':    [(4, tag_id)],
+            'note':       f'RESERVA MY27 — {mes.upper()} — {clave_cliente}',
+            'order_line': order_lines,
+        }
+        order_id = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'sale.order', 'create', [order_vals])
+
+        order_name = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'sale.order', 'read', [[order_id]], {'fields': ['name']})[0]['name']
+
+        logging.info('[generar_orden] %s para %s (%s) mes=%s — %d líneas',
+                     order_name, partner_name, clave_cliente, mes, len(order_lines))
+
+        return jsonify({
+            'order_id':            order_id,
+            'order_name':          order_name,
+            'partner_name':        partner_name,
+            'lineas_creadas':      len(order_lines),
+            'skus_no_encontrados': skus_no_encontrados,
+        }), 200
+
+    except Exception as e:
+        logging.exception('[generar_orden] error: %s', e)
         return jsonify({'error': str(e)}), 500
