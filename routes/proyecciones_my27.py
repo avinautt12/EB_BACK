@@ -71,6 +71,16 @@ PRIORIDAD_CLIENTES = [
 _PRIORIDAD_MAP: dict = {clave.strip().upper(): (prio, nombre)
                         for prio, clave, nombre in PRIORIDAD_CLIENTES}
 
+# Reserva trimestre-mayor: el stock disponible se asigna primero al Q más próximo.
+# Mayo/Jun/Jul son meses ya despachados — aparecen en el modal como informativos
+# pero no consumen del pool actual de reserva.
+TRIMESTRES_DIST = [
+    ['agosto', 'septiembre', 'octubre'],
+    ['noviembre', 'diciembre', 'enero'],
+    ['febrero', 'marzo', 'abril'],
+]
+MESES_PASADOS_DIST: frozenset = frozenset(['mayo', 'junio', 'julio'])
+
 _MY27_R_TTL  = 600  # 10 min Redis — monitor completo
 
 def _rkey_my27(periodo: str) -> str:
@@ -1353,7 +1363,7 @@ def _compute_distribucion_prioritaria(periodo: str) -> list:
             key=lambda x: (x['prioridad'], x['clave_cliente'])
         )
 
-    # 4. Distribuir stock por SKU
+    # 4. Distribuir stock por SKU — algoritmo trimestre-mayor, cliente-mayor dentro de cada Q
     resultado = []
     for sku, info in sku_info.items():
         if info['total_proyectado'] == 0 and info['total_disponible'] == 0:
@@ -1361,33 +1371,51 @@ def _compute_distribucion_prioritaria(periodo: str) -> list:
 
         stock_restante = info['total_disponible']
         clientes_dist  = sku_clientes.get(sku, [])
-        distribuciones = []
 
+        # Mapa de asignación: clave_cliente → mes → unidades asignadas
+        asig_map: dict = {
+            c['clave_cliente']: {m: 0 for m in MESES_ORDEN}
+            for c in clientes_dist
+        }
+
+        # Reserva Q1 → Q2 → Q3 en orden de prioridad por cliente
+        for trimestre_meses in TRIMESTRES_DIST:
+            for cliente in clientes_dist:  # ya ordenados por prioridad
+                for mes in trimestre_meses:
+                    demanda = cliente['meses'].get(mes, 0)
+                    if demanda == 0 or stock_restante <= 0:
+                        continue
+                    alloc = min(demanda, stock_restante)
+                    asig_map[cliente['clave_cliente']][mes] = alloc
+                    stock_restante -= alloc
+
+        # Construir distribuciones con detalle por mes
+        distribuciones = []
         for cliente in clientes_dist:
-            asignado      = 0
-            detalle_meses = []
+            clave          = cliente['clave_cliente']
+            asig_cte       = asig_map[clave]
+            total_asignado = sum(asig_cte.values())
+            detalle_meses  = []
 
             for mes in MESES_ORDEN:
                 demanda = cliente['meses'].get(mes, 0)
                 if demanda == 0:
                     continue
-                asig_mes = min(demanda, max(0, stock_restante))
-                stock_restante -= asig_mes
-                asignado       += asig_mes
                 detalle_meses.append({
                     'mes':      mes,
                     'demanda':  demanda,
-                    'asignado': asig_mes,
-                    'pendiente': demanda - asig_mes,
+                    'asignado': asig_cte[mes],
+                    'pendiente': demanda - asig_cte[mes],
+                    'pasado':   mes in MESES_PASADOS_DIST,
                 })
 
             distribuciones.append({
-                'clave_cliente':  cliente['clave_cliente'],
+                'clave_cliente':  clave,
                 'nombre_cliente': cliente['nombre_cliente'],
                 'prioridad':      cliente['prioridad'],
                 'total_demanda':  cliente['total_demanda'],
-                'asignado':       asignado,
-                'pendiente':      cliente['total_demanda'] - asignado,
+                'asignado':       total_asignado,
+                'pendiente':      cliente['total_demanda'] - total_asignado,
                 'detalle_meses':  detalle_meses,
             })
 
