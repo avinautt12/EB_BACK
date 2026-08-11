@@ -137,18 +137,23 @@ def _get_stock_disponible_odoo() -> dict:
               ['location_id.usage', '=', 'internal']]],
             {'fields': ['product_id', 'quantity', 'reserved_quantity'], 'limit': 0})
 
-        # Paso 3: Agregar por SKU
-        result: dict = {}
+        # Paso 3: Agregar por SKU — sumar qty neta (incluyendo negativos) antes de max(0)
+        # Bug anterior: max(0, qty) por quant ignoraba quants negativas (ajustes de inventario)
+        # inflando el total. La suma neta por SKU es la correcta.
+        totals: dict = {}
         for q in quants:
             raw_pid = q.get('product_id')
             pid = raw_pid[0] if isinstance(raw_pid, list) else raw_pid
             sku = prod_id_to_sku.get(pid)
             if not sku:
                 continue
-            qty = max(0.0, float(q.get('quantity') or 0))
-            res = max(0.0, float(q.get('reserved_quantity') or 0))
-            disponible = max(0, int(qty - res))
-            result[sku] = result.get(sku, 0) + disponible
+            t = totals.setdefault(sku, {'qty': 0.0, 'res': 0.0})
+            t['qty'] += float(q.get('quantity') or 0)
+            t['res'] += max(0.0, float(q.get('reserved_quantity') or 0))
+
+        result: dict = {}
+        for sku, t in totals.items():
+            result[sku] = max(0, int(t['qty'] - t['res']))
 
         _STOCK_ODOO_CACHE = {'data': result, 'ts': now}
         logging.info('[stock_odoo] %d SKUs con stock disponible en Odoo (>0: %d)',
