@@ -3741,11 +3741,21 @@ def avance_forecast():
     """
     clave   = request.args.get('clave', '').strip()
     periodo = request.args.get('periodo', '').strip()
+    refresh = request.args.get('refresh', '0') == '1'
 
     if not clave or not periodo:
         return jsonify({'error': 'Faltan parámetros: clave, periodo'}), 400
     if not _validate_periodo(periodo):
         return jsonify({'error': 'Formato de periodo inválido'}), 400
+
+    if refresh:
+        _avance_cache.pop((clave, periodo), None)
+        try:
+            import redis as _rl, os as _os
+            _rl.Redis(host=_os.getenv('REDIS_HOST', 'localhost'),
+                      port=int(_os.getenv('REDIS_PORT', 6379)), db=0).delete(_rkey_avance(clave, periodo))
+        except Exception:
+            pass
 
     m = re.match(r'^(\d{4})-(\d{4})$', periodo)
     year1, year2 = int(m.group(1)), int(m.group(2))
@@ -4020,10 +4030,21 @@ def avance_forecast_integral():
     """
     grupo_id = request.args.get('grupo_id', '').strip()
     periodo  = request.args.get('periodo', '').strip()
+    refresh  = request.args.get('refresh', '0') == '1'
     if not grupo_id or not periodo:
         return jsonify({'error': 'Faltan parámetros: grupo_id, periodo'}), 400
     if not _validate_periodo(periodo):
         return jsonify({'error': 'Formato de periodo inválido'}), 400
+
+    if refresh:
+        _avance_cache.pop(('integral', grupo_id, periodo), None)
+        try:
+            import redis as _rl, os as _os
+            _rl.Redis(host=_os.getenv('REDIS_HOST', 'localhost'),
+                      port=int(_os.getenv('REDIS_PORT', 6379)), db=0).delete(
+                _rkey_avance(f'integral:{grupo_id}', periodo))
+        except Exception:
+            pass
 
     m = re.match(r'^(\d{4})-(\d{4})$', periodo)
     year1, year2 = int(m.group(1)), int(m.group(2))

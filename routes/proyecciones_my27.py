@@ -108,8 +108,9 @@ _STOCK_ODOO_TTL = 300  # 5 minutos
 
 def _get_stock_disponible_odoo() -> dict:
     """
-    Retorna {sku: disponible} donde disponible = max(0, qty_on_hand - reserved_quantity).
-    Solo considera ubicaciones internas (usage='internal').
+    Retorna {sku: pronosticado} donde pronosticado = virtual_available de Odoo.
+    virtual_available = qty_on_hand + incoming_qty - outgoing_qty (reservado).
+    Incluye stock en tránsito y descuenta lo ya comprometido a otras órdenes.
     Caché doble: memoria (5 min) + Redis (10 min, sobrevive restarts de Flask).
     """
     global _STOCK_ODOO_CACHE
@@ -133,44 +134,24 @@ def _get_stock_disponible_odoo() -> dict:
 
         skus = list(FORECAST_SKU_WHITELIST)
 
-        # Paso 1: IDs de variantes
+        # Paso 1: variantes MY27 con su virtual_available (pronosticado)
+        # virtual_available = qty_on_hand + incoming_qty - outgoing_qty
         prods = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
             'product.product', 'search_read',
             [[['default_code', 'in', skus]]],
-            {'fields': ['id', 'default_code'], 'limit': 0})
-        prod_id_to_sku = {p['id']: (p.get('default_code') or '').strip()
-                          for p in prods}
-        prod_ids = list(prod_id_to_sku.keys())
-        if not prod_ids:
-            _STOCK_ODOO_CACHE = {'data': {}, 'ts': now}
-            return {}
-
-        # Paso 2: Quants en ubicaciones internas
-        quants = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
-            'stock.quant', 'search_read',
-            [[['product_id', 'in', prod_ids],
-              ['location_id.usage', '=', 'internal']]],
-            {'fields': ['product_id', 'quantity', 'reserved_quantity'], 'limit': 0})
-
-        # Paso 3: Agregar por SKU — sumar qty neta (incluyendo negativos) antes de max(0)
-        totals: dict = {}
-        for q in quants:
-            raw_pid = q.get('product_id')
-            pid = raw_pid[0] if isinstance(raw_pid, list) else raw_pid
-            sku = prod_id_to_sku.get(pid)
-            if not sku:
-                continue
-            t = totals.setdefault(sku, {'qty': 0.0, 'res': 0.0})
-            t['qty'] += float(q.get('quantity') or 0)
-            t['res'] += max(0.0, float(q.get('reserved_quantity') or 0))
+            {'fields': ['id', 'default_code', 'virtual_available'], 'limit': 0})
 
         result: dict = {}
-        for sku, t in totals.items():
-            result[sku] = max(0, int(t['qty'] - t['res']))
+        for p in prods:
+            sku = (p.get('default_code') or '').strip()
+            if not sku:
+                continue
+            virtual = float(p.get('virtual_available') or 0)
+            result[sku] = max(0, int(virtual))
 
         _STOCK_ODOO_CACHE = {'data': result, 'ts': now}
         _redis_set(_RKEY_STOCK_ODOO, result, _STOCK_ODOO_R_TTL)
-        logging.info('[stock_odoo] %d SKUs con stock disponible en Odoo (>0: %d)',
+        logging.info('[stock_odoo] %d SKUs con pronosticado Odoo (>0: %d)',
                      len(result), sum(1 for v in result.values() if v > 0))
         return result
 
@@ -394,15 +375,35 @@ def _get_ordenes_my27(periodo: str) -> dict:
             _ORDENES_CACHE = {'data': {}, 'periodo': periodo, 'ts': now}
             return {}
 
-        # 2. Refs de los partners
+        # 2. Refs de los partners (con fallback a empresa matriz para contactos hijo)
         partner_ids = list({o['partner_id'][0] for o in orders if o.get('partner_id')})
         partners = models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
             'res.partner', 'search_read',
-            [[['id', 'in', partner_ids], ['ref', '!=', False]]],
-            {'fields': ['id', 'ref'], 'limit': 0}
+            [[['id', 'in', partner_ids]]],
+            {'fields': ['id', 'ref', 'parent_id'], 'limit': 0}
         )
-        ref_map = {p['id']: (p.get('ref') or '').strip() for p in partners}
+        ref_map: dict = {}
+        sin_ref: list = []  # (child_id, parent_id)
+        for p in partners:
+            ref = (p.get('ref') or '').strip()
+            if ref:
+                ref_map[p['id']] = ref
+            elif p.get('parent_id'):
+                sin_ref.append((p['id'], p['parent_id'][0]))
+        # Fallback: buscar ref en la empresa matriz de contactos hijo sin ref
+        if sin_ref:
+            parent_ids_lookup = list({pid for _, pid in sin_ref})
+            parents = models.execute_kw(
+                ODOO_DB, uid, ODOO_PASSWORD,
+                'res.partner', 'search_read',
+                [[['id', 'in', parent_ids_lookup], ['ref', '!=', False]]],
+                {'fields': ['id', 'ref'], 'limit': 0}
+            )
+            parent_ref_map = {p['id']: (p.get('ref') or '').strip() for p in parents}
+            for child_id, parent_id in sin_ref:
+                if parent_ref_map.get(parent_id):
+                    ref_map[child_id] = parent_ref_map[parent_id]
 
         # 3. order_id → clave_cliente
         order_clave = {
@@ -1178,7 +1179,7 @@ def _compute_cobertura(periodo: str) -> list:
     Calcula el análisis FIFO de cobertura para todos los SKUs de FORECAST_SKU_WHITELIST.
     Cada SKU reporta:
       - cantidad_entrante: stock subido por Excel (tabla forecast_inventario_megamo)
-      - odoo_disponible:   stock a la mano en Odoo (qty_on_hand - reserved)
+      - odoo_disponible:   pronosticado Odoo (virtual_available = on_hand + tránsito - reservado)
       - total_disponible:  suma de ambos (base para el FIFO)
     Solo omite SKUs que no tienen proyecciones NI stock de ningún tipo.
     Odoo stock se obtiene primero, antes de abrir la conexión MySQL.
@@ -1215,15 +1216,46 @@ def _compute_cobertura(periodo: str) -> list:
             cols_mes = ', '.join(f'COALESCE(SUM({m}), 0) AS {m}' for m in MESES_ORDEN)
             ph = ','.join(['%s'] * len(skus_all))
             cur.execute(f"""
-                SELECT fp.sku, {cols_mes}, MAX(fp.producto) AS producto
+                SELECT fp.sku, fp.clave_cliente, {cols_mes}, MAX(fp.producto) AS producto
                 FROM forecast_proyecciones fp
                 WHERE fp.periodo = %s AND fp.sku IN ({ph})
-                GROUP BY fp.sku
+                GROUP BY fp.sku, fp.clave_cliente
             """, (periodo, *skus_all))
-            proyecciones_rows = cur.fetchall()
+            proy_rows_raw = cur.fetchall()
 
-            if proyecciones_rows:
-                skus_proy = [r['sku'] for r in proyecciones_rows]
+            # Aplicar deducción de órdenes Odoo (igual que el Monitor) para consistencia
+            ordenes_dist_cob = _get_ordenes_my27(periodo)
+            if ordenes_dist_cob:
+                proy_rows_deducidos = []
+                for r in proy_rows_raw:
+                    sn = _norm_sku(r['sku'])
+                    total_ped = ordenes_dist_cob.get(r['clave_cliente'], {}).get(sn, 0)
+                    if total_ped > 0:
+                        r = dict(r)
+                        rest_d = total_ped
+                        for mes in MESES_ORDEN:
+                            qty = int(r.get(mes) or 0)
+                            ded = min(rest_d, qty)
+                            r[mes] = qty - ded
+                            rest_d -= ded
+                            if rest_d <= 0:
+                                break
+                    proy_rows_deducidos.append(r)
+                proy_rows_raw = proy_rows_deducidos
+
+            # Agregar por SKU (suma de todos los clientes, ya deducida)
+            proy_by_sku_raw: dict = {}
+            for r in proy_rows_raw:
+                sku = r['sku']
+                if sku not in proy_by_sku_raw:
+                    proy_by_sku_raw[sku] = {m: 0 for m in MESES_ORDEN}
+                    proy_by_sku_raw[sku]['sku']     = sku
+                    proy_by_sku_raw[sku]['producto'] = r.get('producto') or sku
+                for m in MESES_ORDEN:
+                    proy_by_sku_raw[sku][m] += int(r.get(m) or 0)
+
+            if proy_by_sku_raw:
+                skus_proy = list(proy_by_sku_raw.keys())
                 ph2 = ','.join(['%s'] * len(skus_proy))
                 cur.execute(f"""
                     SELECT referencia_interna, nombre_producto
@@ -1232,10 +1264,10 @@ def _compute_cobertura(periodo: str) -> list:
                 """, skus_proy)
                 nombres_odoo = {r['referencia_interna']: r['nombre_producto']
                                 for r in cur.fetchall()}
-                for r in proyecciones_rows:
-                    r['producto'] = nombres_odoo.get(r['sku']) or r.get('producto') or r['sku']
+                for sku, rd in proy_by_sku_raw.items():
+                    rd['producto'] = nombres_odoo.get(sku) or rd.get('producto') or sku
 
-            proy_by_sku = {r['sku']: r for r in proyecciones_rows}
+            proy_by_sku = proy_by_sku_raw
     finally:
         conn.close()
 
@@ -1375,6 +1407,28 @@ def _compute_distribucion_prioritaria(periodo: str) -> list:
     finally:
         conn.close()
 
+    # 2b. Descontar órdenes ya colocadas en Odoo (misma lógica que el Monitor)
+    ordenes_dist = _get_ordenes_my27(periodo)
+    if ordenes_dist:
+        rows_deducidos = []
+        for r in rows:
+            sn = _norm_sku(r['sku'])
+            total_pedido = ordenes_dist.get(r['clave_cliente'], {}).get(sn, 0)
+            if total_pedido > 0:
+                r = dict(r)  # copia mutable
+                restante_ded = total_pedido
+                for mes in MESES_ORDEN:
+                    qty = int(r.get(mes) or 0)
+                    deducido = min(restante_ded, qty)
+                    r[mes] = qty - deducido
+                    restante_ded -= deducido
+                    if restante_ded <= 0:
+                        break
+                r['total_demanda'] = sum(int(r.get(m) or 0) for m in MESES_ORDEN)
+            if int(r.get('total_demanda') or 0) > 0:
+                rows_deducidos.append(r)
+        rows = rows_deducidos
+
     # 3. Agrupar por SKU y ordenar por prioridad
     from collections import defaultdict
     sku_clientes: dict = defaultdict(list)
@@ -1466,23 +1520,29 @@ def _compute_distribucion_prioritaria(periodo: str) -> list:
 @proyecciones_my27_bp.route('/cobertura-megamo', methods=['GET'])
 def get_cobertura_megamo():
     """
-    GET /proyecciones-my27/cobertura-megamo?periodo=2026-2027
+    GET /proyecciones-my27/cobertura-megamo?periodo=2026-2027&refresh=1
     Devuelve análisis FIFO de cobertura: stock entrante vs proyecciones globales por SKU.
-    Cacheado 5 min en Redis para evitar recálculo en cada request.
+    Sin cache Redis propio — la BD es rápida; el stock de Odoo tiene su propio cache.
+    refresh=1 fuerza re-fetch del stock de Odoo además del recálculo.
     """
     periodo = request.args.get('periodo', '2026-2027').strip()
-    rkey = _rkey_cobertura(periodo)
+    refresh = request.args.get('refresh', '0') == '1'
 
-    cached = _redis_get(rkey)
-    if cached is not None:
-        return jsonify({'periodo': periodo, 'cobertura': cached}), 200
+    if refresh:
+        # Limpiar cache de stock Odoo para que el próximo _compute_cobertura lo refetch
+        global _STOCK_ODOO_CACHE
+        _STOCK_ODOO_CACHE = {'data': {}, 'ts': 0.0}
+        try:
+            import redis as _rl, os as _os
+            _rl.Redis(host=_os.getenv('REDIS_HOST', 'localhost'),
+                      port=int(_os.getenv('REDIS_PORT', 6379)), db=0).delete(_RKEY_STOCK_ODOO)
+        except Exception:
+            pass
 
     resultado = _compute_cobertura(periodo)
     if not resultado:
         return jsonify({'periodo': periodo, 'cobertura': [],
                         'mensaje': 'No hay inventario cargado para este periodo'}), 200
-
-    _redis_set(rkey, resultado, _COBERTURA_R_TTL)
     return jsonify({'periodo': periodo, 'cobertura': resultado}), 200
 
 
