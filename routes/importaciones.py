@@ -958,6 +958,7 @@ def dashboard():
                 "via_transporte":              r.get("via_transporte") or "MARITIMO",
                 "log_origen":                  r.get("log_origen") or "",
                 "log_tipo_productos":          r.get("log_tipo_productos") or "",
+                "log_fecha_notificacion":      _fmt_d(r.get("log_fecha_notificacion")),
                 "estado":                      r.get("estado") or "activo",
                 "pct_global":                  pct_global,
                 "des_llegada_almacen":         r.get("des_llegada_almacen"),
