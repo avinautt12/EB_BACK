@@ -78,8 +78,15 @@ def _parsear_historial(raw):
         return []
 
 
-def _entrada_historial(tipo, descripcion):
-    return {"fecha": datetime.now().isoformat(), "tipo": tipo, "descripcion": descripcion}
+def _entrada_historial(tipo, descripcion, usuario=None):
+    entrada = {
+        "fecha": datetime.now().isoformat(),
+        "tipo": tipo,
+        "descripcion": descripcion
+    }
+    if usuario:
+        entrada["usuario"] = usuario
+    return entrada
 
 
 # GUÍA: validación por archivo, no por solicitud completa -- si el admin
@@ -110,6 +117,9 @@ def registrar_venta():
     datos['id_tienda'] = request.form.get('id_tienda')
     datos['nombre_completo'] = request.form.get('nombre_completo')
     datos['nombre_sucursal'] = request.form.get('nombre_sucursal')
+
+    usuario_actual = _usuario_desde_token(request)
+    nombre_usuario = usuario_actual.get('nombre') or usuario_actual.get('usuario') if usuario_actual else None
 
     # 2. Validar que los archivos obligatorios estén presentes (PDF y XML son opcionales)
     for key_archivo in ARCHIVOS_REQUERIDOS.keys():
@@ -221,7 +231,7 @@ def registrar_venta():
         if nueva:
             data.guardar_historial_inicial(
                 cursor, nueva['id'],
-                json.dumps([_entrada_historial('creacion', 'Solicitud registrada')])
+                json.dumps([_entrada_historial('creacion', 'Solicitud registrada', nombre_usuario)])
             )
             conexion.commit()
 
@@ -430,6 +440,9 @@ def validar_documento(id_venta):
     if not _requiere_admin(request):
         return jsonify({"error": "No autorizado"}), 403
 
+    payload = _usuario_desde_token(request)
+    usuario_actual = payload.get('nombre') or payload.get('usuario') if payload else None
+
     body = request.get_json(force=True, silent=True) or {}
     documento = body.get('documento')
     estatus_doc = body.get('estatus')
@@ -455,7 +468,7 @@ def validar_documento(id_venta):
         etiqueta_doc = ARCHIVOS_REQUERIDOS[documento]
         etiqueta_estatus = 'validado' if estatus_doc == 'valido' else 'rechazado'
         historial = _parsear_historial(fila['historial_json'])
-        historial.append(_entrada_historial('validacion', f"{etiqueta_doc}: {etiqueta_estatus}"))
+        historial.append(_entrada_historial('validacion', f"{etiqueta_doc}: {etiqueta_estatus}", usuario_actual))
 
         data.actualizar_validacion_documento(cursor, id_venta, json.dumps(validacion_docs), json.dumps(historial))
         conexion.commit()
@@ -488,6 +501,9 @@ def corregir_nota_credito(id_venta):
     if not _requiere_admin(request):
         return jsonify({"error": "No autorizado"}), 403
 
+    payload = _usuario_desde_token(request)
+    usuario_actual = payload.get('nombre') or payload.get('usuario') if payload else None
+
     body = request.get_json(force=True, silent=True) or {}
     nueva_nota_credito = body.get('nota_credito')
     if nueva_nota_credito is None:
@@ -505,7 +521,7 @@ def corregir_nota_credito(id_venta):
 
         historial = _parsear_historial(fila['historial_json'])
         historial.append(_entrada_historial(
-            'nota_credito', f"Nota de crédito corregida de ${fila['nota_credito']} a ${nueva_nota_credito}"
+            'nota_credito', f"Nota de crédito corregida de ${fila['nota_credito']} a ${nueva_nota_credito}", usuario_actual
         ))
 
         data.actualizar_nota_credito(cursor, id_venta, nueva_nota_credito, json.dumps(historial))
