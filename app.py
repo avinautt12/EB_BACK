@@ -31,6 +31,7 @@ from routes.garantias import garantias_bp
 from routes.importaciones import importaciones_bp
 from routes.proyecciones_my27 import proyecciones_my27_bp
 from routes.solicitud_retroactivo import solicitud_retroactivo_bp
+from routes.solicitud_retroactivo_campanias import solicitud_retroactivo_campanias_bp
 
 # Importamos la instancia de Celery desde celery_worker
 from celery_worker import celery_app as celery
@@ -170,6 +171,7 @@ def create_app():
     app.register_blueprint(importaciones_bp)
     app.register_blueprint(proyecciones_my27_bp)
     app.register_blueprint(solicitud_retroactivo_bp)
+    app.register_blueprint(solicitud_retroactivo_campanias_bp)
 
     # Iniciar scheduler de sync automático (L-V 08:30 CDMX)
     init_scheduler()
