@@ -3759,8 +3759,10 @@ def avance_forecast():
 
     m = re.match(r'^(\d{4})-(\d{4})$', periodo)
     year1, year2 = int(m.group(1)), int(m.group(2))
-    # MY27 = 1 Jul year1 → 30 Jun year2 (el periodo completo de la temporada)
-    fecha_inicio = f'{year1}-07-01'
+    # El periodo comercial empieza en mayo del year1 (columna "mayo" del forecast)
+    # y termina en junio del year2. Usar julio era demasiado tardío y excluía
+    # órdenes anticipadas colocadas en mayo-junio del mismo año (ej. S07027 del 2026-06-04).
+    fecha_inicio = f'{year1}-05-01'
     fecha_fin    = f'{year2}-06-30'
 
     def _norm(s: str) -> str:
@@ -4048,7 +4050,8 @@ def avance_forecast_integral():
 
     m = re.match(r'^(\d{4})-(\d{4})$', periodo)
     year1, year2 = int(m.group(1)), int(m.group(2))
-    fecha_inicio = f'{year1}-07-01'
+    # Mismo ajuste que avance_forecast: usar mayo como inicio del periodo comercial
+    fecha_inicio = f'{year1}-05-01'
     fecha_fin    = f'{year2}-06-30'
 
     def _norm(s: str) -> str:

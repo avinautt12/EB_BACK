@@ -385,25 +385,36 @@ def _get_ordenes_my27(periodo: str) -> dict:
         )
         ref_map: dict = {}
         sin_ref: list = []  # (child_id, parent_id)
+        sin_ref_ni_padre: list = []  # sin ref y sin parent_id
         for p in partners:
             ref = (p.get('ref') or '').strip()
             if ref:
                 ref_map[p['id']] = ref
             elif p.get('parent_id'):
                 sin_ref.append((p['id'], p['parent_id'][0]))
+            else:
+                sin_ref_ni_padre.append(p['id'])
+        logging.info('[ordenes_my27] partners con ref: %d, hijos sin ref: %d, sin ref ni padre: %d',
+                     len(ref_map), len(sin_ref), len(sin_ref_ni_padre))
         # Fallback: buscar ref en la empresa matriz de contactos hijo sin ref
         if sin_ref:
             parent_ids_lookup = list({pid for _, pid in sin_ref})
             parents = models.execute_kw(
                 ODOO_DB, uid, ODOO_PASSWORD,
                 'res.partner', 'search_read',
-                [[['id', 'in', parent_ids_lookup], ['ref', '!=', False]]],
-                {'fields': ['id', 'ref'], 'limit': 0}
+                [[['id', 'in', parent_ids_lookup]]],
+                {'fields': ['id', 'ref', 'name'], 'limit': 0}
             )
             parent_ref_map = {p['id']: (p.get('ref') or '').strip() for p in parents}
+            logging.info('[ordenes_my27] padres encontrados: %s',
+                         {p['id']: (p.get('ref'), p.get('name')) for p in parents})
             for child_id, parent_id in sin_ref:
-                if parent_ref_map.get(parent_id):
-                    ref_map[child_id] = parent_ref_map[parent_id]
+                pref = parent_ref_map.get(parent_id, '')
+                logging.info('[ordenes_my27] hijo %s → padre %s ref=%r', child_id, parent_id, pref)
+                if pref:
+                    ref_map[child_id] = pref
+        logging.info('[ordenes_my27] ref_map final: %d claves; EC216 presente: %s',
+                     len(ref_map), 'EC216' in ref_map.values())
 
         # 3. order_id → clave_cliente
         order_clave = {
@@ -411,6 +422,7 @@ def _get_ordenes_my27(periodo: str) -> dict:
             for o in orders
             if o.get('partner_id') and ref_map.get(o['partner_id'][0])
         }
+        logging.info('[ordenes_my27] ordenes con clave: %d / %d totales', len(order_clave), len(orders))
 
         # 4. Líneas de venta
         sol = models.execute_kw(
@@ -451,6 +463,10 @@ def _get_ordenes_my27(periodo: str) -> dict:
 
         _ORDENES_CACHE = {'data': result, 'periodo': periodo, 'ts': now}
         logging.info('[ordenes_my27] %d clientes con pedidos en %s', len(result), periodo)
+        if 'EC216' in result:
+            logging.info('[ordenes_my27] EC216 pedidos: %s', result['EC216'])
+        else:
+            logging.info('[ordenes_my27] EC216 NO está en result — no se descontará')
         return result
 
     except Exception as e:
@@ -744,6 +760,30 @@ def listar():
         logging.exception('[proyecciones_my27] listar error: %s', e)
         return jsonify({'error': str(e)}), 500
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /proyecciones-my27/debug-ordenes  — diagnóstico temporal
+# ─────────────────────────────────────────────────────────────────────────────
+
+@proyecciones_my27_bp.route('/debug-ordenes', methods=['GET'])
+def debug_ordenes():
+    """Endpoint temporal de diagnóstico: devuelve raw de _get_ordenes_my27."""
+    periodo = request.args.get('periodo', '2026-2027')
+    # Forzar re-fetch (expira cache)
+    global _ORDENES_CACHE
+    _ORDENES_CACHE['ts'] = 0.0
+    result = _get_ordenes_my27(periodo)
+    # Verificar si EC216 está en el resultado
+    ec216_data = result.get('EC216')
+    sku_target = _norm_sku('427102-0001004')
+    return jsonify({
+        'total_clientes': len(result),
+        'claves': sorted(result.keys()),
+        'EC216_presente': 'EC216' in result,
+        'EC216_pedidos': ec216_data,
+        'sku_norm_target': sku_target,
+        'EC216_sku_qty': ec216_data.get(sku_target, 'KEY_NOT_FOUND') if ec216_data else None,
+    }), 200
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GET /proyecciones-my27/exportar  — descarga Excel
@@ -1825,3 +1865,4 @@ def generar_orden_odoo():
     except Exception as e:
         logging.exception('[generar_orden] error: %s', e)
         return jsonify({'error': str(e)}), 500
+
