@@ -3,32 +3,10 @@ Rutas API para la administración de campañas de retroactivos.
 
 GUÍA DEL PROYECTO:
 - Este archivo contiene únicamente la capa HTTP y la lógica de negocio.
-- Las consultas SQL deben vivir en:
-    services/solicitud_retroactivos_campanias_service.py
-- Las rutas NO deben contener SQL directamente.
+- Las consultas SQL viven en:
+    services/solicitud_retroactivo_campanias_service.py
 - La conexión y el cursor se crean aquí.
-- El commit/rollback también se controla aquí.
-- El service solamente recibe el cursor y ejecuta consultas.
-
-FUNCIONALIDAD DE CAMPAÑAS:
-Una campaña contiene:
-    id
-    nombre
-    fecha_inicio
-    fecha_fin
-    msi_id
-    productos -> arreglo de IDs de productos
-    fecha_registro
-    activa -> 1 o 0
-
-GUÍA:
-- msi_id tiene relación con solicitud_retroactivo_msi.
-- productos es una relación de varios productos con una campaña.
-- Para no mezclar la lógica de campañas con la tabla MSI, la consulta
-  de MSI se mantiene como un endpoint GET independiente.
-- fecha_registro se genera/actualiza automáticamente en BD.
-- activa permite desactivar una campaña sin eliminarla físicamente.
-- DELETE elimina la campaña y sus relaciones de productos.
+- El commit/rollback y cierre de conexiones se controla aquí.
 """
 
 import json
@@ -75,7 +53,7 @@ def _validar_fecha(fecha, nombre_campo):
 
 def _normalizar_productos(productos):
     """
-    Convierte y valida el arreglo de productos.
+    Convierte y valida el arreglo de IDs de producto_detalle.
     """
     if productos is None:
         return []
@@ -99,13 +77,13 @@ def _normalizar_productos(productos):
         except (TypeError, ValueError):
             return None
 
-    # Eliminamos duplicados conservando el orden recibido.
+    # Eliminamos duplicados conservando el orden
     return list(dict.fromkeys(resultado))
 
 
 def _normalizar_activa(activa, valor_default=1):
     """
-    Normaliza el campo activa.
+    Normaliza el campo activa a entero (1 o 0).
     """
     if activa is None:
         return valor_default
@@ -308,7 +286,7 @@ def crear_campania():
 
             if productos_invalidos:
                 return jsonify({
-                    "error": "Uno o más productos no existen.",
+                    "error": "Uno o más productos detalle no existen.",
                     "productos_invalidos": productos_invalidos
                 }), 400
 
@@ -415,7 +393,7 @@ def editar_campania(id_campania):
 
             if productos_invalidos:
                 return jsonify({
-                    "error": "Uno o más productos no existen.",
+                    "error": "Uno o más productos detalle no existen.",
                     "productos_invalidos": productos_invalidos
                 }), 400
 
@@ -498,6 +476,83 @@ def eliminar_campania(id_campania):
         logging.exception("Error al eliminar campaña %s: %s", id_campania, e)
         return jsonify({
             "error": "Error al eliminar la campaña.",
+            "detalle": str(e)
+        }), 500
+
+    finally:
+        cursor.close()
+        conexion.close()
+        
+# ============================================================
+# GET MARCAS
+# ============================================================
+
+@solicitud_retroactivo_campanias_bp.route('/api/solicitud-retroactivo-campanias/marcas', methods=['GET'])
+def listar_marcas():
+    """
+    GET - Obtiene la lista de marcas para el filtro del catálogo.
+    """
+    conexion = obtener_conexion()
+    if not conexion:
+        return jsonify({"error": "No se pudo conectar a la base de datos."}), 500
+
+    cursor = conexion.cursor(dictionary=True, buffered=True)
+
+    try:
+        marcas = data.listar_marcas(cursor)
+        return jsonify(marcas), 200
+
+    except Exception as e:
+        logging.exception("Error al consultar marcas: %s", e)
+        return jsonify({
+            "error": "Error al consultar las marcas.",
+            "detalle": str(e)
+        }), 500
+
+    finally:
+        cursor.close()
+        conexion.close()
+
+
+# ============================================================
+# GET CATÁLOGO DE PRODUCTOS (MODAL)
+# ============================================================
+
+@solicitud_retroactivo_campanias_bp.route('/api/solicitud-retroactivo-campanias/catalogo-productos', methods=['GET'])
+def catalogo_productos():
+    """
+    GET - Obtiene variantes de producto (SKU) con paginación y filtros.
+    """
+    query = request.args.get('query', '').strip() or None
+    marca_id = request.args.get('marca_id', type=int)
+    sku = request.args.get('sku', '').strip() or None
+    page = request.args.get('page', 1, type=int)
+    limit = request.args.get('limit', 10, type=int)
+
+    if page < 1: page = 1
+    if limit < 1 or limit > 100: limit = 10
+
+    conexion = obtener_conexion()
+    if not conexion:
+        return jsonify({"error": "No se pudo conectar a la base de datos."}), 500
+
+    cursor = conexion.cursor(dictionary=True, buffered=True)
+
+    try:
+        resultado = data.buscar_catalogo_productos(
+            cursor,
+            query=query,
+            marca_id=marca_id,
+            sku=sku,
+            page=page,
+            limit=limit
+        )
+        return jsonify(resultado), 200
+
+    except Exception as e:
+        logging.exception("Error al consultar catálogo de productos: %s", e)
+        return jsonify({
+            "error": "Error al consultar el catálogo de productos.",
             "detalle": str(e)
         }), 500
 

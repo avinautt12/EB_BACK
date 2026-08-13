@@ -4,51 +4,11 @@ Capa de acceso a datos (Data Access) para Solicitud de Retroactivos - Campañas.
 GUÍA DEL PROYECTO:
 - Este archivo contiene únicamente consultas SQL.
 - Las rutas viven en:
-    routes/solicitud_retroactivos_campanias.py
-- Las rutas son responsables de:
-    * Validaciones
-    * Reglas de negocio
-    * Conexión
-    * Commit / rollback
-    * Respuestas HTTP
+    routes/solicitud_retroactivo_campanias.py
 - Este service únicamente:
     * Recibe un cursor ya abierto.
     * Ejecuta SQL.
     * Devuelve los resultados.
-
-GUÍA:
-La campaña contiene:
-    id
-    nombre
-    fecha_inicio
-    fecha_fin
-    msi_id
-    fecha_registro
-    activa
-
-Y tiene una relación de productos:
-    campaña -> productos
-
-El arreglo de productos que recibe el frontend se persiste
-en una tabla de relación.
-
-GUÍA:
-No se realiza commit() ni rollback() aquí.
-La transacción completa es responsabilidad de routes.
-
-GUÍA:
-fecha_registro:
-- Al crear se genera automáticamente mediante DEFAULT CURRENT_TIMESTAMP.
-- Al editar se actualiza automáticamente mediante
-  ON UPDATE CURRENT_TIMESTAMP.
-
-GUÍA:
-activa:
-    1 = campaña activa
-    0 = campaña inactiva
-
-No se elimina una campaña al desactivarla.
-Para desactivarla se actualiza activa = 0.
 """
 
 
@@ -59,12 +19,6 @@ Para desactivarla se actualiza activa = 0.
 def listar_msi(cursor):
     """
     Obtiene el catálogo completo de MSI.
-
-    GUÍA:
-    La información proviene de:
-        solicitud_retroactivo_msi
-
-    Este método alimenta el selector de MSI del frontend.
     """
     cursor.execute("""
         SELECT
@@ -79,11 +33,7 @@ def listar_msi(cursor):
 
 def obtener_msi_por_id(cursor, msi_id):
     """
-    Obtiene un MSI específico.
-
-    GUÍA:
-    Se utiliza antes de crear o editar una campaña para comprobar
-    que el msi_id recibido realmente exista.
+    Obtiene un MSI específico para validar su existencia.
     """
     cursor.execute("""
         SELECT
@@ -97,27 +47,12 @@ def obtener_msi_por_id(cursor, msi_id):
 
 
 # ============================================================
-# PRODUCTOS
+# PRODUCTOS DETALLE (VARIANTES / SKUs)
 # ============================================================
 
 def validar_productos(cursor, productos):
     """
-    Comprueba qué productos existen.
-
-    GUÍA:
-    productos llega desde routes como:
-        [1, 2, 3]
-
-    El método devuelve únicamente los productos existentes.
-    La ruta es responsable de comparar el resultado contra el arreglo
-    original y determinar si existen IDs inválidos.
-
-    GUÍA:
-    Actualmente se utiliza la tabla:
-        productos
-
-    Si el nombre real de la tabla de productos del proyecto es otro,
-    esta consulta debe cambiarse aquí y NO en routes.
+    Comprueba qué productos detalle (variantes/SKUs) existen.
     """
     if not productos:
         return []
@@ -125,71 +60,18 @@ def validar_productos(cursor, productos):
     placeholders = ', '.join(['%s'] * len(productos))
     cursor.execute(f"""
         SELECT id
-        FROM productos
+        FROM producto_detalle
         WHERE id IN ({placeholders})
     """, tuple(productos))
     
     return cursor.fetchall()
 
-
 # ============================================================
 # CAMPAÑAS
 # ============================================================
-
 def listar_campanias(cursor):
     """
-    Obtiene todas las campañas.
-
-    GUÍA:
-    Se muestran campañas activas e inactivas.
-    No se filtra:
-        WHERE activa = 1
-    porque el administrador necesita visualizar también las campañas
-    que fueron desactivadas.
-
-    GUÍA:
-    Los productos se devuelven agrupados por campaña.
-    La ruta convierte el resultado a un arreglo JSON para el frontend.
-    """
-    cursor.execute("""
-       SELECT
-        c.id,
-        c.nombre,
-        c.fecha_inicio,
-        c.fecha_fin,
-        c.msi_id,
-        m.plazo_meses,
-        m.porcentaje,
-        c.activa,
-        COALESCE(
-            (
-                SELECT JSON_ARRAYAGG(cp.producto_detalle_id)
-                FROM solicitud_retroactivo_campania_producto_detalle cp
-                WHERE cp.campania_id = c.id
-            ), 
-            JSON_ARRAY()
-        ) AS productos
-    FROM solicitud_retroactivo_campanias c
-    LEFT JOIN solicitud_retroactivo_msi m
-        ON m.id = c.msi_id
-    ORDER BY 
-        c.fecha_fin DESC;
-    """)
-    return cursor.fetchall()
-
-
-def obtener_campania(cursor, id_campania):
-    """
-    Obtiene una campaña por ID.
-
-    GUÍA:
-    Este método se utiliza:
-        - Para consultar una campaña individual.
-        - Para comprobar que exista antes de editar.
-        - Para comprobar que exista antes de eliminar.
-        - Después de crear/editar para devolver el registro actualizado.
-
-    Los productos se devuelven como arreglo JSON.
+    Obtiene todas las campañas con el detalle completo de sus SKUs asociados.
     """
     cursor.execute("""
         SELECT
@@ -203,8 +85,63 @@ def obtener_campania(cursor, id_campania):
             c.activa,
             COALESCE(
                 (
-                    SELECT JSON_ARRAYAGG(cp.producto_detalle_id)
+                    SELECT JSON_ARRAYAGG(
+                        JSON_OBJECT(
+                            'id', pd.id,
+                            'id_producto', p.id,
+                            'modelo', p.modelo,
+                            'codigo', p.codigo,
+                            'sku', pd.sku,
+                            'talla', pd.talla,
+                            'color', pd.color
+                        )
+                    )
                     FROM solicitud_retroactivo_campania_producto_detalle cp
+                    INNER JOIN producto_detalle pd ON cp.producto_detalle_id = pd.id
+                    INNER JOIN productos p ON pd.codigo_producto = p.codigo
+                    WHERE cp.campania_id = c.id
+                ), 
+                JSON_ARRAY()
+            ) AS productos
+        FROM solicitud_retroactivo_campanias c
+        LEFT JOIN solicitud_retroactivo_msi m
+            ON m.id = c.msi_id
+        ORDER BY 
+            c.fecha_fin DESC;
+    """)
+    return cursor.fetchall()
+
+
+def obtener_campania(cursor, id_campania):
+    """
+    Obtiene una campaña específica por ID con sus SKUs detallados.
+    """
+    cursor.execute("""
+        SELECT
+            c.id,
+            c.nombre,
+            c.fecha_inicio,
+            c.fecha_fin,
+            c.msi_id,
+            m.plazo_meses,
+            m.porcentaje,
+            c.activa,
+            COALESCE(
+                (
+                    SELECT JSON_ARRAYAGG(
+                        JSON_OBJECT(
+                            'id', pd.id,
+                            'id_producto', p.id,
+                            'modelo', p.modelo,
+                            'codigo', p.codigo,
+                            'sku', pd.sku,
+                            'talla', pd.talla,
+                            'color', pd.color
+                        )
+                    )
+                    FROM solicitud_retroactivo_campania_producto_detalle cp
+                    INNER JOIN producto_detalle pd ON cp.producto_detalle_id = pd.id
+                    INNER JOIN productos p ON pd.codigo_producto = p.codigo
                     WHERE cp.campania_id = c.id
                 ), 
                 JSON_ARRAY()
@@ -224,9 +161,6 @@ def obtener_campania(cursor, id_campania):
 def crear_campania(cursor, nombre, fecha_inicio, fecha_fin, msi_id, activa):
     """
     Crea una campaña y devuelve el ID generado.
-    
-    GUÍA:
-    El cursor debe ser capaz de devolver lastrowid.
     """
     cursor.execute("""
         INSERT INTO solicitud_retroactivo_campanias (
@@ -249,12 +183,6 @@ def crear_campania(cursor, nombre, fecha_inicio, fecha_fin, msi_id, activa):
 def actualizar_campania(cursor, id_campania, nombre, fecha_inicio, fecha_fin, msi_id, activa):
     """
     Actualiza los datos principales de una campaña.
-
-    GUÍA:
-    La columna debe estar configurada en BD con:
-        ON UPDATE CURRENT_TIMESTAMP
-    Por lo tanto, cualquier edición de la campaña actualiza
-    automáticamente.
     """
     cursor.execute("""
         UPDATE solicitud_retroactivo_campanias
@@ -274,21 +202,7 @@ def actualizar_campania(cursor, id_campania, nombre, fecha_inicio, fecha_fin, ms
 
 def agregar_productos_campania(cursor, id_campania, productos):
     """
-    Agrega productos asociados a una campaña.
-
-    GUÍA:
-    products llega como:
-        [1, 2, 3]
-
-    Y se convierte en registros:
-        campania_id | producto_id
-        ------------|------------
-        10          | 1
-        10          | 2
-        10          | 3
-
-    IMPORTANTE:
-    La ruta ya se encargó de validar que los productos existan.
+    Agrega productos detalle (variantes) asociados a una campaña.
     """
     if not productos:
         return
@@ -298,7 +212,7 @@ def agregar_productos_campania(cursor, id_campania, productos):
     cursor.executemany("""
         INSERT INTO solicitud_retroactivo_campania_producto_detalle (
             campania_id,
-            producto_id
+            producto_detalle_id
         )
         VALUES (%s, %s)
     """, valores)
@@ -306,24 +220,7 @@ def agregar_productos_campania(cursor, id_campania, productos):
 
 def eliminar_productos_campania(cursor, id_campania):
     """
-    Elimina todas las relaciones producto de una campaña.
-
-    GUÍA:
-    Al editar una campaña NO hacemos actualización individual
-    de cada producto.
-
-    Se utiliza el siguiente flujo:
-        1. DELETE relaciones actuales
-        2. INSERT relaciones nuevas
-
-    Ejemplo:
-        Antes:    [1, 2, 3]
-        Después:  [2, 5]
-
-        Se eliminan: 1, 2, 3
-        Y se insertan: 2, 5
-
-    Esto simplifica considerablemente el manejo del arreglo.
+    Elimina todas las relaciones de productos detalle de una campaña.
     """
     cursor.execute("""
         DELETE FROM solicitud_retroactivo_campania_producto_detalle
@@ -337,16 +234,93 @@ def eliminar_productos_campania(cursor, id_campania):
 
 def eliminar_campania(cursor, id_campania):
     """
-    Elimina físicamente una campaña.
-
-    GUÍA:
-    Las relaciones de productos se eliminan primero mediante:
-        eliminar_productos_campania()
-    y después se elimina el registro principal.
-
-    La ruta controla el orden y la transacción.
+    Elimina físicamente una campaña de la tabla principal.
     """
     cursor.execute("""
         DELETE FROM solicitud_retroactivo_campanias
         WHERE id = %s
     """, (id_campania,))
+
+
+# ============================================================
+# CATÁLOGO DE PRODUCTOS Y MARCAS (PARA EL MODAL)
+# ============================================================
+
+def listar_marcas(cursor):
+    """
+    Obtiene el catálogo de marcas registradas.
+    """
+    cursor.execute("""
+        SELECT
+            id,
+            nombre
+        FROM solicitud_retroactivo_marca
+        ORDER BY nombre ASC
+    """)
+    return cursor.fetchall()
+
+
+def buscar_catalogo_productos(cursor, query=None, marca_id=None, sku=None, page=1, limit=10):
+    """
+    Consulta las variantes/SKUs (producto_detalle) enlazadas con sus productos
+    base y marcas, con filtros de búsqueda y paginación.
+    """
+    condiciones = []
+    parametros = []
+
+    if query:
+        condiciones.append("(p.modelo LIKE %s OR p.codigo LIKE %s OR pd.sku LIKE %s)")
+        patron = f"%{query}%"
+        parametros.extend([patron, patron, patron])
+
+    if marca_id:
+        condiciones.append("p.marca_id = %s")
+        parametros.append(marca_id)
+
+    if sku:
+        condiciones.append("pd.sku LIKE %s")
+        parametros.append(f"%{sku}%")
+
+    where_clause = " WHERE " + " AND ".join(condiciones) if condiciones else ""
+
+    # 1. Total de registros filtrados
+    sql_count = f"""
+        SELECT COUNT(*) AS total
+        FROM producto_detalle pd
+        INNER JOIN productos p ON pd.codigo_producto = p.codigo
+        LEFT JOIN solicitud_retroactivo_marca m ON p.marca_id = m.id
+        {where_clause}
+    """
+    cursor.execute(sql_count, tuple(parametros))
+    resultado_count = cursor.fetchone()
+    total = resultado_count['total'] if resultado_count else 0
+
+    # 2. Registros paginados
+    offset = (page - 1) * limit
+    sql_data = f"""
+        SELECT
+            pd.id,
+            p.id AS id_producto,
+            m.nombre AS marca,
+            p.modelo,
+            p.codigo,
+            pd.talla,
+            pd.color,
+            pd.sku
+        FROM producto_detalle pd
+        INNER JOIN productos p ON pd.codigo_producto = p.codigo
+        LEFT JOIN solicitud_retroactivo_marca m ON p.marca_id = m.id
+        {where_clause}
+        ORDER BY p.modelo ASC, pd.sku ASC
+        LIMIT %s OFFSET %s
+    """
+    parametros_data = parametros + [limit, offset]
+    cursor.execute(sql_data, tuple(parametros_data))
+    filas = cursor.fetchall()
+
+    return {
+        "data": filas,
+        "total": total,
+        "page": page,
+        "pageSize": limit
+    }
