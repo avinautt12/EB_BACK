@@ -118,7 +118,7 @@ def registrar_venta():
     for key_archivo in ARCHIVOS_REQUERIDOS.keys():
         file = request.files.get(key_archivo)
 
-        if key_archivo in ['factura_pdf', 'factura_xml']:
+        if key_archivo in ['factura_xml']:
             if not file or not file.filename:
                 continue
 
@@ -514,10 +514,18 @@ def corregir_nota_credito(id_venta):
         if not fila:
             return jsonify({"error": "Solicitud no encontrada."}), 404
 
+        nota_anterior = fila.get('nota_credito')
+        
+        # Evalúa si existía una nota de crédito previa para dar un texto más natural sin 'None' ni comillas
+        if not nota_anterior or str(nota_anterior).strip().lower() in ('none', '', '0'):
+            desc_historial = f"Nota de crédito asignada: #{nueva_nota_credito}"
+        else:
+            desc_historial = f"Nota de crédito actualizada de #{nota_anterior} a #{nueva_nota_credito}"
+
         historial = _parsear_historial(fila['historial_json'])
         historial.append(_entrada_historial(
             'nota_credito',
-            f"Nota de crédito corregida de '{fila['nota_credito']}' a '{nueva_nota_credito}'",
+            desc_historial,
             usuario=nombre_usuario
         ))
 

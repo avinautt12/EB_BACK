@@ -242,6 +242,7 @@ def actualizar_validacion_documento(cursor, id_venta, validacion_docs_json, hist
         (validacion_docs_json, historial_json, id_venta)
     )
 
+
 def obtener_venta_para_nota_credito(cursor, id_venta):
     cursor.execute(
         "SELECT nota_credito, historial_json FROM solicitud_retroactivo_venta WHERE id = %s",
@@ -249,11 +250,13 @@ def obtener_venta_para_nota_credito(cursor, id_venta):
     )
     return cursor.fetchone()
 
+
 def actualizar_nota_credito(cursor, id_venta, nota_credito, historial_json):
     cursor.execute(
         "UPDATE solicitud_retroactivo_venta SET nota_credito = %s, historial_json = %s WHERE id = %s",
         (nota_credito, historial_json, id_venta)
     )
+
 
 def obtener_venta_para_precio(cursor, id_venta):
     cursor.execute(
@@ -277,7 +280,7 @@ def listar_mis_ventas(cursor, id_usuario):
             v.id_marca_bicicleta, v.id_msi, m.plazo_meses,
             v.nombre_sucursal, v.correo_electronico, v.nombre_completo,
             v.fecha_venta, v.modelo_bicicleta, v.numero_serie,
-            v.precio_publico, v.porcentaje, v.monto_pagar,
+            v.precio_publico, v.porcentaje, v.monto_pagar, v.nota_credito,
             v.validacion_docs_json, v.historial_json, {ANIO_MODELO_SQL} AS anio_modelo,
             v.ticket_compra_key, v.voucher_key, v.factura_pdf_key, v.factura_xml_key,
             v.fecha_registro
