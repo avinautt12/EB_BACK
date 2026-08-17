@@ -930,7 +930,7 @@ def sync_monitor_odoo():
 # Endpoint: Recalcular acumulados en previo desde monitor (puede llamarse solo)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _recalcular_acumulados_previo(conexion, cursor):
+def _recalcular_acumulados_previo(conexion, cursor, fecha_corte_override=None, fecha_inicio_override=None, dry_run=False):
     """
     Actualiza previo con los avances de cumplimiento calculados desde monitor.
 
@@ -943,7 +943,19 @@ def _recalcular_acumulados_previo(conexion, cursor):
     El primer periodo (jul_ago) arranca desde f_inicio, no desde el 1 de julio,
     lo que permite contabilizar correctamente a distribuidores con inicio anticipado.
     Para filas integrales suma los miembros del grupo.
-    Retorna el número de filas actualizadas.
+
+    fecha_corte_override: si se da (YYYY-MM-DD), acota el corte superior a esa
+    fecha (nunca más allá del fin real de la temporada).
+    fecha_inicio_override: si se da (YYYY-MM-DD), acota el inicio a esa fecha
+    para cada cliente (nunca antes de su f_inicio real -- se usa la más tardía
+    de las dos). Junto con fecha_corte_override permite "ver los montos de un
+    rango [desde, hasta]" sin mover las fechas reales de temporada del cliente.
+    dry_run: si es True, NO escribe nada en `previo` -- regresa la lista de
+    filas calculadas (incluye clave/evac/nombre_cliente/nivel) en vez del
+    conteo de actualizadas. Usado por /obtener_previo_fecha (solo lectura).
+
+    Retorna el número de filas actualizadas (dry_run=False) o la lista de
+    filas calculadas (dry_run=True).
     """
     # Fechas de la temporada ABIERTA -- nunca hardcodeadas. Antes esta funcion
     # tenia '2025-07-01'/'2026-06-30' (MY26) fijos, incluyendo los cortes de
@@ -957,6 +969,13 @@ def _recalcular_acumulados_previo(conexion, cursor):
     else:
         DEFAULT_INICIO = '2025-07-01'
         FECHA_CORTE    = '2026-06-30'
+
+    if fecha_corte_override and str(fecha_corte_override) < FECHA_CORTE:
+        FECHA_CORTE = str(fecha_corte_override)
+
+    # Piso de fecha_inicio a aplicar por cliente vía GREATEST(f_inicio, piso) en
+    # el WHERE -- '1900-01-01' es un centinela neutro cuando no hay override.
+    FECHA_INICIO_PISO = str(fecha_inicio_override) if fecha_inicio_override else '1900-01-01'
 
     _rangos = {nombre: (ini, fin) for nombre, ini, fin in rangos_bimestres_temporada(DEFAULT_INICIO)}
     R_JUL_AGO_FIN               = _rangos['jul_ago'][1]
@@ -1082,11 +1101,11 @@ def _recalcular_acumulados_previo(conexion, cursor):
         LEFT JOIN clientes c ON m.contacto_referencia = c.clave
         WHERE m.contacto_referencia IS NOT NULL
           AND m.contacto_referencia != ''
-          AND m.fecha_factura >= COALESCE(c.f_inicio, %s)
+          AND m.fecha_factura >= GREATEST(COALESCE(c.f_inicio, %s), %s)
           AND m.fecha_factura <= %s
           AND (c.temporada_cerrada IS NULL OR c.temporada_cerrada = 0)
         GROUP BY m.contacto_referencia
-    """, (DEFAULT_INICIO, FECHA_CORTE))
+    """, (DEFAULT_INICIO, FECHA_INICIO_PISO, FECHA_CORTE))
     totales = {row['clave']: row for row in cursor.fetchall()}
 
     # Claves cerradas — no sobrescribir su previo con ceros durante sync global
@@ -1103,7 +1122,7 @@ def _recalcular_acumulados_previo(conexion, cursor):
         miembros_grupo.setdefault(row['id_grupo'], []).append(row['clave'])
 
     cursor.execute("""
-        SELECT id, clave, es_integral, grupo_integral,
+        SELECT id, clave, evac, nombre_cliente, nivel, es_integral, grupo_integral,
                compromiso_scott, compromiso_apparel_syncros_vittoria,
                compromiso_jul_ago,     compromiso_sep_oct,     compromiso_nov_dic,
                compromiso_ene_feb,     compromiso_mar_abr,     compromiso_may_jun,
@@ -1162,6 +1181,7 @@ def _recalcular_acumulados_previo(conexion, cursor):
         return total
 
     actualizados = 0
+    resultados = []
     for fila in filas:
         if fila['es_integral']:
             grupo_id = fila['grupo_integral']
@@ -1203,54 +1223,82 @@ def _recalcular_acumulados_previo(conexion, cursor):
         cm_ini = flt(fila.get('compra_minima_inicial'))
         cm_anu = flt(fila.get('compra_minima_anual'))
 
-        cursor.execute("""
-            UPDATE previo SET
-                acumulado_anticipado                   = %s,
-                acumulado_syncros                      = %s,
-                acumulado_apparel                      = %s,
-                acumulado_vittoria                     = %s,
-                acumulado_bold                         = %s,
-                avance_global                          = %s,
-                avance_global_scott                    = %s,
-                avance_global_apparel_syncros_vittoria = %s,
-                porcentaje_global                      = %s,
-                porcentaje_anual                       = %s,
-                porcentaje_scott                       = %s,
-                porcentaje_apparel_syncros_vittoria    = %s,
-                avance_jul_ago     = %s,  porcentaje_jul_ago     = %s,
-                avance_sep_oct     = %s,  porcentaje_sep_oct     = %s,
-                avance_nov_dic     = %s,  porcentaje_nov_dic     = %s,
-                avance_ene_feb     = %s,  porcentaje_ene_feb     = %s,
-                avance_mar_abr     = %s,  porcentaje_mar_abr     = %s,
-                avance_may_jun     = %s,  porcentaje_may_jun     = %s,
-                avance_jul_ago_app = %s,  porcentaje_jul_ago_app = %s,
-                avance_sep_oct_app = %s,  porcentaje_sep_oct_app = %s,
-                avance_nov_dic_app = %s,  porcentaje_nov_dic_app = %s,
-                avance_ene_feb_app = %s,  porcentaje_ene_feb_app = %s,
-                avance_mar_abr_app = %s,  porcentaje_mar_abr_app = %s,
-                avance_may_jun_app = %s,  porcentaje_may_jun_app = %s
-            WHERE id = %s
-        """, (
-            acum_total, syncros, apparel, vittoria, bold,
-            acum_total, scott, app_global,
-            pct(acum_total, cm_ini), pct(acum_total, cm_anu),
-            pct(scott,      flt(fila.get('compromiso_scott'))),
-            pct(app_global, flt(fila.get('compromiso_apparel_syncros_vittoria'))),
-            p_scott['jul_ago'], pct(p_scott['jul_ago'], flt(fila.get('compromiso_jul_ago'))),
-            p_scott['sep_oct'], pct(p_scott['sep_oct'], flt(fila.get('compromiso_sep_oct'))),
-            p_scott['nov_dic'], pct(p_scott['nov_dic'], flt(fila.get('compromiso_nov_dic'))),
-            p_scott['ene_feb'], pct(p_scott['ene_feb'], flt(fila.get('compromiso_ene_feb'))),
-            p_scott['mar_abr'], pct(p_scott['mar_abr'], flt(fila.get('compromiso_mar_abr'))),
-            p_scott['may_jun'], pct(p_scott['may_jun'], flt(fila.get('compromiso_may_jun'))),
-            p_app['jul_ago'],   pct(p_app['jul_ago'],   flt(fila.get('compromiso_jul_ago_app'))),
-            p_app['sep_oct'],   pct(p_app['sep_oct'],   flt(fila.get('compromiso_sep_oct_app'))),
-            p_app['nov_dic'],   pct(p_app['nov_dic'],   flt(fila.get('compromiso_nov_dic_app'))),
-            p_app['ene_feb'],   pct(p_app['ene_feb'],   flt(fila.get('compromiso_ene_feb_app'))),
-            p_app['mar_abr'],   pct(p_app['mar_abr'],   flt(fila.get('compromiso_mar_abr_app'))),
-            p_app['may_jun'],   pct(p_app['may_jun'],   flt(fila.get('compromiso_may_jun_app'))),
-            fila['id']
-        ))
+        valores_fila = {
+            'id': fila['id'], 'clave': fila['clave'], 'evac': fila.get('evac'),
+            'nombre_cliente': fila.get('nombre_cliente'), 'nivel': fila.get('nivel'),
+            'es_integral': fila.get('es_integral'), 'grupo_integral': fila.get('grupo_integral'),
+            'acumulado_anticipado': acum_total, 'acumulado_syncros': syncros,
+            'acumulado_apparel': apparel, 'acumulado_vittoria': vittoria, 'acumulado_bold': bold,
+            'avance_global': acum_total, 'avance_global_scott': scott,
+            'avance_global_apparel_syncros_vittoria': app_global,
+            'compra_minima_inicial': cm_ini, 'compra_minima_anual': cm_anu,
+            'porcentaje_global': pct(acum_total, cm_ini), 'porcentaje_anual': pct(acum_total, cm_anu),
+            'compromiso_scott': flt(fila.get('compromiso_scott')),
+            'porcentaje_scott': pct(scott, flt(fila.get('compromiso_scott'))),
+            'compromiso_apparel_syncros_vittoria': flt(fila.get('compromiso_apparel_syncros_vittoria')),
+            'porcentaje_apparel_syncros_vittoria': pct(app_global, flt(fila.get('compromiso_apparel_syncros_vittoria'))),
+        }
+        for p in PERIODS:
+            valores_fila[f'compromiso_{p}'] = flt(fila.get(f'compromiso_{p}'))
+            valores_fila[f'avance_{p}'] = p_scott[p]
+            valores_fila[f'porcentaje_{p}'] = pct(p_scott[p], flt(fila.get(f'compromiso_{p}')))
+            valores_fila[f'compromiso_{p}_app'] = flt(fila.get(f'compromiso_{p}_app'))
+            valores_fila[f'avance_{p}_app'] = p_app[p]
+            valores_fila[f'porcentaje_{p}_app'] = pct(p_app[p], flt(fila.get(f'compromiso_{p}_app')))
+
+        if dry_run:
+            resultados.append(valores_fila)
+        else:
+            cursor.execute("""
+                UPDATE previo SET
+                    acumulado_anticipado                   = %s,
+                    acumulado_syncros                      = %s,
+                    acumulado_apparel                      = %s,
+                    acumulado_vittoria                     = %s,
+                    acumulado_bold                         = %s,
+                    avance_global                          = %s,
+                    avance_global_scott                    = %s,
+                    avance_global_apparel_syncros_vittoria = %s,
+                    porcentaje_global                      = %s,
+                    porcentaje_anual                       = %s,
+                    porcentaje_scott                       = %s,
+                    porcentaje_apparel_syncros_vittoria    = %s,
+                    avance_jul_ago     = %s,  porcentaje_jul_ago     = %s,
+                    avance_sep_oct     = %s,  porcentaje_sep_oct     = %s,
+                    avance_nov_dic     = %s,  porcentaje_nov_dic     = %s,
+                    avance_ene_feb     = %s,  porcentaje_ene_feb     = %s,
+                    avance_mar_abr     = %s,  porcentaje_mar_abr     = %s,
+                    avance_may_jun     = %s,  porcentaje_may_jun     = %s,
+                    avance_jul_ago_app = %s,  porcentaje_jul_ago_app = %s,
+                    avance_sep_oct_app = %s,  porcentaje_sep_oct_app = %s,
+                    avance_nov_dic_app = %s,  porcentaje_nov_dic_app = %s,
+                    avance_ene_feb_app = %s,  porcentaje_ene_feb_app = %s,
+                    avance_mar_abr_app = %s,  porcentaje_mar_abr_app = %s,
+                    avance_may_jun_app = %s,  porcentaje_may_jun_app = %s
+                WHERE id = %s
+            """, (
+                acum_total, syncros, apparel, vittoria, bold,
+                acum_total, scott, app_global,
+                valores_fila['porcentaje_global'], valores_fila['porcentaje_anual'],
+                valores_fila['porcentaje_scott'], valores_fila['porcentaje_apparel_syncros_vittoria'],
+                p_scott['jul_ago'], valores_fila['porcentaje_jul_ago'],
+                p_scott['sep_oct'], valores_fila['porcentaje_sep_oct'],
+                p_scott['nov_dic'], valores_fila['porcentaje_nov_dic'],
+                p_scott['ene_feb'], valores_fila['porcentaje_ene_feb'],
+                p_scott['mar_abr'], valores_fila['porcentaje_mar_abr'],
+                p_scott['may_jun'], valores_fila['porcentaje_may_jun'],
+                p_app['jul_ago'],   valores_fila['porcentaje_jul_ago_app'],
+                p_app['sep_oct'],   valores_fila['porcentaje_sep_oct_app'],
+                p_app['nov_dic'],   valores_fila['porcentaje_nov_dic_app'],
+                p_app['ene_feb'],   valores_fila['porcentaje_ene_feb_app'],
+                p_app['mar_abr'],   valores_fila['porcentaje_mar_abr_app'],
+                p_app['may_jun'],   valores_fila['porcentaje_may_jun_app'],
+                fila['id']
+            ))
         actualizados += 1
+
+    if dry_run:
+        return resultados
 
     conexion.commit()
     return actualizados

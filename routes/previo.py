@@ -356,6 +356,48 @@ def obtener_previo_int():
         if conexion and conexion.is_connected():
             conexion.close()
 
+@previo_bp.route('/obtener_previo_fecha', methods=['GET'])
+def obtener_previo_fecha():
+    """
+    Recalcula (sin escribir en `previo`) los montos acotados a un rango de
+    fechas (fecha_desde=YYYY-MM-DD&fecha_hasta=YYYY-MM-DD), usando la misma
+    lógica de categorización que el recálculo en vivo. Para "ver como estaban
+    los montos" entre dos fechas de la temporada actual, sin mover el corte
+    real de temporada. fecha_desde es opcional (si se omite, usa el f_inicio
+    real de cada cliente); fecha_hasta es requerida.
+    """
+    fecha_desde = request.args.get('fecha_desde')
+    fecha_hasta = request.args.get('fecha_hasta') or request.args.get('fecha')
+    if not fecha_hasta:
+        return jsonify({'error': 'Se requiere el parámetro fecha_hasta (YYYY-MM-DD)'}), 400
+
+    conexion = None
+    cursor = None
+    try:
+        from routes.monitor_odoo import _recalcular_acumulados_previo
+
+        conexion = obtener_conexion()
+        cursor = conexion.cursor(dictionary=True)
+
+        resultados = _recalcular_acumulados_previo(
+            conexion, cursor,
+            fecha_corte_override=fecha_hasta,
+            fecha_inicio_override=fecha_desde,
+            dry_run=True
+        )
+        return jsonify(resultados), 200
+
+    except Exception as e:
+        logging.exception("Error en obtener_previo_fecha")
+        return jsonify({'error': str(e)}), 500
+
+    finally:
+        if cursor:
+            cursor.close()
+        if conexion:
+            conexion.close()
+
+
 @previo_bp.route('/recalcular_previo', methods=['POST'])
 def disparar_recalculo_previo():
     try:

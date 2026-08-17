@@ -122,6 +122,9 @@ def registrar_venta():
     datos['nombre_completo'] = request.form.get('nombre_completo')
     datos['nombre_sucursal'] = request.form.get('nombre_sucursal')
 
+    usuario_actual = _usuario_desde_token(request)
+    nombre_usuario = usuario_actual.get('nombre') or usuario_actual.get('usuario') if usuario_actual else None
+
     # 2. Validar que los archivos obligatorios estén presentes (PDF y XML son opcionales)
     for key_archivo in ARCHIVOS_REQUERIDOS.keys():
         file = request.files.get(key_archivo)
@@ -237,7 +240,7 @@ def registrar_venta():
         if nueva:
             data.guardar_historial_inicial(
                 cursor, nueva['id'],
-                json.dumps([_entrada_historial('creacion', 'Solicitud registrada')])
+                json.dumps([_entrada_historial('creacion', 'Solicitud registrada', nombre_usuario)])
             )
             conexion.commit()
 

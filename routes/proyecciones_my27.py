@@ -36,10 +36,62 @@ MESES       = ['mayo', 'junio', 'julio', 'agosto', 'septiembre',
 MESES_LABEL = ['May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic', 'Ene', 'Feb', 'Mar', 'Abr']
 MESES_ORDEN = MESES  # alias — mismo orden cronológico MY27
 
-_MY27_R_TTL  = 600  # 10 min Redis — monitor completo
+# Lista de prioridad para distribución de inventario.
+# Los clientes no en esta lista reciben stock después de la prioridad 27.
+PRIORIDAD_CLIENTES = [
+    (1,  'LC657', 'Víctor Hugo Villanueva Guzman'),
+    (2,  'MC677', 'BICICLETAS SCJM'),
+    (3,  'MC679', 'Adventure Bike Rider S. A. DE C. V. (GPE)'),
+    (4,  'GC411', 'Adventure Bike Rider S. A. DE C. V.'),
+    (5,  'HE420', 'Xavier James Lord Santos'),
+    (6,  'EC216', 'Marco Tulio (Morelia)'),
+    (7,  'JC539', 'Marco Tulio Andrade Navarro (León)'),
+    (8,  'MD670', 'LIVING FOR BIKES'),
+    (9,  'GD380', 'Cycling Riding de Mexico SA de CV (Metepec)'),
+    (10, 'HA433', 'Lucia Salazar Lopez'),
+    (11, 'ID506', 'Angelica Osorio Gasperin'),
+    (12, '4E013', 'CHRISTIAN BOCCALETTI.'),
+    (13, 'JE537', 'Christian Boccaletti.'),
+    (14, 'LC625', 'Naruco S. A. de C. V. Arcos'),
+    (15, 'LC626', 'Naruco S. A. de C. V. SJR'),
+    (16, 'LC627', 'Naruco S. A. de C. V. (Jurica)'),
+    (17, '84920', 'Naruco Corregidora'),
+    (18, 'MD697', 'Fernando Pontón Rocha'),
+    (19, 'EA219', 'Victor Alejandro Garnier Morga'),
+    (20, 'HF427', 'Opciones Creativas SA de CV'),
+    (21, 'FA271', 'Juan Manuel Ruacho Rangel'),
+    (22, 'AG873', 'Alta Gama 87'),
+    (23, 'LD664', 'Bikes 95 Cycling Club S. A. De C. V.'),
+    (24, '5GEG6', 'FELIPE ENRIQUEZ ROJAS'),
+    (25, 'IA500', 'Jesus Manuel Medrano Velarde'),
+    (26, 'DC192', 'ANA CECILIA LOPEZ LOPEZ'),
+    (27, 'JC554', 'ZIRANDA MADRIGAL EUGENA'),
+]
+# Lookup rápido: clave_cliente → (prioridad, nombre_canonical)
+_PRIORIDAD_MAP: dict = {clave.strip().upper(): (prio, nombre)
+                        for prio, clave, nombre in PRIORIDAD_CLIENTES}
+
+# Reserva trimestre-mayor: el stock disponible se asigna primero al Q más próximo.
+# Mayo/Jun/Jul son meses ya despachados — aparecen en el modal como informativos
+# pero no consumen del pool actual de reserva.
+TRIMESTRES_DIST = [
+    ['agosto', 'septiembre', 'octubre'],
+    ['noviembre', 'diciembre', 'enero'],
+    ['febrero', 'marzo', 'abril'],
+]
+MESES_PASADOS_DIST: frozenset = frozenset(['mayo', 'junio', 'julio'])
+
+_MY27_R_TTL     = 1800  # 30 min Redis — monitor completo
+_COBERTURA_R_TTL = 300  # 5 min Redis — cobertura inventario
+_STOCK_ODOO_R_TTL = 600  # 10 min Redis — stock Odoo (sobrevive restarts)
 
 def _rkey_my27(periodo: str) -> str:
     return f'proy_my27:{periodo}'
+
+def _rkey_cobertura(periodo: str) -> str:
+    return f'cobertura_megamo:{periodo}'
+
+_RKEY_STOCK_ODOO = 'stock_odoo:my27'
 
 _COSTOS_CACHE: dict = {'data': {}, 'ts': 0.0}
 _COSTOS_TTL = 300  # 5 minutos
@@ -49,6 +101,64 @@ _MEGAMO_PRECIOS_TTL  = 300
 
 _ORDENES_CACHE: dict = {'data': {}, 'periodo': '', 'ts': 0.0}
 _ORDENES_TTL = 180  # 3 minutos
+
+_STOCK_ODOO_CACHE: dict = {'data': {}, 'ts': 0.0}
+_STOCK_ODOO_TTL = 300  # 5 minutos
+
+
+def _get_stock_disponible_odoo() -> dict:
+    """
+    Retorna {sku: pronosticado} donde pronosticado = virtual_available de Odoo.
+    virtual_available = qty_on_hand + incoming_qty - outgoing_qty (reservado).
+    Incluye stock en tránsito y descuenta lo ya comprometido a otras órdenes.
+    Caché doble: memoria (5 min) + Redis (10 min, sobrevive restarts de Flask).
+    """
+    global _STOCK_ODOO_CACHE
+    now = time.time()
+
+    # 1. Memoria (más rápido)
+    if _STOCK_ODOO_CACHE['ts'] > 0.0 and (now - _STOCK_ODOO_CACHE['ts']) < _STOCK_ODOO_TTL:
+        return _STOCK_ODOO_CACHE['data']
+
+    # 2. Redis (sobrevive restarts)
+    cached = _redis_get(_RKEY_STOCK_ODOO)
+    if cached is not None:
+        _STOCK_ODOO_CACHE = {'data': cached, 'ts': now}
+        return cached
+
+    try:
+        uid, models, err = get_odoo_models()
+        if not uid:
+            logging.warning('[stock_odoo] no se pudo conectar: %s', err)
+            return _STOCK_ODOO_CACHE['data']
+
+        skus = list(FORECAST_SKU_WHITELIST)
+
+        # Paso 1: variantes MY27 con su virtual_available (pronosticado)
+        # virtual_available = qty_on_hand + incoming_qty - outgoing_qty
+        prods = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'product.product', 'search_read',
+            [[['default_code', 'in', skus]]],
+            {'fields': ['id', 'default_code', 'virtual_available'], 'limit': 0})
+
+        result: dict = {}
+        for p in prods:
+            sku = (p.get('default_code') or '').strip()
+            if not sku:
+                continue
+            virtual = float(p.get('virtual_available') or 0)
+            result[sku] = max(0, int(virtual))
+
+        _STOCK_ODOO_CACHE = {'data': result, 'ts': now}
+        _redis_set(_RKEY_STOCK_ODOO, result, _STOCK_ODOO_R_TTL)
+        logging.info('[stock_odoo] %d SKUs con pronosticado Odoo (>0: %d)',
+                     len(result), sum(1 for v in result.values() if v > 0))
+        return result
+
+    except Exception as e:
+        logging.warning('[stock_odoo] error: %s', e)
+        return _STOCK_ODOO_CACHE['data']
+
 
 # Mapeo nivel → pricelist ID en Odoo
 _NIVEL_TO_PL_ID: dict = {
@@ -265,15 +375,46 @@ def _get_ordenes_my27(periodo: str) -> dict:
             _ORDENES_CACHE = {'data': {}, 'periodo': periodo, 'ts': now}
             return {}
 
-        # 2. Refs de los partners
+        # 2. Refs de los partners (con fallback a empresa matriz para contactos hijo)
         partner_ids = list({o['partner_id'][0] for o in orders if o.get('partner_id')})
         partners = models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
             'res.partner', 'search_read',
-            [[['id', 'in', partner_ids], ['ref', '!=', False]]],
-            {'fields': ['id', 'ref'], 'limit': 0}
+            [[['id', 'in', partner_ids]]],
+            {'fields': ['id', 'ref', 'parent_id'], 'limit': 0}
         )
-        ref_map = {p['id']: (p.get('ref') or '').strip() for p in partners}
+        ref_map: dict = {}
+        sin_ref: list = []  # (child_id, parent_id)
+        sin_ref_ni_padre: list = []  # sin ref y sin parent_id
+        for p in partners:
+            ref = (p.get('ref') or '').strip()
+            if ref:
+                ref_map[p['id']] = ref
+            elif p.get('parent_id'):
+                sin_ref.append((p['id'], p['parent_id'][0]))
+            else:
+                sin_ref_ni_padre.append(p['id'])
+        logging.info('[ordenes_my27] partners con ref: %d, hijos sin ref: %d, sin ref ni padre: %d',
+                     len(ref_map), len(sin_ref), len(sin_ref_ni_padre))
+        # Fallback: buscar ref en la empresa matriz de contactos hijo sin ref
+        if sin_ref:
+            parent_ids_lookup = list({pid for _, pid in sin_ref})
+            parents = models.execute_kw(
+                ODOO_DB, uid, ODOO_PASSWORD,
+                'res.partner', 'search_read',
+                [[['id', 'in', parent_ids_lookup]]],
+                {'fields': ['id', 'ref', 'name'], 'limit': 0}
+            )
+            parent_ref_map = {p['id']: (p.get('ref') or '').strip() for p in parents}
+            logging.info('[ordenes_my27] padres encontrados: %s',
+                         {p['id']: (p.get('ref'), p.get('name')) for p in parents})
+            for child_id, parent_id in sin_ref:
+                pref = parent_ref_map.get(parent_id, '')
+                logging.info('[ordenes_my27] hijo %s → padre %s ref=%r', child_id, parent_id, pref)
+                if pref:
+                    ref_map[child_id] = pref
+        logging.info('[ordenes_my27] ref_map final: %d claves; EC216 presente: %s',
+                     len(ref_map), 'EC216' in ref_map.values())
 
         # 3. order_id → clave_cliente
         order_clave = {
@@ -281,6 +422,7 @@ def _get_ordenes_my27(periodo: str) -> dict:
             for o in orders
             if o.get('partner_id') and ref_map.get(o['partner_id'][0])
         }
+        logging.info('[ordenes_my27] ordenes con clave: %d / %d totales', len(order_clave), len(orders))
 
         # 4. Líneas de venta
         sol = models.execute_kw(
@@ -321,6 +463,10 @@ def _get_ordenes_my27(periodo: str) -> dict:
 
         _ORDENES_CACHE = {'data': result, 'periodo': periodo, 'ts': now}
         logging.info('[ordenes_my27] %d clientes con pedidos en %s', len(result), periodo)
+        if 'EC216' in result:
+            logging.info('[ordenes_my27] EC216 pedidos: %s', result['EC216'])
+        else:
+            logging.info('[ordenes_my27] EC216 NO está en result — no se descontará')
         return result
 
     except Exception as e:
@@ -601,6 +747,7 @@ def listar():
             _COSTOS_CACHE['ts'] = 0.0
             _MEGAMO_PRECIOS_CACHE['ts'] = 0.0
             _ORDENES_CACHE['ts'] = 0.0
+            _STOCK_ODOO_CACHE['ts'] = 0.0
         else:
             cached = _redis_get(_rkey_my27(periodo))
             if cached is not None:
@@ -613,6 +760,30 @@ def listar():
         logging.exception('[proyecciones_my27] listar error: %s', e)
         return jsonify({'error': str(e)}), 500
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /proyecciones-my27/debug-ordenes  — diagnóstico temporal
+# ─────────────────────────────────────────────────────────────────────────────
+
+@proyecciones_my27_bp.route('/debug-ordenes', methods=['GET'])
+def debug_ordenes():
+    """Endpoint temporal de diagnóstico: devuelve raw de _get_ordenes_my27."""
+    periodo = request.args.get('periodo', '2026-2027')
+    # Forzar re-fetch (expira cache)
+    global _ORDENES_CACHE
+    _ORDENES_CACHE['ts'] = 0.0
+    result = _get_ordenes_my27(periodo)
+    # Verificar si EC216 está en el resultado
+    ec216_data = result.get('EC216')
+    sku_target = _norm_sku('427102-0001004')
+    return jsonify({
+        'total_clientes': len(result),
+        'claves': sorted(result.keys()),
+        'EC216_presente': 'EC216' in result,
+        'EC216_pedidos': ec216_data,
+        'sku_norm_target': sku_target,
+        'EC216_sku_qty': ec216_data.get(sku_target, 'KEY_NOT_FOUND') if ec216_data else None,
+    }), 200
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GET /proyecciones-my27/exportar  — descarga Excel
@@ -994,6 +1165,16 @@ def subir_inventario_megamo():
     cur.close()
     conn.close()
 
+    # Invalidar caché de cobertura para que el próximo GET recalcule con el nuevo inventario
+    try:
+        import redis as _redis_lib
+        import os as _os
+        _r = _redis_lib.Redis(host=_os.getenv('REDIS_HOST', 'localhost'),
+                              port=int(_os.getenv('REDIS_PORT', 6379)), db=0)
+        _r.delete(_rkey_cobertura(periodo))
+    except Exception:
+        pass
+
     return jsonify({
         'ok': True,
         'periodo': periodo,
@@ -1035,81 +1216,134 @@ def get_inventario_megamo():
 
 def _compute_cobertura(periodo: str) -> list:
     """
-    Calcula el análisis FIFO de cobertura para un periodo dado.
-    Devuelve la lista de dicts de cobertura (o lista vacía si no hay inventario).
+    Calcula el análisis FIFO de cobertura para todos los SKUs de FORECAST_SKU_WHITELIST.
+    Cada SKU reporta:
+      - cantidad_entrante: stock subido por Excel (tabla forecast_inventario_megamo)
+      - odoo_disponible:   pronosticado Odoo (virtual_available = on_hand + tránsito - reservado)
+      - total_disponible:  suma de ambos (base para el FIFO)
+    Solo omite SKUs que no tienen proyecciones NI stock de ningún tipo.
+    Odoo stock se obtiene primero, antes de abrir la conexión MySQL.
     """
+    # 1. Stock disponible Odoo (cacheado 5 min) — hoisted before DB open
+    odoo_stock = _get_stock_disponible_odoo()
+
     conn = obtener_conexion()
-    cur  = conn.cursor(dictionary=True)
+    try:
+        cur = conn.cursor(dictionary=True)
 
-    # 1. Inventario entrante
-    cur.execute("""
-        SELECT sku, cantidad, descripcion
-        FROM forecast_inventario_megamo
-        WHERE periodo = %s
-    """, (periodo,))
-    inventario_rows = cur.fetchall()
-    if not inventario_rows:
-        cur.close()
-        conn.close()
-        return []
+        # 2. Inventario entrante desde BD (puede estar vacío — no abortamos)
+        cur.execute("""
+            SELECT sku, cantidad, descripcion
+            FROM forecast_inventario_megamo
+            WHERE periodo = %s
+        """, (periodo,))
+        inventario_rows = cur.fetchall()
+        inventario = {r['sku']: r for r in inventario_rows}
 
-    inventario = {r['sku']: r for r in inventario_rows}
-    skus_inv   = list(inventario.keys())
+        # 3. Proyecciones globales por SKU — todos los SKUs del catálogo
+        skus_all = list(FORECAST_SKU_WHITELIST)
+        proy_by_sku: dict = {}
 
-    # 2. Proyecciones globales por SKU
-    proy_by_sku = {}
-    monitor_cached = _redis_get(_rkey_my27(periodo))
-
-    if monitor_cached:
-        for art in monitor_cached.get('articulos', []):
-            sku = art['sku']
-            if sku not in inventario:
-                continue
-            proy_by_sku[sku] = {mes: art['meses'][mes]['cantidad'] for mes in MESES_ORDEN}
-            proy_by_sku[sku]['sku']      = sku
-            proy_by_sku[sku]['producto'] = art.get('producto', sku)
-        cur.close()
-        conn.close()
-    else:
-        cols_mes = ', '.join(f'COALESCE(SUM({m}), 0) AS {m}' for m in MESES_ORDEN)
-        cur.execute(f"""
-            SELECT fp.sku, {cols_mes}, MAX(fp.producto) AS producto
-            FROM forecast_proyecciones fp
-            WHERE fp.periodo = %s AND fp.sku IN ({','.join(['%s']*len(skus_inv))})
-            GROUP BY fp.sku
-        """, (periodo, *skus_inv))
-        proyecciones_rows = cur.fetchall()
-
-        if proyecciones_rows:
-            skus_proy = [r['sku'] for r in proyecciones_rows]
+        monitor_cached = _redis_get(_rkey_my27(periodo))
+        if monitor_cached:
+            for art in monitor_cached.get('articulos', []):
+                sku = art['sku']
+                proy_by_sku[sku] = {mes: art['meses'][mes]['cantidad'] for mes in MESES_ORDEN}
+                proy_by_sku[sku]['sku']      = sku
+                proy_by_sku[sku]['producto'] = art.get('producto', sku)
+            # no explicit cur/conn close here — finally handles it
+        else:
+            cols_mes = ', '.join(f'COALESCE(SUM({m}), 0) AS {m}' for m in MESES_ORDEN)
+            ph = ','.join(['%s'] * len(skus_all))
             cur.execute(f"""
-                SELECT referencia_interna, nombre_producto
-                FROM odoo_catalogo
-                WHERE referencia_interna IN ({','.join(['%s']*len(skus_proy))})
-            """, skus_proy)
-            nombres_odoo = {r['referencia_interna']: r['nombre_producto'] for r in cur.fetchall()}
-            for r in proyecciones_rows:
-                r['producto'] = nombres_odoo.get(r['sku']) or r.get('producto') or r['sku']
-        cur.close()
-        conn.close()
-        proy_by_sku = {r['sku']: r for r in proyecciones_rows}
+                SELECT fp.sku, fp.clave_cliente, {cols_mes}, MAX(fp.producto) AS producto
+                FROM forecast_proyecciones fp
+                WHERE fp.periodo = %s AND fp.sku IN ({ph})
+                GROUP BY fp.sku, fp.clave_cliente
+            """, (periodo, *skus_all))
+            proy_rows_raw = cur.fetchall()
 
-    # 3. Calcular cobertura FIFO por SKU
+            # Aplicar deducción de órdenes Odoo (igual que el Monitor) para consistencia
+            ordenes_dist_cob = _get_ordenes_my27(periodo)
+            if ordenes_dist_cob:
+                proy_rows_deducidos = []
+                for r in proy_rows_raw:
+                    sn = _norm_sku(r['sku'])
+                    total_ped = ordenes_dist_cob.get(r['clave_cliente'], {}).get(sn, 0)
+                    if total_ped > 0:
+                        r = dict(r)
+                        rest_d = total_ped
+                        for mes in MESES_ORDEN:
+                            qty = int(r.get(mes) or 0)
+                            ded = min(rest_d, qty)
+                            r[mes] = qty - ded
+                            rest_d -= ded
+                            if rest_d <= 0:
+                                break
+                    proy_rows_deducidos.append(r)
+                proy_rows_raw = proy_rows_deducidos
+
+            # Agregar por SKU (suma de todos los clientes, ya deducida)
+            proy_by_sku_raw: dict = {}
+            for r in proy_rows_raw:
+                sku = r['sku']
+                if sku not in proy_by_sku_raw:
+                    proy_by_sku_raw[sku] = {m: 0 for m in MESES_ORDEN}
+                    proy_by_sku_raw[sku]['sku']     = sku
+                    proy_by_sku_raw[sku]['producto'] = r.get('producto') or sku
+                for m in MESES_ORDEN:
+                    proy_by_sku_raw[sku][m] += int(r.get(m) or 0)
+
+            if proy_by_sku_raw:
+                skus_proy = list(proy_by_sku_raw.keys())
+                ph2 = ','.join(['%s'] * len(skus_proy))
+                cur.execute(f"""
+                    SELECT referencia_interna, nombre_producto
+                    FROM odoo_catalogo
+                    WHERE referencia_interna IN ({ph2})
+                """, skus_proy)
+                nombres_odoo = {r['referencia_interna']: r['nombre_producto']
+                                for r in cur.fetchall()}
+                for sku, rd in proy_by_sku_raw.items():
+                    rd['producto'] = nombres_odoo.get(sku) or rd.get('producto') or sku
+
+            proy_by_sku = proy_by_sku_raw
+    finally:
+        conn.close()
+
+    # 4. Construir resultado para TODOS los SKUs
     resultado = []
-    for sku in skus_inv:
-        inv_rec  = inventario[sku]
+    for sku in skus_all:
+        inv_rec  = inventario.get(sku, {})
         proy_rec = proy_by_sku.get(sku)
-        cantidad_entrante = inv_rec['cantidad']
+
+        cantidad_entrante = int(inv_rec.get('cantidad', 0) or 0)
+        odoo_disponible   = int(odoo_stock.get(sku, 0))
+        total_disponible  = cantidad_entrante + odoo_disponible
+
+        # Omitir SKUs sin ningún tipo de stock NI proyección
+        if total_disponible == 0 and not proy_rec:
+            continue
+
+        # Nombre del producto: proyección → descripcion del Excel → sku
+        nombre_prod = (
+            (proy_rec.get('producto') if proy_rec else None)
+            or inv_rec.get('descripcion')
+            or sku
+        )
 
         if not proy_rec:
+            # Sin proyección pero tiene stock (Odoo o entrante)
             resultado.append({
-                'sku': sku,
-                'producto': inv_rec.get('descripcion') or sku,
+                'sku':               sku,
+                'producto':          nombre_prod,
                 'cantidad_entrante': cantidad_entrante,
-                'total_proyectado': 0,
-                'total_cubierto': 0,
-                'total_deficit': 0,
-                'sobrante': cantidad_entrante,
+                'odoo_disponible':   odoo_disponible,
+                'total_disponible':  total_disponible,
+                'total_proyectado':  0,
+                'total_cubierto':    0,
+                'total_deficit':     0,
+                'sobrante':          total_disponible,
                 'cobertura': [{
                     'mes': m, 'proyectado': 0, 'cubierto': 0,
                     'deficit': 0, 'estado': 'sin_demanda'
@@ -1117,8 +1351,9 @@ def _compute_cobertura(periodo: str) -> list:
             })
             continue
 
-        disponible = cantidad_entrante
-        cobertura_meses = []
+        # FIFO sobre total_disponible
+        disponible       = total_disponible
+        cobertura_meses  = []
         total_proyectado = 0
         total_cubierto   = 0
 
@@ -1134,9 +1369,9 @@ def _compute_cobertura(periodo: str) -> list:
                 continue
 
             if disponible >= proy_mes:
-                cubierto = proy_mes
+                cubierto   = proy_mes
                 disponible -= proy_mes
-                estado = 'completo'
+                estado     = 'completo'
             elif disponible > 0:
                 cubierto   = disponible
                 disponible = 0
@@ -1153,27 +1388,197 @@ def _compute_cobertura(periodo: str) -> list:
             })
 
         resultado.append({
-            'sku': sku,
-            'producto': proy_rec.get('producto') or inv_rec.get('descripcion') or sku,
+            'sku':               sku,
+            'producto':          nombre_prod,
             'cantidad_entrante': cantidad_entrante,
-            'total_proyectado': total_proyectado,
-            'total_cubierto': total_cubierto,
-            'total_deficit': total_proyectado - total_cubierto,
-            'sobrante': max(0, disponible),
-            'cobertura': cobertura_meses,
+            'odoo_disponible':   odoo_disponible,
+            'total_disponible':  total_disponible,
+            'total_proyectado':  total_proyectado,
+            'total_cubierto':    total_cubierto,
+            'total_deficit':     total_proyectado - total_cubierto,
+            'sobrante':          max(0, disponible),
+            'cobertura':         cobertura_meses,
         })
 
     resultado.sort(key=lambda x: (x['total_proyectado'] == 0, x['sku']))
     return resultado
 
 
+def _compute_distribucion_prioritaria(periodo: str) -> list:
+    """
+    Para cada SKU con total_disponible > 0 o proyecciones:
+      - Distribuye total_disponible (Odoo + entrante) a clientes en orden de prioridad.
+      - Algoritmo FIFO por mes: el cliente prioritario llena primero cada mes
+        de su demanda antes de que el siguiente cliente reciba algo.
+      - Clientes no en PRIORIDAD_CLIENTES aparecen después del lugar 27,
+        ordenados por clave_cliente.
+    """
+    # 1. Cobertura con stock combinado
+    cobertura = _compute_cobertura(periodo)
+    sku_info  = {c['sku']: c for c in cobertura}
+
+    # 2. Demanda por cliente por SKU — solo clientes con al menos 1 unidad
+    conn = obtener_conexion()
+    try:
+        cur  = conn.cursor(dictionary=True)
+        cols = ', '.join(
+            f'COALESCE(SUM(fp.{m}), 0) AS {m}' for m in MESES_ORDEN
+        )
+        cur.execute(f"""
+            SELECT
+                fp.sku,
+                fp.clave_cliente,
+                COALESCE(c.nombre_cliente, fp.clave_cliente) AS nombre_cliente,
+                {cols},
+                (COALESCE(SUM(fp.mayo),0)+COALESCE(SUM(fp.junio),0)+
+                 COALESCE(SUM(fp.julio),0)+COALESCE(SUM(fp.agosto),0)+
+                 COALESCE(SUM(fp.septiembre),0)+COALESCE(SUM(fp.octubre),0)+
+                 COALESCE(SUM(fp.noviembre),0)+COALESCE(SUM(fp.diciembre),0)+
+                 COALESCE(SUM(fp.enero),0)+COALESCE(SUM(fp.febrero),0)+
+                 COALESCE(SUM(fp.marzo),0)+COALESCE(SUM(fp.abril),0)) AS total_demanda
+            FROM forecast_proyecciones fp
+            LEFT JOIN clientes c ON c.clave = fp.clave_cliente
+            WHERE fp.periodo = %s
+            GROUP BY fp.sku, fp.clave_cliente, nombre_cliente
+            HAVING total_demanda > 0
+        """, (periodo,))
+        rows = cur.fetchall()
+        cur.close()
+    finally:
+        conn.close()
+
+    # 2b. Descontar órdenes ya colocadas en Odoo (misma lógica que el Monitor)
+    ordenes_dist = _get_ordenes_my27(periodo)
+    if ordenes_dist:
+        rows_deducidos = []
+        for r in rows:
+            sn = _norm_sku(r['sku'])
+            total_pedido = ordenes_dist.get(r['clave_cliente'], {}).get(sn, 0)
+            if total_pedido > 0:
+                r = dict(r)  # copia mutable
+                restante_ded = total_pedido
+                for mes in MESES_ORDEN:
+                    qty = int(r.get(mes) or 0)
+                    deducido = min(restante_ded, qty)
+                    r[mes] = qty - deducido
+                    restante_ded -= deducido
+                    if restante_ded <= 0:
+                        break
+                r['total_demanda'] = sum(int(r.get(m) or 0) for m in MESES_ORDEN)
+            if int(r.get('total_demanda') or 0) > 0:
+                rows_deducidos.append(r)
+        rows = rows_deducidos
+
+    # 3. Agrupar por SKU y ordenar por prioridad
+    from collections import defaultdict
+    sku_clientes: dict = defaultdict(list)
+    for r in rows:
+        prio_info = _PRIORIDAD_MAP.get((r['clave_cliente'] or '').strip().upper())
+        sku_clientes[r['sku']].append({
+            'clave_cliente':  r['clave_cliente'],
+            'nombre_cliente': r['nombre_cliente'],
+            'prioridad':      prio_info[0] if prio_info else 999,
+            'meses':          {m: int(r.get(m) or 0) for m in MESES_ORDEN},
+            'total_demanda':  int(r.get('total_demanda') or 0),
+        })
+    for sku in sku_clientes:
+        sku_clientes[sku].sort(
+            key=lambda x: (x['prioridad'], x['clave_cliente'])
+        )
+
+    # 4. Distribuir stock por SKU — algoritmo trimestre-mayor, cliente-mayor dentro de cada Q
+    resultado = []
+    for sku, info in sku_info.items():
+        if info['total_proyectado'] == 0 and info['total_disponible'] == 0:
+            continue
+
+        stock_restante = info['total_disponible']
+        clientes_dist  = sku_clientes.get(sku, [])
+
+        # Mapa de asignación: clave_cliente → mes → unidades asignadas
+        asig_map: dict = {
+            c['clave_cliente']: {m: 0 for m in MESES_ORDEN}
+            for c in clientes_dist
+        }
+
+        # Reserva Q1 → Q2 → Q3 en orden de prioridad por cliente
+        for trimestre_meses in TRIMESTRES_DIST:
+            for cliente in clientes_dist:  # ya ordenados por prioridad
+                for mes in trimestre_meses:
+                    demanda = cliente['meses'].get(mes, 0)
+                    if demanda == 0 or stock_restante <= 0:
+                        continue
+                    alloc = min(demanda, stock_restante)
+                    asig_map[cliente['clave_cliente']][mes] = alloc
+                    stock_restante -= alloc
+
+        # Construir distribuciones con detalle por mes
+        distribuciones = []
+        for cliente in clientes_dist:
+            clave          = cliente['clave_cliente']
+            asig_cte       = asig_map[clave]
+            total_asignado = sum(asig_cte.values())
+            detalle_meses  = []
+
+            for mes in MESES_ORDEN:
+                demanda = cliente['meses'].get(mes, 0)
+                if demanda == 0:
+                    continue
+                detalle_meses.append({
+                    'mes':      mes,
+                    'demanda':  demanda,
+                    'asignado': asig_cte[mes],
+                    'pendiente': demanda - asig_cte[mes],
+                    'pasado':   mes in MESES_PASADOS_DIST,
+                })
+
+            distribuciones.append({
+                'clave_cliente':  clave,
+                'nombre_cliente': cliente['nombre_cliente'],
+                'prioridad':      cliente['prioridad'],
+                'total_demanda':  cliente['total_demanda'],
+                'asignado':       total_asignado,
+                'pendiente':      cliente['total_demanda'] - total_asignado,
+                'detalle_meses':  detalle_meses,
+            })
+
+        resultado.append({
+            'sku':               sku,
+            'producto':          info.get('producto', sku),
+            'odoo_disponible':   info['odoo_disponible'],
+            'cantidad_entrante': info['cantidad_entrante'],
+            'total_disponible':  info['total_disponible'],
+            'total_proyectado':  info['total_proyectado'],
+            'stock_restante':    max(0, stock_restante),
+            'distribuciones':    distribuciones,
+        })
+
+    resultado.sort(key=lambda x: (x['total_disponible'] == 0, x['sku']))
+    return resultado
+
+
 @proyecciones_my27_bp.route('/cobertura-megamo', methods=['GET'])
 def get_cobertura_megamo():
     """
-    GET /proyecciones-my27/cobertura-megamo?periodo=2026-2027
+    GET /proyecciones-my27/cobertura-megamo?periodo=2026-2027&refresh=1
     Devuelve análisis FIFO de cobertura: stock entrante vs proyecciones globales por SKU.
+    Sin cache Redis propio — la BD es rápida; el stock de Odoo tiene su propio cache.
+    refresh=1 fuerza re-fetch del stock de Odoo además del recálculo.
     """
-    periodo  = request.args.get('periodo', '2026-2027').strip()
+    periodo = request.args.get('periodo', '2026-2027').strip()
+    refresh = request.args.get('refresh', '0') == '1'
+
+    if refresh:
+        # Limpiar cache de stock Odoo para que el próximo _compute_cobertura lo refetch
+        global _STOCK_ODOO_CACHE
+        _STOCK_ODOO_CACHE = {'data': {}, 'ts': 0.0}
+        try:
+            import redis as _rl, os as _os
+            _rl.Redis(host=_os.getenv('REDIS_HOST', 'localhost'),
+                      port=int(_os.getenv('REDIS_PORT', 6379)), db=0).delete(_RKEY_STOCK_ODOO)
+        except Exception:
+            pass
+
     resultado = _compute_cobertura(periodo)
     if not resultado:
         return jsonify({'periodo': periodo, 'cobertura': [],
@@ -1225,7 +1630,7 @@ def exportar_cobertura():
         brd  = Border(left=thin, right=thin, top=thin, bottom=thin)
 
         # ── Cabecera ──
-        fixed_cols = ['SKU', 'Producto', 'Inventario']
+        fixed_cols = ['SKU', 'Producto', 'Odoo disp.', 'Entrante', 'Total disp.']
         mes_labels = MESES_LABEL  # 12 meses
         tail_cols  = ['Total Proyectado', 'Total Cubierto', 'Déficit', 'Sobrante', 'Estado']
         headers    = fixed_cols + mes_labels + tail_cols
@@ -1249,7 +1654,9 @@ def exportar_cobertura():
             row_vals = [
                 sku_data['sku'],
                 sku_data.get('producto', ''),
+                sku_data.get('odoo_disponible', 0),
                 sku_data['cantidad_entrante'],
+                sku_data.get('total_disponible', 0),
             ]
             for mes in MESES_ORDEN:
                 mc = next((c for c in sku_data['cobertura'] if c['mes'] == mes), None)
@@ -1287,9 +1694,13 @@ def exportar_cobertura():
                 elif col_idx == 2:  # Producto
                     cell.font = F_MUTED
                     cell.alignment = AL_L
-                elif col_idx == 3:  # Inventario
+                elif col_idx == 3:  # Odoo disp.
                     cell.font = F_WHITE
-                elif col_idx in range(4, 4 + 12):  # Meses
+                elif col_idx == 4:  # Entrante
+                    cell.font = F_WHITE
+                elif col_idx == 5:  # Total disp.
+                    cell.font = Font(color='EB5E28', bold=True, size=9)
+                elif col_idx in range(6, 6 + 12):  # Meses
                     v = cell.value or 0
                     cell.font = (F_NORMAL if v == 0 else
                                  Font(color='FFFCF2', size=9))
@@ -1307,14 +1718,16 @@ def exportar_cobertura():
         # Anchos de columna
         ws.column_dimensions[get_column_letter(1)].width = 16   # SKU
         ws.column_dimensions[get_column_letter(2)].width = 30   # Producto
-        ws.column_dimensions[get_column_letter(3)].width = 13   # Inventario
-        for c in range(4, 4 + 12):
+        ws.column_dimensions[get_column_letter(3)].width = 11   # Odoo disp.
+        ws.column_dimensions[get_column_letter(4)].width = 11   # Entrante
+        ws.column_dimensions[get_column_letter(5)].width = 11   # Total disp.
+        for c in range(6, 6 + 12):
             ws.column_dimensions[get_column_letter(c)].width = 8
-        for c in range(4 + 12, len(headers) + 1):
+        for c in range(6 + 12, len(headers) + 1):
             ws.column_dimensions[get_column_letter(c)].width = 15
 
         ws.row_dimensions[1].height = 22
-        ws.freeze_panes = 'D2'
+        ws.freeze_panes = 'F2'
 
         buf = io.BytesIO()
         wb.save(buf)
@@ -1331,3 +1744,125 @@ def exportar_cobertura():
     except Exception as e:
         logging.exception('[proyecciones_my27] exportar_cobertura error: %s', e)
         return jsonify({'error': str(e)}), 500
+
+
+@proyecciones_my27_bp.route('/distribucion-prioritaria', methods=['GET'])
+def get_distribucion_prioritaria():
+    """
+    GET /proyecciones-my27/distribucion-prioritaria?periodo=2026-2027
+    Distribución FIFO del stock disponible (Odoo + entrante) a clientes
+    en orden de prioridad definido en PRIORIDAD_CLIENTES.
+    """
+    periodo = request.args.get('periodo', '2026-2027').strip()
+    try:
+        result = _compute_distribucion_prioritaria(periodo)
+        return jsonify({'periodo': periodo, 'distribuciones': result}), 200
+    except Exception as e:
+        logging.exception('[distribucion_prioritaria] error: %s', e)
+        return jsonify({'error': str(e)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /proyecciones-my27/generar-orden-odoo — crea pedido de venta en Odoo
+# ─────────────────────────────────────────────────────────────────────────────
+
+@proyecciones_my27_bp.route('/generar-orden-odoo', methods=['POST'])
+def generar_orden_odoo():
+    """
+    POST /proyecciones-my27/generar-orden-odoo
+    Body: {
+      "clave_cliente": "LC657",
+      "mes": "agosto",
+      "lineas": [{"sku": "286383-704", "cantidad": 5}, ...]
+    }
+    Crea un pedido de venta en Odoo con los productos seleccionados,
+    vinculando el partner por ref=clave_cliente y etiquetando el mes.
+    """
+    data = request.get_json(force=True) or {}
+    clave_cliente = (data.get('clave_cliente') or '').strip().upper()
+    mes           = (data.get('mes') or '').strip().lower()
+    lineas        = [l for l in (data.get('lineas') or []) if int(l.get('cantidad') or 0) > 0]
+
+    if not clave_cliente or not mes or not lineas:
+        return jsonify({'error': 'Se requieren clave_cliente, mes y al menos una línea con cantidad > 0'}), 400
+
+    try:
+        uid, models, err = get_odoo_models()
+        if not uid:
+            return jsonify({'error': f'No se pudo conectar a Odoo: {err}'}), 503
+
+        # 1. Partner por ref = clave_cliente
+        partners = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'res.partner', 'search_read',
+            [[['ref', '=', clave_cliente]]],
+            {'fields': ['id', 'name'], 'limit': 1})
+        if not partners:
+            return jsonify({'error': f'No se encontró contacto en Odoo con ref={clave_cliente}'}), 404
+        partner_id   = partners[0]['id']
+        partner_name = partners[0]['name']
+
+        # 2. Tag del mes — buscar o crear "Reserva Agosto" etc.
+        mes_label = f"Reserva {mes.capitalize()}"
+        existing_tags = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'crm.tag', 'search_read',
+            [[['name', '=', mes_label]]],
+            {'fields': ['id'], 'limit': 1})
+        tag_id = (existing_tags[0]['id'] if existing_tags
+                  else models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+                      'crm.tag', 'create', [{'name': mes_label}]))
+
+        # 3. product.product por default_code (SKU)
+        skus = [(l.get('sku') or '').strip() for l in lineas]
+        prods = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'product.product', 'search_read',
+            [[['default_code', 'in', skus]]],
+            {'fields': ['id', 'default_code', 'lst_price'], 'limit': 0})
+        sku_to_prod = {(p.get('default_code') or '').strip(): p for p in prods}
+
+        # 4. Construir order_line
+        order_lines      = []
+        skus_no_encontrados = []
+        for l in lineas:
+            sku      = (l.get('sku') or '').strip()
+            cantidad = int(l.get('cantidad') or 0)
+            prod     = sku_to_prod.get(sku)
+            if not prod:
+                skus_no_encontrados.append(sku)
+                continue
+            order_lines.append((0, 0, {
+                'product_id':      prod['id'],
+                'product_uom_qty': cantidad,
+                'price_unit':      float(prod.get('lst_price') or 0),
+            }))
+
+        if not order_lines:
+            return jsonify({'error': 'Ningún SKU fue encontrado en el catálogo de Odoo'}), 400
+
+        # 5. Crear sale.order
+        order_vals = {
+            'partner_id': partner_id,
+            'tag_ids':    [(4, tag_id)],
+            'note':       f'RESERVA MY27 — {mes.upper()} — {clave_cliente}',
+            'order_line': order_lines,
+        }
+        order_id = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'sale.order', 'create', [order_vals])
+
+        order_name = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD,
+            'sale.order', 'read', [[order_id]], {'fields': ['name']})[0]['name']
+
+        logging.info('[generar_orden] %s para %s (%s) mes=%s — %d líneas',
+                     order_name, partner_name, clave_cliente, mes, len(order_lines))
+
+        return jsonify({
+            'order_id':            order_id,
+            'order_name':          order_name,
+            'partner_name':        partner_name,
+            'lineas_creadas':      len(order_lines),
+            'skus_no_encontrados': skus_no_encontrados,
+        }), 200
+
+    except Exception as e:
+        logging.exception('[generar_orden] error: %s', e)
+        return jsonify({'error': str(e)}), 500
+
