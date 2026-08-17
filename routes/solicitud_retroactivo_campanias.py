@@ -37,6 +37,34 @@ def _obtener_json():
     return request.get_json(force=True, silent=True) or {}
 
 
+def _normalizar_json_campo(valor):
+    """
+    MySQL regresa las columnas JSON_ARRAYAGG (msi, productos) ya sea como
+    lista (driver las parsea solo) o como string crudo -- normaliza ambos
+    casos a una lista de Python.
+    """
+    if not valor:
+        return []
+    if isinstance(valor, list):
+        return valor
+    if isinstance(valor, str):
+        try:
+            return json.loads(valor)
+        except (TypeError, ValueError):
+            return []
+    return []
+
+
+def _normalizar_campania_json(fila):
+    """
+    Aplica _normalizar_json_campo a los campos 'msi' y 'productos' de una
+    fila de campaña.
+    """
+    fila['msi'] = _normalizar_json_campo(fila.get('msi'))
+    fila['productos'] = _normalizar_json_campo(fila.get('productos'))
+    return fila
+
+
 def _validar_fecha(fecha, nombre_campo):
     """
     Valida que una fecha tenga formato YYYY-MM-DD.
@@ -79,6 +107,41 @@ def _normalizar_productos(productos):
 
     # Eliminamos duplicados conservando el orden
     return list(dict.fromkeys(resultado))
+
+
+def _normalizar_msi(msi):
+    """
+    Valida y normaliza la lista de MSI de una campaña. Cada elemento debe
+    traer msi_id (existente en el catálogo global) y porcentaje (0-100).
+    Regresa None si el formato es inválido.
+    """
+    if not isinstance(msi, list) or not msi:
+        return None
+
+    resultado = []
+    for item in msi:
+        if not isinstance(item, dict):
+            return None
+        try:
+            msi_id = int(item.get('msi_id'))
+            if msi_id <= 0:
+                return None
+        except (TypeError, ValueError):
+            return None
+        try:
+            porcentaje = float(item.get('porcentaje'))
+            if porcentaje < 0 or porcentaje > 100:
+                return None
+        except (TypeError, ValueError):
+            return None
+        resultado.append((msi_id, porcentaje))
+
+    # Sin duplicados del mismo msi_id
+    ids = [m[0] for m in resultado]
+    if len(ids) != len(set(ids)):
+        return None
+
+    return resultado
 
 
 def _normalizar_activa(activa, valor_default=1):
@@ -134,6 +197,70 @@ def listar_msi():
 
 
 # ============================================================
+# POST CREAR MSI (plazo nuevo, cuando MKT necesita uno que no existe)
+# ============================================================
+
+@solicitud_retroactivo_campanias_bp.route('/api/solicitud-retroactivo-campanias/msi', methods=['POST'])
+def crear_msi():
+    """
+    POST - Agrega un plazo nuevo al catálogo global de MSI. El % que se
+    manda aquí es solo un valor base/informativo -- el % real que aplica
+    en cada campaña se define al ligar el MSI a la campaña (ver msi en
+    crear_campania/editar_campania).
+    """
+    body = _obtener_json()
+
+    try:
+        plazo_meses = int(body.get('plazo_meses'))
+        if plazo_meses <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "plazo_meses debe ser un entero positivo."}), 400
+
+    try:
+        porcentaje = float(body.get('porcentaje'))
+        if porcentaje < 0 or porcentaje > 100:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "porcentaje debe ser un número entre 0 y 100."}), 400
+
+    conexion = obtener_conexion()
+    if not conexion:
+        return jsonify({"error": "No se pudo conectar a la base de datos."}), 500
+
+    cursor = conexion.cursor(dictionary=True, buffered=True)
+
+    try:
+        existente = data.obtener_msi_por_plazo(cursor, plazo_meses)
+        if existente:
+            return jsonify({
+                "error": f"Ya existe un plazo de {plazo_meses} meses.",
+                "msi": existente
+            }), 409
+
+        msi_id = data.crear_msi(cursor, plazo_meses, porcentaje)
+        conexion.commit()
+
+        return jsonify({
+            "respuesta": True,
+            "mensaje": "Plazo MSI creado correctamente.",
+            "datos": {"id": msi_id, "plazo_meses": plazo_meses, "porcentaje": porcentaje}
+        }), 201
+
+    except Exception as e:
+        conexion.rollback()
+        logging.exception("Error al crear plazo MSI: %s", e)
+        return jsonify({
+            "error": "Error al crear el plazo MSI.",
+            "detalle": str(e)
+        }), 500
+
+    finally:
+        cursor.close()
+        conexion.close()
+
+
+# ============================================================
 # GET CAMPAÑAS
 # ============================================================
 
@@ -150,18 +277,7 @@ def listar_campanias():
 
     try:
         filas = data.listar_campanias(cursor)
-
-        for fila in filas:
-            productos = fila.get('productos')
-            if productos is None or productos == '':
-                fila['productos'] = []
-            elif isinstance(productos, list):
-                fila['productos'] = productos
-            elif isinstance(productos, str):
-                try:
-                    fila['productos'] = json.loads(productos)
-                except (TypeError, ValueError):
-                    fila['productos'] = []
+        filas = [_normalizar_campania_json(fila) for fila in filas]
 
         return jsonify(filas), 200
 
@@ -197,15 +313,7 @@ def obtener_campania(id_campania):
         if not fila:
             return jsonify({"error": "Campaña no encontrada."}), 404
 
-        productos = fila.get('productos')
-        if not productos:
-            fila['productos'] = []
-        elif isinstance(productos, str):
-            try:
-                fila['productos'] = json.loads(productos)
-            except (TypeError, ValueError):
-                fila['productos'] = []
-
+        fila = _normalizar_campania_json(fila)
         return jsonify(fila), 200
 
     except Exception as e:
@@ -250,13 +358,12 @@ def crear_campania():
     if fecha_fin < fecha_inicio:
         return jsonify({"error": "fecha_fin no puede ser menor que fecha_inicio."}), 400
 
-    # Validar MSI
-    msi_id = body.get('msi_id')
-    try:
-        msi_id = int(msi_id)
-        if msi_id <= 0: raise ValueError
-    except (TypeError, ValueError):
-        return jsonify({"error": "msi_id inválido."}), 400
+    # Validar MSI -- lista de {msi_id, porcentaje}, al menos uno
+    msi_list = _normalizar_msi(body.get('msi'))
+    if msi_list is None:
+        return jsonify({
+            "error": "msi debe ser un arreglo con al menos un elemento {msi_id, porcentaje} (porcentaje entre 0 y 100)."
+        }), 400
 
     # Validar productos
     productos = _normalizar_productos(body.get('productos'))
@@ -275,9 +382,17 @@ def crear_campania():
     cursor = conexion.cursor(dictionary=True, buffered=True)
 
     try:
-        msi = data.obtener_msi_por_id(cursor, msi_id)
-        if not msi:
-            return jsonify({"error": "El MSI indicado no existe."}), 400
+        ids_msi_solicitados = {msi_id for msi_id, _ in msi_list}
+        ids_msi_validos = set()
+        for msi_id in ids_msi_solicitados:
+            if data.obtener_msi_por_id(cursor, msi_id):
+                ids_msi_validos.add(msi_id)
+        msi_invalidos = ids_msi_solicitados - ids_msi_validos
+        if msi_invalidos:
+            return jsonify({
+                "error": "Uno o más MSI indicados no existen.",
+                "msi_invalidos": list(msi_invalidos)
+            }), 400
 
         if productos:
             productos_validos = data.validar_productos(cursor, productos)
@@ -290,7 +405,8 @@ def crear_campania():
                     "productos_invalidos": productos_invalidos
                 }), 400
 
-        id_campania = data.crear_campania(cursor, nombre, fecha_inicio, fecha_fin, msi_id, activa)
+        id_campania = data.crear_campania(cursor, nombre, fecha_inicio, fecha_fin, activa)
+        data.agregar_msi_campania(cursor, id_campania, msi_list)
 
         if productos:
             data.agregar_productos_campania(cursor, id_campania, productos)
@@ -298,16 +414,8 @@ def crear_campania():
         conexion.commit()
 
         campania = data.obtener_campania(cursor, id_campania)
-        
         if campania:
-            productos_resultado = campania.get('productos')
-            if not productos_resultado:
-                campania['productos'] = []
-            elif isinstance(productos_resultado, str):
-                try:
-                    campania['productos'] = json.loads(productos_resultado)
-                except (TypeError, ValueError):
-                    campania['productos'] = []
+            campania = _normalizar_campania_json(campania)
 
         return jsonify({
             "respuesta": True,
@@ -369,17 +477,24 @@ def editar_campania(id_campania):
         if fecha_fin < fecha_inicio:
             return jsonify({"error": "fecha_fin no puede ser menor que fecha_inicio."}), 400
 
-        # Validar MSI
-        msi_id = body.get('msi_id')
-        try:
-            msi_id = int(msi_id)
-            if msi_id <= 0: raise ValueError
-        except (TypeError, ValueError):
-            return jsonify({"error": "msi_id inválido."}), 400
+        # Validar MSI -- lista de {msi_id, porcentaje}, al menos uno
+        msi_list = _normalizar_msi(body.get('msi'))
+        if msi_list is None:
+            return jsonify({
+                "error": "msi debe ser un arreglo con al menos un elemento {msi_id, porcentaje} (porcentaje entre 0 y 100)."
+            }), 400
 
-        msi = data.obtener_msi_por_id(cursor, msi_id)
-        if not msi:
-            return jsonify({"error": "El MSI indicado no existe."}), 400
+        ids_msi_solicitados = {msi_id for msi_id, _ in msi_list}
+        ids_msi_validos = set()
+        for msi_id in ids_msi_solicitados:
+            if data.obtener_msi_por_id(cursor, msi_id):
+                ids_msi_validos.add(msi_id)
+        msi_invalidos = ids_msi_solicitados - ids_msi_validos
+        if msi_invalidos:
+            return jsonify({
+                "error": "Uno o más MSI indicados no existen.",
+                "msi_invalidos": list(msi_invalidos)
+            }), 400
 
         # Validar productos
         productos = _normalizar_productos(body.get('productos'))
@@ -403,7 +518,9 @@ def editar_campania(id_campania):
             return jsonify({"error": "activa debe ser 1, 0, true o false."}), 400
 
         # Actualizar campaña
-        data.actualizar_campania(cursor, id_campania, nombre, fecha_inicio, fecha_fin, msi_id, activa)
+        data.actualizar_campania(cursor, id_campania, nombre, fecha_inicio, fecha_fin, activa)
+        data.eliminar_msi_campania(cursor, id_campania)
+        data.agregar_msi_campania(cursor, id_campania, msi_list)
         data.eliminar_productos_campania(cursor, id_campania)
 
         if productos:
@@ -413,14 +530,7 @@ def editar_campania(id_campania):
 
         campania = data.obtener_campania(cursor, id_campania)
         if campania:
-            productos_resultado = campania.get('productos')
-            if not productos_resultado:
-                campania['productos'] = []
-            elif isinstance(productos_resultado, str):
-                try:
-                    campania['productos'] = json.loads(productos_resultado)
-                except (TypeError, ValueError):
-                    campania['productos'] = []
+            campania = _normalizar_campania_json(campania)
 
         return jsonify({
             "respuesta": True,
@@ -506,6 +616,67 @@ def listar_marcas():
         logging.exception("Error al consultar marcas: %s", e)
         return jsonify({
             "error": "Error al consultar las marcas.",
+            "detalle": str(e)
+        }), 500
+
+    finally:
+        cursor.close()
+        conexion.close()
+
+
+# ============================================================
+# POST BUSCAR PRODUCTOS POR SKU (carga masiva)
+# ============================================================
+
+@solicitud_retroactivo_campanias_bp.route('/api/solicitud-retroactivo-campanias/productos/buscar-por-sku', methods=['POST'])
+def buscar_productos_por_sku():
+    """
+    POST - Resuelve una lista de SKUs a sus productos detalle, para que MKT
+    pueda cargar productos de forma masiva en el formulario de campaña en
+    vez de buscarlos uno por uno en el catálogo. Regresa los encontrados y
+    la lista de SKUs que no existen, para que el usuario pueda corregirlos.
+    """
+    body = _obtener_json()
+    skus = body.get('skus')
+
+    if not isinstance(skus, list) or not skus:
+        return jsonify({"error": "skus debe ser un arreglo con al menos un SKU."}), 400
+
+    # Normaliza: recorta espacios, descarta vacíos y duplicados
+    # conservando el orden de aparición.
+    skus_limpios = []
+    vistos = set()
+    for s in skus:
+        s = str(s).strip()
+        if not s or s in vistos:
+            continue
+        vistos.add(s)
+        skus_limpios.append(s)
+
+    if not skus_limpios:
+        return jsonify({"error": "skus debe ser un arreglo con al menos un SKU."}), 400
+
+    conexion = obtener_conexion()
+    if not conexion:
+        return jsonify({"error": "No se pudo conectar a la base de datos."}), 500
+
+    cursor = conexion.cursor(dictionary=True, buffered=True)
+
+    try:
+        encontrados = data.buscar_productos_por_skus(cursor, skus_limpios)
+        skus_encontrados = {p['sku'] for p in encontrados}
+        no_encontrados = [s for s in skus_limpios if s not in skus_encontrados]
+
+        return jsonify({
+            "respuesta": True,
+            "encontrados": encontrados,
+            "no_encontrados": no_encontrados
+        }), 200
+
+    except Exception as e:
+        logging.exception("Error al buscar productos por SKU: %s", e)
+        return jsonify({
+            "error": "Error al buscar productos por SKU.",
             "detalle": str(e)
         }), 500
 

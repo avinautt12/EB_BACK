@@ -46,6 +46,32 @@ def obtener_msi_por_id(cursor, msi_id):
     return cursor.fetchone()
 
 
+def obtener_msi_por_plazo(cursor, plazo_meses):
+    """
+    Busca un MSI del catálogo global por su plazo (para evitar duplicados
+    al crear uno nuevo desde el formulario de campañas).
+    """
+    cursor.execute("""
+        SELECT id, plazo_meses, porcentaje
+        FROM solicitud_retroactivo_msi
+        WHERE plazo_meses = %s
+    """, (plazo_meses,))
+    return cursor.fetchone()
+
+
+def crear_msi(cursor, plazo_meses, porcentaje):
+    """
+    Agrega un plazo nuevo al catálogo global de MSI (el % aquí es solo un
+    valor base/informativo -- el % real que aplica en cada campaña vive en
+    solicitud_retroactivo_campania_msi).
+    """
+    cursor.execute("""
+        INSERT INTO solicitud_retroactivo_msi (plazo_meses, porcentaje)
+        VALUES (%s, %s)
+    """, (plazo_meses, porcentaje))
+    return cursor.lastrowid
+
+
 # ============================================================
 # PRODUCTOS DETALLE (VARIANTES / SKUs)
 # ============================================================
@@ -71,7 +97,8 @@ def validar_productos(cursor, productos):
 # ============================================================
 def listar_campanias(cursor):
     """
-    Obtiene todas las campañas con el detalle completo de sus SKUs asociados.
+    Obtiene todas las campañas con sus MSI (cada uno con su % propio de esta
+    campaña) y el detalle completo de sus SKUs asociados.
     """
     cursor.execute("""
         SELECT
@@ -79,10 +106,22 @@ def listar_campanias(cursor):
             c.nombre,
             c.fecha_inicio,
             c.fecha_fin,
-            c.msi_id,
-            m.plazo_meses,
-            m.porcentaje,
             c.activa,
+            COALESCE(
+                (
+                    SELECT JSON_ARRAYAGG(
+                        JSON_OBJECT(
+                            'msi_id', cm.msi_id,
+                            'plazo_meses', m.plazo_meses,
+                            'porcentaje', cm.porcentaje
+                        )
+                    )
+                    FROM solicitud_retroactivo_campania_msi cm
+                    INNER JOIN solicitud_retroactivo_msi m ON m.id = cm.msi_id
+                    WHERE cm.campania_id = c.id
+                ),
+                JSON_ARRAY()
+            ) AS msi,
             COALESCE(
                 (
                     SELECT JSON_ARRAYAGG(
@@ -100,13 +139,11 @@ def listar_campanias(cursor):
                     INNER JOIN producto_detalle pd ON cp.producto_detalle_id = pd.id
                     INNER JOIN productos p ON pd.codigo_producto = p.codigo
                     WHERE cp.campania_id = c.id
-                ), 
+                ),
                 JSON_ARRAY()
             ) AS productos
         FROM solicitud_retroactivo_campanias c
-        LEFT JOIN solicitud_retroactivo_msi m
-            ON m.id = c.msi_id
-        ORDER BY 
+        ORDER BY
             c.fecha_fin DESC;
     """)
     return cursor.fetchall()
@@ -114,7 +151,7 @@ def listar_campanias(cursor):
 
 def obtener_campania(cursor, id_campania):
     """
-    Obtiene una campaña específica por ID con sus SKUs detallados.
+    Obtiene una campaña específica por ID con sus MSI y SKUs detallados.
     """
     cursor.execute("""
         SELECT
@@ -122,10 +159,22 @@ def obtener_campania(cursor, id_campania):
             c.nombre,
             c.fecha_inicio,
             c.fecha_fin,
-            c.msi_id,
-            m.plazo_meses,
-            m.porcentaje,
             c.activa,
+            COALESCE(
+                (
+                    SELECT JSON_ARRAYAGG(
+                        JSON_OBJECT(
+                            'msi_id', cm.msi_id,
+                            'plazo_meses', m.plazo_meses,
+                            'porcentaje', cm.porcentaje
+                        )
+                    )
+                    FROM solicitud_retroactivo_campania_msi cm
+                    INNER JOIN solicitud_retroactivo_msi m ON m.id = cm.msi_id
+                    WHERE cm.campania_id = c.id
+                ),
+                JSON_ARRAY()
+            ) AS msi,
             COALESCE(
                 (
                     SELECT JSON_ARRAYAGG(
@@ -143,12 +192,10 @@ def obtener_campania(cursor, id_campania):
                     INNER JOIN producto_detalle pd ON cp.producto_detalle_id = pd.id
                     INNER JOIN productos p ON pd.codigo_producto = p.codigo
                     WHERE cp.campania_id = c.id
-                ), 
+                ),
                 JSON_ARRAY()
             ) AS productos
         FROM solicitud_retroactivo_campanias c
-        LEFT JOIN solicitud_retroactivo_msi m
-            ON m.id = c.msi_id
         WHERE c.id = %s
     """, (id_campania,))
     return cursor.fetchone()
@@ -158,21 +205,21 @@ def obtener_campania(cursor, id_campania):
 # CREAR CAMPAÑA
 # ============================================================
 
-def crear_campania(cursor, nombre, fecha_inicio, fecha_fin, msi_id, activa):
+def crear_campania(cursor, nombre, fecha_inicio, fecha_fin, activa):
     """
-    Crea una campaña y devuelve el ID generado.
+    Crea una campaña (sin MSI todavía -- eso se liga aparte, ver
+    agregar_msi_campania) y devuelve el ID generado.
     """
     cursor.execute("""
         INSERT INTO solicitud_retroactivo_campanias (
             nombre,
             fecha_inicio,
             fecha_fin,
-            msi_id,
             activa
         )
-        VALUES (%s, %s, %s, %s, %s)
-    """, (nombre, fecha_inicio, fecha_fin, msi_id, activa))
-    
+        VALUES (%s, %s, %s, %s)
+    """, (nombre, fecha_inicio, fecha_fin, activa))
+
     return cursor.lastrowid
 
 
@@ -180,7 +227,7 @@ def crear_campania(cursor, nombre, fecha_inicio, fecha_fin, msi_id, activa):
 # EDITAR CAMPAÑA
 # ============================================================
 
-def actualizar_campania(cursor, id_campania, nombre, fecha_inicio, fecha_fin, msi_id, activa):
+def actualizar_campania(cursor, id_campania, nombre, fecha_inicio, fecha_fin, activa):
     """
     Actualiza los datos principales de una campaña.
     """
@@ -190,10 +237,43 @@ def actualizar_campania(cursor, id_campania, nombre, fecha_inicio, fecha_fin, ms
             nombre = %s,
             fecha_inicio = %s,
             fecha_fin = %s,
-            msi_id = %s,
             activa = %s
         WHERE id = %s
-    """, (nombre, fecha_inicio, fecha_fin, msi_id, activa, id_campania))
+    """, (nombre, fecha_inicio, fecha_fin, activa, id_campania))
+
+
+# ============================================================
+# MSI DE LA CAMPAÑA (cada plazo con su % propio de esta campaña)
+# ============================================================
+
+def agregar_msi_campania(cursor, id_campania, msi_list):
+    """
+    Liga plazos MSI a una campaña, cada uno con su propio %.
+    msi_list: lista de tuplas (msi_id, porcentaje).
+    """
+    if not msi_list:
+        return
+
+    valores = [(id_campania, msi_id, porcentaje) for msi_id, porcentaje in msi_list]
+
+    cursor.executemany("""
+        INSERT INTO solicitud_retroactivo_campania_msi (
+            campania_id,
+            msi_id,
+            porcentaje
+        )
+        VALUES (%s, %s, %s)
+    """, valores)
+
+
+def eliminar_msi_campania(cursor, id_campania):
+    """
+    Elimina todos los plazos MSI ligados a una campaña.
+    """
+    cursor.execute("""
+        DELETE FROM solicitud_retroactivo_campania_msi
+        WHERE campania_id = %s
+    """, (id_campania,))
 
 
 # ============================================================
@@ -257,6 +337,34 @@ def listar_marcas(cursor):
         FROM solicitud_retroactivo_marca
         ORDER BY nombre ASC
     """)
+    return cursor.fetchall()
+
+
+def buscar_productos_por_skus(cursor, skus):
+    """
+    Busca productos detalle (variantes) por una lista de SKUs exactos, para
+    la carga masiva de productos en una campaña. sku es UNIQUE en
+    producto_detalle, así que cada SKU encontrado mapea a un solo registro.
+    """
+    if not skus:
+        return []
+
+    placeholders = ', '.join(['%s'] * len(skus))
+    cursor.execute(f"""
+        SELECT
+            pd.id,
+            p.id AS id_producto,
+            m.nombre AS marca,
+            p.modelo,
+            p.codigo,
+            pd.talla,
+            pd.color,
+            pd.sku
+        FROM producto_detalle pd
+        INNER JOIN productos p ON pd.codigo_producto = p.codigo
+        LEFT JOIN solicitud_retroactivo_marca m ON p.marca_id = m.id
+        WHERE pd.sku IN ({placeholders})
+    """, tuple(skus))
     return cursor.fetchall()
 
 
