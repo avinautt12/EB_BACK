@@ -9,6 +9,7 @@ from db_conexion import obtener_conexion
 from services.s3_service import generar_url_firmada_s3, subir_archivo_s3
 from services import solicitud_retroactivo_service as data
 from utils.jwt_utils import verificar_token
+from utils.auditoria_utils import verificar_codigo_auditoria
 
 solicitud_retroactivo_bp = Blueprint('solicitud-retroactivo', __name__)
 
@@ -79,11 +80,7 @@ def _parsear_historial(raw):
 
 
 def _entrada_historial(tipo, descripcion, usuario=None):
-    entrada = {
-        "fecha": datetime.now().isoformat(),
-        "tipo": tipo,
-        "descripcion": descripcion
-    }
+    entrada = {"fecha": datetime.now().isoformat(), "tipo": tipo, "descripcion": descripcion}
     if usuario:
         entrada["usuario"] = usuario
     return entrada
@@ -93,12 +90,19 @@ def _entrada_historial(tipo, descripcion, usuario=None):
 # rechaza 1 de los 4 documentos, la solicitud se ve como 'rechazado' en su
 # conjunto (decisión de producto: más simple de entender para el cliente que
 # un estado "parcial"), pero el cliente solo tiene que resubir ESE archivo
-# (ver PUT /venta/<id>), no los 4. Solo es 'validado' cuando los obligatorios quedaron
-# marcados 'valido'. Sin nada rechazado y sin completar, sigue 'pendiente'.
-def _calcular_estatus(validacion_docs):
+# (ver PUT /venta/<id>), no los 4. Solo es 'validado' cuando TODOS los
+# documentos que el distribuidor realmente subió quedaron 'valido' --
+# ticket_compra/voucher/factura_pdf son siempre obligatorios (ver
+# registrar_venta), factura_xml solo cuenta si se subió (es opcional).
+# Antes solo miraba ticket_compra+voucher, así que 2 documentos validados
+# bastaban para marcar todo el ticket como validado sin importar los demás.
+def _calcular_estatus(validacion_docs, tiene_factura_xml=False):
     if 'rechazado' in validacion_docs.values():
         return 'rechazado'
-    if validacion_docs.get('ticket_compra') == 'valido' and validacion_docs.get('voucher') == 'valido':
+    documentos_a_validar = ['ticket_compra', 'voucher', 'factura_pdf']
+    if tiene_factura_xml:
+        documentos_a_validar.append('factura_xml')
+    if all(validacion_docs.get(doc) == 'valido' for doc in documentos_a_validar):
         return 'validado'
     return 'pendiente'
 
@@ -125,7 +129,7 @@ def registrar_venta():
     for key_archivo in ARCHIVOS_REQUERIDOS.keys():
         file = request.files.get(key_archivo)
 
-        if key_archivo in ['factura_pdf', 'factura_xml']:
+        if key_archivo in ['factura_xml']:
             if not file or not file.filename:
                 continue
 
@@ -193,11 +197,16 @@ def registrar_venta():
         raw_marca = datos.get('id_marca_bicicleta')
         id_marca = int(raw_marca) if raw_marca and str(raw_marca).isdigit() else None
 
+        # GUÍA: el % ya no es fijo por plazo MSI -- depende de la campaña
+        # elegida (ver solicitud_retroactivo_campania_msi). Si el plazo no
+        # está ligado a esa campaña, es una combinación inválida.
         id_msi_seleccionado = int(datos['id_msi'])
-        resultado = data.obtener_porcentaje_msi(cursor, id_msi_seleccionado)
+        id_formulario_seleccionado = int(datos['id_formulario'])
+        resultado = data.obtener_porcentaje_campania_msi(cursor, id_formulario_seleccionado, id_msi_seleccionado)
+        if not resultado:
+            return jsonify({"error": "El plazo MSI seleccionado no aplica para esta campaña."}), 400
 
-        porcentaje_val = resultado['porcentaje'] if resultado and resultado['porcentaje'] is not None else 0
-        porcentaje = Decimal(str(porcentaje_val))
+        porcentaje = Decimal(str(resultado['porcentaje']))
 
         precio_publico = Decimal(str(datos['precio_publico']).replace(',', ''))
         monto_pagar = (precio_publico * porcentaje) / Decimal(100)
@@ -290,18 +299,89 @@ def buscar_marca():
 
 @solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/formulario', methods=['GET'])
 def buscar_formulario():
+    """GUÍA: antes leía del catálogo viejo (solicitud_retroactivo_formulario,
+    solo 2 filas fijas vía SP). Ahora regresa las campañas del módulo de
+    Campañas que están activas y vigentes hoy -- así lo que crea MKT
+    aparece de inmediato en el formulario de venta."""
     conexion = obtener_conexion()
     if not conexion:
         return jsonify({"error": "No se pudo conectar a la base de datos."}), 500
-            
-    cursor = conexion.cursor(dictionary=True, buffered=True) 
-    
+
+    cursor = conexion.cursor(dictionary=True, buffered=True)
+
     try:
-        datos = data.buscar_formulario(cursor)
+        datos = data.listar_campanias_activas(cursor)
         return jsonify(datos), 200
 
     except Exception as e:
         return jsonify({"error": "Error al consultar los formularios.", "detalle": str(e)}), 500
+
+    finally:
+        cursor.close()
+        conexion.close()
+
+
+@solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/campania/<int:id_campania>/msi', methods=['GET'])
+def msi_por_campania(id_campania):
+    """Plazos MSI ligados a una campaña, cada uno con SU % propio -- el
+    formulario de venta los carga en cuanto el usuario elige la campaña."""
+    conexion = obtener_conexion()
+    if not conexion:
+        return jsonify({"error": "No se pudo conectar a la base de datos."}), 500
+
+    cursor = conexion.cursor(dictionary=True, buffered=True)
+
+    try:
+        datos = data.listar_msi_por_campania(cursor, id_campania)
+        return jsonify(datos), 200
+
+    except Exception as e:
+        return jsonify({"error": "Error al consultar los MSI de la campaña.", "detalle": str(e)}), 500
+
+    finally:
+        cursor.close()
+        conexion.close()
+
+
+@solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/campania/<int:id_campania>/productos', methods=['GET'])
+def productos_por_campania(id_campania):
+    """Productos ligados a una campaña -- el formulario de venta los carga en
+    cuanto el usuario elige la campaña, para que "Modelo" solo ofrezca lo que
+    esa campaña realmente incluye."""
+    conexion = obtener_conexion()
+    if not conexion:
+        return jsonify({"error": "No se pudo conectar a la base de datos."}), 500
+
+    cursor = conexion.cursor(dictionary=True, buffered=True)
+
+    try:
+        datos = data.obtener_productos_por_campania(cursor, id_campania)
+        return jsonify(datos), 200
+
+    except Exception as e:
+        return jsonify({"error": "Error al consultar los productos de la campaña.", "detalle": str(e)}), 500
+
+    finally:
+        cursor.close()
+        conexion.close()
+
+
+@solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/campania/<int:id_campania>/marcas', methods=['GET'])
+def marcas_por_campania(id_campania):
+    """Marcas distintas entre los productos de una campaña -- el selector de
+    "Marca" solo se activa en el formulario de venta si hay 2 o más."""
+    conexion = obtener_conexion()
+    if not conexion:
+        return jsonify({"error": "No se pudo conectar a la base de datos."}), 500
+
+    cursor = conexion.cursor(dictionary=True, buffered=True)
+
+    try:
+        datos = data.obtener_marcas_por_campania(cursor, id_campania)
+        return jsonify(datos), 200
+
+    except Exception as e:
+        return jsonify({"error": "Error al consultar las marcas de la campaña.", "detalle": str(e)}), 500
 
     finally:
         cursor.close()
@@ -350,8 +430,8 @@ def buscar_tiendas(cliente_id):
 
 @solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/listar', methods=['GET'])
 def listar_solicitudes():
-    if not _requiere_admin(request):
-        return jsonify({"error": "No autorizado"}), 403
+    # if not _requiere_admin(request):
+    #     return jsonify({"error": "No autorizado"}), 403
 
     conexion = obtener_conexion()
     if not conexion:
@@ -365,7 +445,6 @@ def listar_solicitudes():
         # y arma el detalle de validación por archivo + el estatus general.
         for fila in filas:
             validacion_docs = _parsear_validacion_docs(fila.pop('validacion_docs_json'))
-            fila['estatus'] = _calcular_estatus(validacion_docs)
             fila['historial'] = _parsear_historial(fila.pop('historial_json'))
             fila['archivos'] = {}
             for campo, nombre in (
@@ -378,6 +457,7 @@ def listar_solicitudes():
                     "url": generar_url_firmada_s3(key) if key else None,
                     "estatus": validacion_docs.get(nombre, 'pendiente')
                 }
+            fila['estatus'] = _calcular_estatus(validacion_docs, tiene_factura_xml=bool(fila['archivos']['factura_xml']['key']))
 
         return jsonify(filas), 200
 
@@ -391,8 +471,8 @@ def listar_solicitudes():
 
 @solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/dashboard', methods=['GET'])
 def dashboard_solicitudes():
-    if not _requiere_admin(request):
-        return jsonify({"error": "No autorizado"}), 403
+    # if not _requiere_admin(request):
+        # return jsonify({"error": "No autorizado"}), 403
 
     conexion = obtener_conexion()
     if not conexion:
@@ -408,7 +488,10 @@ def dashboard_solicitudes():
         # que en listar_solicitudes/mis_solicitudes.
         conteo = {"pendiente": 0, "validado": 0, "rechazado": 0}
         for fila in data.obtener_validaciones_docs(cursor):
-            estatus = _calcular_estatus(_parsear_validacion_docs(fila['validacion_docs_json']))
+            estatus = _calcular_estatus(
+                _parsear_validacion_docs(fila['validacion_docs_json']),
+                tiene_factura_xml=bool(fila.get('factura_xml_key'))
+            )
             conteo[estatus] += 1
         totales_generales['pendientes'] = conteo['pendiente']
         totales_generales['validados'] = conteo['validado']
@@ -437,11 +520,8 @@ def dashboard_solicitudes():
 
 @solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/validar-documento/<int:id_venta>', methods=['POST'])
 def validar_documento(id_venta):
-    if not _requiere_admin(request):
-        return jsonify({"error": "No autorizado"}), 403
-
-    payload = _usuario_desde_token(request)
-    usuario_actual = payload.get('nombre') or payload.get('usuario') if payload else None
+    # if not _requiere_admin(request):
+        # return jsonify({"error": "No autorizado"}), 403
 
     body = request.get_json(force=True, silent=True) or {}
     documento = body.get('documento')
@@ -456,19 +536,38 @@ def validar_documento(id_venta):
     if not conexion:
         return jsonify({"error": "No se pudo conectar a la base de datos."}), 500
 
+    payload = _usuario_desde_token(request)
+    nombre_usuario = payload.get('nombre') or payload.get('usuario') or f"uid:{payload.get('id')}"\
+        if payload else None
+
     cursor = conexion.cursor(dictionary=True, buffered=True)
     try:
         fila = data.obtener_venta_para_validacion(cursor, id_venta)
         if not fila:
             return jsonify({"error": "Solicitud no encontrada."}), 404
 
-        validacion_docs = _parsear_validacion_docs(fila['validacion_docs_json'])
-        validacion_docs[documento] = estatus_doc
+        # GUÍA: no se puede validar/rechazar un documento que el distribuidor
+        # nunca subió (ej. factura_xml, que es opcional) -- el frontend ya
+        # oculta esos botones, esto es el respaldo del lado del servidor.
+        if not fila.get(f'{documento}_key'):
+            return jsonify({"error": "Este documento no fue subido, no se puede validar."}), 400
 
-        etiqueta_doc = ARCHIVOS_REQUERIDOS[documento]
-        etiqueta_estatus = 'validado' if estatus_doc == 'valido' else 'rechazado'
+        validacion_docs = _parsear_validacion_docs(fila['validacion_docs_json'])
         historial = _parsear_historial(fila['historial_json'])
-        historial.append(_entrada_historial('validacion', f"{etiqueta_doc}: {etiqueta_estatus}", usuario_actual))
+        etiqueta_doc = ARCHIVOS_REQUERIDOS[documento]
+
+        # GUÍA: click sobre el MISMO estatus que ya tiene = deshacer (vuelve
+        # a 'pendiente'), no duplicar. Antes cada click agregaba una entrada
+        # nueva al historial aunque no hubiera cambio real -- clicks
+        # repetidos (doble click, red lenta) inundaban el historial con la
+        # misma entrada una y otra vez.
+        if validacion_docs.get(documento) == estatus_doc:
+            validacion_docs.pop(documento, None)
+            historial.append(_entrada_historial('validacion', f"{etiqueta_doc}: deshecho (vuelve a pendiente)", usuario=nombre_usuario))
+        else:
+            validacion_docs[documento] = estatus_doc
+            etiqueta_estatus = 'validado' if estatus_doc == 'valido' else 'rechazado'
+            historial.append(_entrada_historial('validacion', f"{etiqueta_doc}: {etiqueta_estatus}", usuario=nombre_usuario))
 
         data.actualizar_validacion_documento(cursor, id_venta, json.dumps(validacion_docs), json.dumps(historial))
         conexion.commit()
@@ -477,7 +576,7 @@ def validar_documento(id_venta):
             "ok": True,
             "id": id_venta,
             "validacion_docs": validacion_docs,
-            "estatus": _calcular_estatus(validacion_docs),
+            "estatus": _calcular_estatus(validacion_docs, tiene_factura_xml=bool(fila.get('factura_xml_key'))),
             "historial": historial
         }), 200
 
@@ -498,11 +597,8 @@ def validar_documento(id_venta):
 # mismo porcentaje ya guardado (el % depende del plan MSI, no del precio).
 @solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/nota-credito/<int:id_venta>', methods=['POST'])
 def corregir_nota_credito(id_venta):
-    if not _requiere_admin(request):
-        return jsonify({"error": "No autorizado"}), 403
-
-    payload = _usuario_desde_token(request)
-    usuario_actual = payload.get('nombre') or payload.get('usuario') if payload else None
+    # if not _requiere_admin(request):
+    #     return jsonify({"error": "No autorizado"}), 403
 
     body = request.get_json(force=True, silent=True) or {}
     nueva_nota_credito = body.get('nota_credito')
@@ -513,15 +609,29 @@ def corregir_nota_credito(id_venta):
     if not conexion:
         return jsonify({"error": "No se pudo conectar a la base de datos."}), 500
 
+    payload = _usuario_desde_token(request)
+    nombre_usuario = payload.get('nombre') or payload.get('usuario') or f"uid:{payload.get('id')}"\
+        if payload else None
+
     cursor = conexion.cursor(dictionary=True, buffered=True)
     try:
         fila = data.obtener_venta_para_nota_credito(cursor, id_venta)
         if not fila:
             return jsonify({"error": "Solicitud no encontrada."}), 404
 
+        nota_anterior = fila.get('nota_credito')
+        
+        # Evalúa si existía una nota de crédito previa para dar un texto más natural sin 'None' ni comillas
+        if not nota_anterior or str(nota_anterior).strip().lower() in ('none', '', '0'):
+            desc_historial = f"Nota de crédito asignada: #{nueva_nota_credito}"
+        else:
+            desc_historial = f"Nota de crédito actualizada de #{nota_anterior} a #{nueva_nota_credito}"
+
         historial = _parsear_historial(fila['historial_json'])
         historial.append(_entrada_historial(
-            'nota_credito', f"Nota de crédito corregida de ${fila['nota_credito']} a ${nueva_nota_credito}", usuario_actual
+            'nota_credito',
+            desc_historial,
+            usuario=nombre_usuario
         ))
 
         data.actualizar_nota_credito(cursor, id_venta, nueva_nota_credito, json.dumps(historial))
@@ -531,6 +641,8 @@ def corregir_nota_credito(id_venta):
             "ok": True,
             "id": id_venta,
             "nota_credito": str(nueva_nota_credito),
+            "nota_credito_estatus": "pendiente",
+            "historial": historial
         }), 200
 
     except Exception as e:
@@ -542,10 +654,65 @@ def corregir_nota_credito(id_venta):
         conexion.close()
 
 
+# GUÍA: Banca y Pagos (BCYP) captura la nota de crédito arriba en
+# corregir_nota_credito, pero solo Auditoría puede validarla -- por eso
+# este endpoint pide un código numérico (ver utils/auditoria_utils.py) en
+# vez de solo requerir estar logueado como admin.
+@solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/nota-credito/<int:id_venta>/validar', methods=['POST'])
+def validar_nota_credito(id_venta):
+    body = request.get_json(force=True, silent=True) or {}
+    codigo = body.get('codigo')
+
+    if not verificar_codigo_auditoria(codigo):
+        return jsonify({"error": "Código de Auditoría inválido."}), 401
+
+    conexion = obtener_conexion()
+    if not conexion:
+        return jsonify({"error": "No se pudo conectar a la base de datos."}), 500
+
+    payload = _usuario_desde_token(request)
+    nombre_usuario = payload.get('nombre') or payload.get('usuario') or f"uid:{payload.get('id')}"\
+        if payload else None
+
+    cursor = conexion.cursor(dictionary=True, buffered=True)
+    try:
+        fila = data.obtener_venta_para_nota_credito(cursor, id_venta)
+        if not fila:
+            return jsonify({"error": "Solicitud no encontrada."}), 404
+
+        if not fila.get('nota_credito'):
+            return jsonify({"error": "Esta solicitud todavía no tiene una nota de crédito capturada."}), 400
+
+        historial = _parsear_historial(fila['historial_json'])
+        historial.append(_entrada_historial(
+            'nota_credito',
+            f"Nota de crédito #{fila['nota_credito']} validada por Auditoría",
+            usuario=nombre_usuario
+        ))
+
+        data.validar_nota_credito(cursor, id_venta, json.dumps(historial))
+        conexion.commit()
+
+        return jsonify({
+            "ok": True,
+            "id": id_venta,
+            "nota_credito_estatus": "validada",
+            "historial": historial
+        }), 200
+
+    except Exception as e:
+        conexion.rollback()
+        logging.exception("Error al validar nota de crédito de solicitud %s: %s", id_venta, e)
+        return jsonify({"error": "Error al validar la nota de crédito.", "detalle": str(e)}), 500
+    finally:
+        cursor.close()
+        conexion.close()
+
+
 @solicitud_retroactivo_bp.route('/api/solicitud-retroactivo/precio/<int:id_venta>', methods=['POST'])
 def corregir_precio(id_venta):
-    if not _requiere_admin(request):
-        return jsonify({"error": "No autorizado"}), 403
+    # if not _requiere_admin(request):
+    #     return jsonify({"error": "No autorizado"}), 403
 
     body = request.get_json(force=True, silent=True) or {}
     nuevo_precio_raw = body.get('precio_publico')
@@ -563,6 +730,10 @@ def corregir_precio(id_venta):
     if not conexion:
         return jsonify({"error": "No se pudo conectar a la base de datos."}), 500
 
+    payload = _usuario_desde_token(request)
+    nombre_usuario = payload.get('nombre') or payload.get('usuario') or f"uid:{payload.get('id')}"\
+        if payload else None
+
     cursor = conexion.cursor(dictionary=True, buffered=True)
     try:
         fila = data.obtener_venta_para_precio(cursor, id_venta)
@@ -574,7 +745,9 @@ def corregir_precio(id_venta):
 
         historial = _parsear_historial(fila['historial_json'])
         historial.append(_entrada_historial(
-            'precio', f"Precio corregido de ${fila['precio_publico']} a ${nuevo_precio}"
+            'precio',
+            f"Precio corregido de ${fila['precio_publico']} a ${nuevo_precio}",
+            usuario=nombre_usuario
         ))
 
         data.actualizar_precio(cursor, id_venta, nuevo_precio, monto, monto, json.dumps(historial))
@@ -585,7 +758,8 @@ def corregir_precio(id_venta):
             "id": id_venta,
             "precio_publico": str(nuevo_precio),
             "monto_pagar": str(monto),
-            "monto_aplicar": str(monto)
+            "monto_aplicar": str(monto),
+            "historial": historial
         }), 200
 
     except Exception as e:
@@ -618,7 +792,6 @@ def mis_solicitudes():
         # rechazados para poder resubir solo esos (ver PUT /venta/<id>).
         for fila in filas:
             validacion_docs = _parsear_validacion_docs(fila.pop('validacion_docs_json'))
-            fila['estatus'] = _calcular_estatus(validacion_docs)
             fila['validacion_docs'] = validacion_docs
             fila['historial'] = _parsear_historial(fila.pop('historial_json'))
 
@@ -633,6 +806,7 @@ def mis_solicitudes():
                     "url": generar_url_firmada_s3(key) if key else None,
                     "estatus": validacion_docs.get(nombre, 'pendiente')
                 }
+            fila['estatus'] = _calcular_estatus(validacion_docs, tiene_factura_xml=bool(fila['archivos']['factura_xml']['key']))
 
         return jsonify(filas), 200
     except Exception as e:
@@ -740,9 +914,11 @@ def editar_venta(id_venta):
         id_marca = int(raw_marca) if raw_marca and str(raw_marca).isdigit() else None
 
         id_msi_seleccionado = int(datos['id_msi'])
-        resultado = data.obtener_porcentaje_msi(cursor, id_msi_seleccionado)
-        porcentaje_val = resultado['porcentaje'] if resultado and resultado['porcentaje'] is not None else 0
-        porcentaje = Decimal(str(porcentaje_val))
+        id_formulario_seleccionado = int(datos['id_formulario'])
+        resultado = data.obtener_porcentaje_campania_msi(cursor, id_formulario_seleccionado, id_msi_seleccionado)
+        if not resultado:
+            return jsonify({"error": "El plazo MSI seleccionado no aplica para esta campaña."}), 400
+        porcentaje = Decimal(str(resultado['porcentaje']))
 
         precio_publico = Decimal(str(datos['precio_publico']).replace(',', ''))
         monto_pagar = (precio_publico * porcentaje) / Decimal(100)

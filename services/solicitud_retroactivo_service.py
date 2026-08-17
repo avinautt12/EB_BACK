@@ -18,9 +18,85 @@ ANIO_MODELO_SQL = """
 """
 
 
-def obtener_porcentaje_msi(cursor, id_msi):
-    cursor.execute("SELECT fn_ObtenerPorcentajeMsi(%s) AS porcentaje;", (id_msi,))
+# GUÍA: el % retroactivo ya no es fijo por plazo MSI -- cada campaña liga
+# los plazos que le aplican con SU PROPIO % (ver
+# solicitud_retroactivo_campania_msi, tabla del módulo de Campañas). El
+# formulario de venta ahora usa esto en vez de obtener_porcentaje_msi.
+def obtener_porcentaje_campania_msi(cursor, id_campania, id_msi):
+    cursor.execute("""
+        SELECT porcentaje
+        FROM solicitud_retroactivo_campania_msi
+        WHERE campania_id = %s AND msi_id = %s
+    """, (id_campania, id_msi))
     return cursor.fetchone()
+
+
+def listar_campanias_activas(cursor):
+    """Campañas vigentes hoy (activa=1 y dentro de su rango de fechas) --
+    para el selector de "Campaña" del formulario de venta."""
+    cursor.execute("""
+        SELECT id, nombre
+        FROM solicitud_retroactivo_campanias
+        WHERE activa = 1
+          AND CURDATE() BETWEEN fecha_inicio AND fecha_fin
+        ORDER BY nombre ASC
+    """)
+    return cursor.fetchall()
+
+
+def listar_msi_por_campania(cursor, id_campania):
+    """Plazos MSI ligados a una campaña específica, con el % propio de esa
+    campaña -- para el selector de "Meses sin intereses" del formulario de
+    venta, que depende de qué campaña se eligió."""
+    cursor.execute("""
+        SELECT m.id, m.plazo_meses, cm.porcentaje
+        FROM solicitud_retroactivo_campania_msi cm
+        JOIN solicitud_retroactivo_msi m ON m.id = cm.msi_id
+        WHERE cm.campania_id = %s
+        ORDER BY m.plazo_meses ASC
+    """, (id_campania,))
+    return cursor.fetchall()
+
+
+def obtener_productos_por_campania(cursor, id_campania):
+    """Productos detalle (variantes/SKUs) ligados a una campaña -- para el
+    selector de "Modelo" del formulario de venta, que solo debe ofrecer los
+    productos que esa campaña realmente incluye (no el catálogo completo)."""
+    cursor.execute("""
+        SELECT
+            pd.id,
+            pd.sku,
+            p.modelo,
+            p.codigo,
+            pd.talla,
+            pd.color,
+            m.id AS marca_id,
+            m.nombre AS marca
+        FROM solicitud_retroactivo_campania_producto_detalle cp
+        JOIN producto_detalle pd ON pd.id = cp.producto_detalle_id
+        JOIN productos p ON p.codigo = pd.codigo_producto
+        LEFT JOIN solicitud_retroactivo_marca m ON m.id = p.marca_id
+        WHERE cp.campania_id = %s
+        ORDER BY p.modelo ASC, pd.sku ASC
+    """, (id_campania,))
+    return cursor.fetchall()
+
+
+def obtener_marcas_por_campania(cursor, id_campania):
+    """Marcas distintas entre los productos ligados a una campaña -- el
+    selector de "Marca" del formulario de venta solo debe activarse cuando
+    la campaña realmente mezcla 2 o más marcas (ej. campaña "Multimarca");
+    si es de una sola marca, no tiene sentido preguntarla."""
+    cursor.execute("""
+        SELECT DISTINCT m.id, m.nombre
+        FROM solicitud_retroactivo_campania_producto_detalle cp
+        JOIN producto_detalle pd ON pd.id = cp.producto_detalle_id
+        JOIN productos p ON p.codigo = pd.codigo_producto
+        JOIN solicitud_retroactivo_marca m ON m.id = p.marca_id
+        WHERE cp.campania_id = %s
+        ORDER BY m.nombre ASC
+    """, (id_campania,))
+    return cursor.fetchall()
 
 
 def crear_venta(cursor, parametros):
@@ -56,16 +132,6 @@ def buscar_msi(cursor):
 
 def buscar_marca(cursor):
     cursor.callproc('sp_solicitud_retroactivo_buscar_marca')
-    datos = []
-    for resultado in cursor.stored_results():
-        datos = resultado.fetchall()
-    while cursor.nextset():
-        pass
-    return datos
-
-
-def buscar_formulario(cursor):
-    cursor.callproc('sp_solicitud_retroactivo_buscar_formulario')
     datos = []
     for resultado in cursor.stored_results():
         datos = resultado.fetchall()
@@ -149,12 +215,13 @@ def listar_ventas(cursor):
             v.id_marca_bicicleta, v.id_msi, m.plazo_meses,
             v.nombre_sucursal, v.correo_electronico, v.nombre_completo,
             v.fecha_venta, v.modelo_bicicleta, v.numero_serie,
-            v.precio_publico, v.porcentaje, v.monto_pagar, v.monto_aplicar, v.nota_credito,
+            v.precio_publico, v.porcentaje, v.monto_pagar, v.monto_aplicar,
+            v.nota_credito, v.nota_credito_estatus,
             v.validacion_docs_json, v.historial_json, {ANIO_MODELO_SQL} AS anio_modelo,
             v.ticket_compra_key, v.voucher_key, v.factura_pdf_key, v.factura_xml_key,
             v.fecha_registro
         FROM solicitud_retroactivo_venta v
-        LEFT JOIN solicitud_retroactivo_formulario f ON f.id = v.id_formulario
+        LEFT JOIN solicitud_retroactivo_campanias f ON f.id = v.id_formulario
         LEFT JOIN solicitud_retroactivo_msi m ON m.id = v.id_msi
         ORDER BY v.fecha_registro DESC
     """)
@@ -173,7 +240,7 @@ def obtener_totales_generales(cursor):
 
 
 def obtener_validaciones_docs(cursor):
-    cursor.execute("SELECT validacion_docs_json FROM solicitud_retroactivo_venta")
+    cursor.execute("SELECT validacion_docs_json, factura_xml_key FROM solicitud_retroactivo_venta")
     return cursor.fetchall()
 
 
@@ -183,7 +250,7 @@ def obtener_dashboard_por_campana(cursor):
             v.id_formulario, COALESCE(f.nombre, 'Sin campaña') AS nombre_formulario,
             COUNT(*) AS total_solicitudes, COALESCE(SUM(v.monto_pagar), 0) AS monto_total
         FROM solicitud_retroactivo_venta v
-        LEFT JOIN solicitud_retroactivo_formulario f ON f.id = v.id_formulario
+        LEFT JOIN solicitud_retroactivo_campanias f ON f.id = v.id_formulario
         GROUP BY v.id_formulario, f.nombre
         ORDER BY monto_total DESC
     """)
@@ -230,7 +297,9 @@ def obtener_dashboard_por_producto(cursor):
 
 def obtener_venta_para_validacion(cursor, id_venta):
     cursor.execute(
-        "SELECT validacion_docs_json, historial_json FROM solicitud_retroactivo_venta WHERE id = %s",
+        """SELECT validacion_docs_json, historial_json,
+                  ticket_compra_key, voucher_key, factura_pdf_key, factura_xml_key
+           FROM solicitud_retroactivo_venta WHERE id = %s""",
         (id_venta,)
     )
     return cursor.fetchone()
@@ -242,18 +311,33 @@ def actualizar_validacion_documento(cursor, id_venta, validacion_docs_json, hist
         (validacion_docs_json, historial_json, id_venta)
     )
 
+
 def obtener_venta_para_nota_credito(cursor, id_venta):
     cursor.execute(
-        "SELECT nota_credito, historial_json FROM solicitud_retroactivo_venta WHERE id = %s",
+        "SELECT nota_credito, nota_credito_estatus, historial_json FROM solicitud_retroactivo_venta WHERE id = %s",
         (id_venta,)
     )
     return cursor.fetchone()
 
+
 def actualizar_nota_credito(cursor, id_venta, nota_credito, historial_json):
+    # GUÍA: capturar/editar la NC (BCYP) siempre la deja en 'pendiente' --
+    # incluso si ya estaba validada, un cambio de valor invalida esa
+    # validación anterior y Auditoría debe volver a revisarla.
     cursor.execute(
-        "UPDATE solicitud_retroactivo_venta SET nota_credito = %s, historial_json = %s WHERE id = %s",
+        "UPDATE solicitud_retroactivo_venta SET nota_credito = %s, nota_credito_estatus = 'pendiente', historial_json = %s WHERE id = %s",
         (nota_credito, historial_json, id_venta)
     )
+
+
+def validar_nota_credito(cursor, id_venta, historial_json):
+    """Auditoría valida la NC ya capturada (ver utils/auditoria_utils.py
+    para el código requerido)."""
+    cursor.execute(
+        "UPDATE solicitud_retroactivo_venta SET nota_credito_estatus = 'validada', historial_json = %s WHERE id = %s",
+        (historial_json, id_venta)
+    )
+
 
 def obtener_venta_para_precio(cursor, id_venta):
     cursor.execute(
@@ -278,11 +362,12 @@ def listar_mis_ventas(cursor, id_usuario):
             v.nombre_sucursal, v.correo_electronico, v.nombre_completo,
             v.fecha_venta, v.modelo_bicicleta, v.numero_serie,
             v.precio_publico, v.porcentaje, v.monto_pagar,
+            v.nota_credito, v.nota_credito_estatus,
             v.validacion_docs_json, v.historial_json, {ANIO_MODELO_SQL} AS anio_modelo,
             v.ticket_compra_key, v.voucher_key, v.factura_pdf_key, v.factura_xml_key,
             v.fecha_registro
         FROM solicitud_retroactivo_venta v
-        LEFT JOIN solicitud_retroactivo_formulario f ON f.id = v.id_formulario
+        LEFT JOIN solicitud_retroactivo_campanias f ON f.id = v.id_formulario
         LEFT JOIN solicitud_retroactivo_msi m ON m.id = v.id_msi
         WHERE v.id_usuario = %s
         ORDER BY v.fecha_registro DESC
