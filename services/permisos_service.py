@@ -1,0 +1,103 @@
+# services/permisos_service.py
+
+from db_conexion import obtener_conexion
+from services.usuarios_hijos_service import UsuariosHijosService
+
+class PermisosService:
+
+    @staticmethod
+    def obtener_permisos_delegables(padre_id):
+        """Obtiene los módulos y acciones que un Administrador Cliente tiene permitido delegar."""
+        conn = obtener_conexion()
+        cur = conn.cursor(dictionary=True)
+        try:
+            cur.execute("""
+                SELECT pd.modulo_id, m.nombre as modulo, 
+                       pd.accion_id, a.nombre as accion, a.identificador as accion_id_texto
+                FROM permisos_delegables pd
+                INNER JOIN modulos m ON pd.modulo_id = m.id
+                INNER JOIN acciones a ON pd.accion_id = a.id
+                WHERE pd.administrador_id = %s 
+                  AND m.activo = 1 
+                  AND a.activo = 1
+            """, (padre_id,))
+            return cur.fetchall()
+        finally:
+            cur.close()
+            conn.close()
+
+    @staticmethod
+    def obtener_permisos_usuario(padre_id, hijo_id):
+        """Obtiene los permisos asignados actualmente a un usuario hijo."""
+        if not UsuariosHijosService.validar_pertenencia_hijo(padre_id, hijo_id):
+            raise Exception("Acceso denegado: Este usuario no pertenece a su ámbito de administración.")
+
+        conn = obtener_conexion()
+        cur = conn.cursor(dictionary=True)
+        try:
+            cur.execute("""
+                SELECT up.modulo_id, m.nombre as modulo,
+                       up.accion_id, a.nombre as accion, a.identificador as accion_id_texto
+                FROM usuario_permisos up
+                INNER JOIN modulos m ON up.modulo_id = m.id
+                INNER JOIN acciones a ON up.accion_id = a.id
+                WHERE up.usuario_id = %s
+            """, (hijo_id,))
+            return cur.fetchall()
+        finally:
+            cur.close()
+            conn.close()
+
+    @staticmethod
+    def asignar_permiso_hijo(padre_id, hijo_id, modulo_id, accion_id):
+        """Asigna un permiso a un hijo aplicando las 2 validaciones de seguridad."""
+        if not UsuariosHijosService.validar_pertenencia_hijo(padre_id, hijo_id):
+            raise Exception("Acceso denegado: Este usuario no pertenece a su ámbito de administración.")
+
+        conn = obtener_conexion()
+        cur = conn.cursor()
+        try:
+            cur.execute("""
+                SELECT 1 FROM permisos_delegables 
+                WHERE administrador_id = %s AND modulo_id = %s AND accion_id = %s
+            """, (padre_id, modulo_id, accion_id))
+            
+            if not cur.fetchone():
+                raise Exception("Operación no permitida: No tiene autorización para delegar este permiso.")
+
+            cur.execute("""
+                INSERT IGNORE INTO usuario_permisos (usuario_id, modulo_id, accion_id)
+                VALUES (%s, %s, %s)
+            """, (hijo_id, modulo_id, accion_id))
+            
+            conn.commit()
+            return {"mensaje": "Permiso asignado correctamente al usuario hijo."}
+            
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            cur.close()
+            conn.close()
+
+    @staticmethod
+    def revocar_permiso_hijo(padre_id, hijo_id, modulo_id, accion_id):
+        """Revoca un permiso asignado a un usuario hijo previa validación de pertenencia."""
+        if not UsuariosHijosService.validar_pertenencia_hijo(padre_id, hijo_id):
+            raise Exception("Acceso denegado: Este usuario no pertenece a su ámbito de administración.")
+
+        conn = obtener_conexion()
+        cur = conn.cursor()
+        try:
+            cur.execute("""
+                DELETE FROM usuario_permisos 
+                WHERE usuario_id = %s AND modulo_id = %s AND accion_id = %s
+            """, (hijo_id, modulo_id, accion_id))
+            conn.commit()
+            return {"mensaje": "Permiso revocado correctamente."}
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            cur.close()
+            conn.close()

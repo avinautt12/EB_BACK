@@ -1,0 +1,161 @@
+# services/usuarios_hijos_service.py
+
+from db_conexion import obtener_conexion
+
+class UsuariosHijosService:
+
+    @staticmethod
+    def obtener_cupo_padre(padre_id):
+        """Retorna el limite maximo, hijos activos y disponibilidad del padre."""
+        conn = obtener_conexion()
+        cur = conn.cursor(dictionary=True)
+        try:
+            cur.execute("SELECT max_hijos FROM limites_usuario WHERE padre_id = %s", (padre_id,))
+            limite_res = cur.fetchone()
+            max_hijos = limite_res['max_hijos'] if limite_res else 3
+
+            cur.execute("""
+                SELECT COUNT(*) as activos 
+                FROM jerarquia_usuarios ju
+                INNER JOIN usuarios u ON ju.hijo_id = u.id
+                WHERE ju.padre_id = %s AND u.activo = 1
+            """, (padre_id,))
+            activos_res = cur.fetchone()
+            hijos_activos = activos_res['activos'] if activos_res else 0
+
+            disponibles = max_hijos - hijos_activos
+
+            return {
+                "max_hijos": max_hijos,
+                "hijos_activos": hijos_activos,
+                "disponibles": disponibles,
+                "tiene_cupo": disponibles > 0
+            }
+        finally:
+            cur.close()
+            conn.close()
+
+    @staticmethod
+    def validar_pertenencia_hijo(padre_id, hijo_id):
+        """Regla de seguridad: verifica que el hijo pertenezca al ambito del padre."""
+        conn = obtener_conexion()
+        cur = conn.cursor()
+        try:
+            cur.execute("""
+                SELECT id FROM jerarquia_usuarios 
+                WHERE padre_id = %s AND hijo_id = %s
+            """, (padre_id, hijo_id))
+            return cur.fetchone() is not None
+        finally:
+            cur.close()
+            conn.close()
+
+    @staticmethod
+    def crear_usuario_hijo(padre_id, datos_hijo):
+        """Crea el usuario y la relacion jerarquica en una sola transaccion atomica."""
+        cupo = UsuariosHijosService.obtener_cupo_padre(padre_id)
+        if not cupo["tiene_cupo"]:
+            raise Exception("Ha alcanzado el límite máximo de usuarios permitidos.")
+
+        conn = obtener_conexion()
+        cur = conn.cursor(dictionary=True)
+        try:
+            cur.execute("SELECT cliente_id FROM usuarios WHERE id = %s", (padre_id,))
+            padre_res = cur.fetchone()
+            
+            if not padre_res:
+                raise Exception("El usuario administrador especificado no existe.")
+                
+            cliente_id = padre_res['cliente_id']
+
+            sql_usuario = """
+                INSERT INTO usuarios (nombre, correo, usuario, contrasena, activo, rol_id, cliente_id)
+                VALUES (%s, %s, %s, %s, 1, 2, %s)
+            """
+            cur.execute(sql_usuario, (
+                datos_hijo['nombre'],
+                datos_hijo['correo'],
+                datos_hijo['usuario'],
+                datos_hijo['contrasena'],
+                cliente_id
+            ))
+            hijo_id = cur.lastrowid
+
+            sql_jerarquia = "INSERT INTO jerarquia_usuarios (padre_id, hijo_id) VALUES (%s, %s)"
+            cur.execute(sql_jerarquia, (padre_id, hijo_id))
+
+            conn.commit()
+            return {"id": hijo_id, "mensaje": "Usuario hijo creado correctamente."}
+
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            cur.close()
+            conn.close()
+
+    @staticmethod
+    def listar_hijos(padre_id):
+        """Devuelve la lista de todos los usuarios hijos pertenecientes al padre."""
+        conn = obtener_conexion()
+        cur = conn.cursor(dictionary=True)
+        try:
+            cur.execute("""
+                SELECT u.id, u.nombre, u.correo, u.usuario, u.activo, u.cliente_id, ju.creado_en
+                FROM jerarquia_usuarios ju
+                INNER JOIN usuarios u ON ju.hijo_id = u.id
+                WHERE ju.padre_id = %s
+                ORDER BY u.id DESC
+            """, (padre_id,))
+            return cur.fetchall()
+        finally:
+            cur.close()
+            conn.close()
+
+    @staticmethod
+    def cambiar_contrasena_hijo(padre_id, hijo_id, nueva_contrasena):
+        """Cambia la contraseña de un hijo previa validación del ámbito del padre."""
+        if not UsuariosHijosService.validar_pertenencia_hijo(padre_id, hijo_id):
+            raise Exception("Acceso denegado: Este usuario no pertenece a su ámbito de administración.")
+
+        conn = obtener_conexion()
+        cur = conn.cursor()
+        try:
+            cur.execute("UPDATE usuarios SET contrasena = %s WHERE id = %s", (nueva_contrasena, hijo_id))
+            conn.commit()
+            return {"mensaje": "Contraseña actualizada correctamente."}
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            cur.close()
+            conn.close()
+
+    @staticmethod
+    def cambiar_estado_hijo(padre_id, hijo_id, nuevo_estado):
+        """
+        Activa o desactiva un usuario hijo. 
+        Si se intenta reactivar (estado=1), valida la disponibilidad de cupo.
+        """
+        if not UsuariosHijosService.validar_pertenencia_hijo(padre_id, hijo_id):
+            raise Exception("Acceso denegado: Este usuario no pertenece a su ámbito de administración.")
+
+        # Si se desea reactivar, validar que haya cupo disponible
+        if nuevo_estado == 1:
+            cupo = UsuariosHijosService.obtener_cupo_padre(padre_id)
+            if not cupo["tiene_cupo"]:
+                raise Exception("No se puede reactivar al usuario: Ha alcanzado el límite máximo permitido.")
+
+        conn = obtener_conexion()
+        cur = conn.cursor()
+        try:
+            cur.execute("UPDATE usuarios SET activo = %s WHERE id = %s", (nuevo_estado, hijo_id))
+            conn.commit()
+            estado_texto = "activado" if nuevo_estado == 1 else "desactivado"
+            return {"mensaje": f"Usuario {estado_texto} correctamente."}
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            cur.close()
+            conn.close()
