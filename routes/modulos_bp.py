@@ -40,7 +40,7 @@ def actualizar_modulo(modulo_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-@modulos_bp.route('/<int:modulo_id>/estado', methods=['PATCH'])
+@modulos_bp.route('/<int:modulo_id>/estado', methods=['PUT'])
 def cambiar_estado(modulo_id):
     """Activa o desactiva un módulo."""
     try:

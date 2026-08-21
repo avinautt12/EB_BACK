@@ -26,11 +26,13 @@ def obtener_permisos_usuario(hijo_id):
         padre_id = request.args.get('padre_id', type=int)
         if not padre_id:
             return jsonify({"error": "El parámetro padre_id es requerido."}), 400
-
+            
         permisos = PermisosService.obtener_permisos_usuario(padre_id, hijo_id)
         return jsonify({"permisos": permisos}), 200
     except Exception as e:
-        return jsonify({"error": str(e)}), 403
+        msg = str(e)
+        status_code = 403 if "Acceso denegado" in msg else 500
+        return jsonify({"error": msg}), status_code
 
 
 @permisos_bp.route('/asignar', methods=['POST'])

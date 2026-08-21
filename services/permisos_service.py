@@ -7,18 +7,28 @@ class PermisosService:
 
     @staticmethod
     def obtener_permisos_delegables(padre_id):
-        """Obtiene los módulos y acciones que un Administrador Cliente tiene permitido delegar."""
+        """
+        Obtiene ÚNICAMENTE los módulos y acciones activos que el Administrador Padre
+        tiene autorizados en su bolsa delegable, incluyendo datos de jerarquía.
+        """
         conn = obtener_conexion()
         cur = conn.cursor(dictionary=True)
         try:
             cur.execute("""
-                SELECT pd.modulo_id, m.nombre as modulo, 
-                       pd.accion_id, a.nombre as accion, a.identificador as accion_id_texto
+                SELECT 
+                    m.id AS modulo_id,
+                    m.nombre AS modulo,
+                    m.identificador,
+                    IF(m.padre_id IS NULL OR m.padre_id = 0, 1, 0) AS es_raiz,
+                    m.padre_id,
+                    a.id AS accion_id,
+                    a.nombre AS accion,
+                    a.identificador AS accion_id_texto
                 FROM permisos_delegables pd
                 INNER JOIN modulos m ON pd.modulo_id = m.id
                 INNER JOIN acciones a ON pd.accion_id = a.id
-                WHERE pd.administrador_id = %s 
-                  AND m.activo = 1 
+                WHERE pd.administrador_id = %s
+                  AND m.activo = 1
                   AND a.activo = 1
             """, (padre_id,))
             return cur.fetchall()
@@ -28,16 +38,31 @@ class PermisosService:
 
     @staticmethod
     def obtener_permisos_usuario(padre_id, hijo_id):
-        """Obtiene los permisos asignados actualmente a un usuario hijo."""
-        if not UsuariosHijosService.validar_pertenencia_hijo(padre_id, hijo_id):
-            raise Exception("Acceso denegado: Este usuario no pertenece a su ámbito de administración.")
-
+        """
+        Obtiene los permisos asignados actualmente a un usuario hijo.
+        Soporta bypass para SuperAdmin (Rol 1) o validación estricta de pertenencia.
+        """
         conn = obtener_conexion()
         cur = conn.cursor(dictionary=True)
         try:
+            # 1. Verificar si quien consulta es SuperAdmin (Rol 1)
+            cur.execute("SELECT rol_id FROM usuarios WHERE id = %s", (padre_id,))
+            admin_res = cur.fetchone()
+            es_super_admin = admin_res and admin_res.get('rol_id') == 1
+
+            # 2. Si no es SuperAdmin, validar que el hijo pertenezca al ámbito del padre
+            if not es_super_admin:
+                if not UsuariosHijosService.validar_pertenencia_hijo(padre_id, hijo_id):
+                    raise Exception("Acceso denegado: Este usuario no pertenece a su ámbito de administración.")
+
+            # 3. Consultar los permisos asignados en usuario_permisos
             cur.execute("""
-                SELECT up.modulo_id, m.nombre as modulo,
-                       up.accion_id, a.nombre as accion, a.identificador as accion_id_texto
+                SELECT 
+                    up.modulo_id, 
+                    m.nombre AS modulo,
+                    up.accion_id, 
+                    a.nombre AS accion,
+                    a.identificador AS accion_id_texto
                 FROM usuario_permisos up
                 INNER JOIN modulos m ON up.modulo_id = m.id
                 INNER JOIN acciones a ON up.accion_id = a.id

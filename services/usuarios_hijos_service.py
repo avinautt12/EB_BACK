@@ -1,6 +1,7 @@
 # services/usuarios_hijos_service.py
 
 from db_conexion import obtener_conexion
+from utils.seguridad import hash_password  # <--- Agregar esta importación
 
 class UsuariosHijosService:
 
@@ -68,15 +69,19 @@ class UsuariosHijosService:
                 
             cliente_id = padre_res['cliente_id']
 
+            # Encriptar la contraseña con el mismo método del sistema
+            contrasena_hash = hash_password(datos_hijo['contrasena'])
+
             sql_usuario = """
                 INSERT INTO usuarios (nombre, correo, usuario, contrasena, activo, rol_id, cliente_id)
-                VALUES (%s, %s, %s, %s, 1, 2, %s)
+                VALUES (%s, %s, %s, %s, 1, 3, %s)
             """
+            
             cur.execute(sql_usuario, (
                 datos_hijo['nombre'],
                 datos_hijo['correo'],
                 datos_hijo['usuario'],
-                datos_hijo['contrasena'],
+                contrasena_hash,
                 cliente_id
             ))
             hijo_id = cur.lastrowid
@@ -118,10 +123,13 @@ class UsuariosHijosService:
         if not UsuariosHijosService.validar_pertenencia_hijo(padre_id, hijo_id):
             raise Exception("Acceso denegado: Este usuario no pertenece a su ámbito de administración.")
 
+        # Encriptar la contraseña al actualizarla
+        contrasena_hash = hash_password(nueva_contrasena)
+
         conn = obtener_conexion()
         cur = conn.cursor()
         try:
-            cur.execute("UPDATE usuarios SET contrasena = %s WHERE id = %s", (nueva_contrasena, hijo_id))
+            cur.execute("UPDATE usuarios SET contrasena = %s WHERE id = %s", (contrasena_hash, hijo_id))
             conn.commit()
             return {"mensaje": "Contraseña actualizada correctamente."}
         except Exception as e:

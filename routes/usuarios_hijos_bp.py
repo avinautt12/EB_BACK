@@ -55,7 +55,7 @@ def crear_hijo():
         return jsonify({"error": str(e)}), 400
 
 
-@usuarios_hijos_bp.route('/<int:hijo_id>/contrasena', methods=['PATCH'])
+@usuarios_hijos_bp.route('/<int:hijo_id>/contrasena', methods=['PUT'])
 def cambiar_contrasena(hijo_id):
     """Cambia la contraseña de un usuario hijo."""
     try:
@@ -72,7 +72,7 @@ def cambiar_contrasena(hijo_id):
         return jsonify({"error": str(e)}), 400
 
 
-@usuarios_hijos_bp.route('/<int:hijo_id>/estado', methods=['PATCH'])
+@usuarios_hijos_bp.route('/<int:hijo_id>/estado', methods=['PUT'])
 def cambiar_estado(hijo_id):
     """Activa o desactiva un usuario hijo."""
     try:

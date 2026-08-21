@@ -27,7 +27,7 @@ def crear_accion():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-@acciones_bp.route('/<int:accion_id>/estado', methods=['PATCH'])
+@acciones_bp.route('/<int:accion_id>/estado', methods=['PUT'])
 def cambiar_estado(accion_id):
     """Activa o desactiva una acción base."""
     try:
