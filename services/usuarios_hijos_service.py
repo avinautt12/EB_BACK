@@ -1,7 +1,7 @@
 # services/usuarios_hijos_service.py
 
 from db_conexion import obtener_conexion
-from utils.seguridad import hash_password  # <--- Agregar esta importación
+from utils.seguridad import hash_password
 
 class UsuariosHijosService:
 
@@ -11,9 +11,16 @@ class UsuariosHijosService:
         conn = obtener_conexion()
         cur = conn.cursor(dictionary=True)
         try:
-            cur.execute("SELECT max_hijos FROM limites_usuario WHERE padre_id = %s", (padre_id,))
+            # Detecta dinámicamente la columna exacta de limites_usuario (padre_id / usuario_id / administrador_id)
+            cur.execute("SHOW COLUMNS FROM limites_usuario")
+            columnas = [col['Field'] for col in cur.fetchall()]
+            col_fk = next((c for c in ['padre_id', 'usuario_id', 'administrador_id', 'admin_id'] if c in columnas), 'padre_id')
+
+            cur.execute(f"SELECT max_hijos FROM limites_usuario WHERE {col_fk} = %s", (padre_id,))
             limite_res = cur.fetchone()
-            max_hijos = limite_res['max_hijos'] if limite_res else 3
+            
+            # Si no existe registro en limites_usuario, el cupo por defecto es 0
+            max_hijos = limite_res['max_hijos'] if limite_res is not None else 0
 
             cur.execute("""
                 SELECT COUNT(*) as activos 
@@ -24,13 +31,13 @@ class UsuariosHijosService:
             activos_res = cur.fetchone()
             hijos_activos = activos_res['activos'] if activos_res else 0
 
-            disponibles = max_hijos - hijos_activos
+            disponibles = max(0, max_hijos - hijos_activos)
 
             return {
                 "max_hijos": max_hijos,
                 "hijos_activos": hijos_activos,
                 "disponibles": disponibles,
-                "tiene_cupo": disponibles > 0
+                "tiene_cupo": disponibles > 0 and max_hijos > hijos_activos
             }
         finally:
             cur.close()
