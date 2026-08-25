@@ -30,7 +30,7 @@ def buscar_caratula_evac():
         cursor = conexion.cursor(dictionary=True)
         
         nombre_a_buscar = nombre_cliente
-        columna_a_buscar = "nombre_cliente" # Por defecto buscamos en nombre_cliente
+        columna_a_buscar = "p.nombre_cliente" # Por defecto buscamos en nombre_cliente
         
         # Si la búsqueda es por nombre y contiene "Integral", es un grupo.
         if nombre_cliente and "integral" in nombre_cliente.lower():
@@ -40,16 +40,23 @@ def buscar_caratula_evac():
             if grupo:
                 # Si es un grupo, CAMBIAMOS la columna y el valor a buscar
                 nombre_a_buscar = f"Integral {grupo['id']}"
-                columna_a_buscar = "clave" # ¡Aquí está la magia!
+                columna_a_buscar = "p.clave" # ¡Aquí está la magia!
                 logging.info("Búsqueda de GRUPO: traducido '%s' a buscar '%s' en la columna '%s'", nombre_cliente, nombre_a_buscar, columna_a_buscar)
 
-        # Construir consulta dinámica
-        query = "SELECT * FROM previo WHERE "
+        # Construir consulta dinámica.
+        # Solo se excluyen registros cuyo cliente exista y esté marcado como inactivo.
+        # Registros históricos/integrales sin fila equivalente en clientes se conservan.
+        query = """
+            SELECT p.*
+            FROM previo p
+            LEFT JOIN clientes c ON c.clave = p.clave
+            WHERE (c.id IS NULL OR c.activo = 1)
+        """
         params = []
         conditions = []
         
         if clave:
-            conditions.append("clave = %s")
+            conditions.append("p.clave = %s")
             params.append(clave)
 
         # Usamos la columna y el nombre correctos para la búsqueda
@@ -58,7 +65,8 @@ def buscar_caratula_evac():
             conditions.append(f"{columna_a_buscar} LIKE %s")
             params.append(f"%{nombre_a_buscar}%")
         
-        query += " AND ".join(conditions)
+        if conditions:
+            query += " AND " + " AND ".join(conditions)
         
         cursor.execute(query, tuple(params))
         resultados = cursor.fetchall()
@@ -91,10 +99,13 @@ def obtener_nombres():
         conexion = obtener_conexion()
         cursor = conexion.cursor(dictionary=True)
 
-        # Consulta directa
+        # Consulta directa. Los clientes marcados como inactivos no se muestran.
+        # Registros sin fila equivalente en clientes se conservan para no afectar integrales/históricos.
         query = """
-        SELECT clave, nombre_cliente
-        FROM previo
+        SELECT p.clave, p.nombre_cliente
+        FROM previo p
+        LEFT JOIN clientes c ON c.clave = p.clave
+        WHERE c.id IS NULL OR c.activo = 1
         """
         cursor.execute(query)
         resultados = cursor.fetchall()
@@ -119,9 +130,25 @@ def obtener_previo_evac_a():
     try:
         conexion = obtener_conexion()
         with conexion.cursor(dictionary=True) as cursor:
-            query = "SELECT * FROM previo WHERE evac = %s"
+            query = """
+                SELECT
+                    p.*,
+                    c.evac AS _evac_clientes,
+                    c.nivel AS _nivel_clientes
+                FROM previo p
+                INNER JOIN clientes c ON c.clave = p.clave
+                WHERE c.evac = %s
+                  AND c.activo = 1
+                  AND COALESCE(p.es_integral, 0) = 0
+            """
             cursor.execute(query, ("A",))
             resultados = cursor.fetchall()
+
+            # En temporada actual, CLIENTES es la fuente maestra de EVAC y nivel.
+            # No se modifica PREVIO: solo se normaliza la respuesta del endpoint.
+            for fila in resultados:
+                fila["evac"] = fila.pop("_evac_clientes", fila.get("evac"))
+                fila["nivel"] = fila.pop("_nivel_clientes", fila.get("nivel"))
         
         # Convertir valores Decimal a float para JSON
         for fila in resultados:
@@ -145,9 +172,25 @@ def obtener_previo_evac_b():
     try:
         conexion = obtener_conexion()
         with conexion.cursor(dictionary=True) as cursor:
-            query = "SELECT * FROM previo WHERE evac = %s"
+            query = """
+                SELECT
+                    p.*,
+                    c.evac AS _evac_clientes,
+                    c.nivel AS _nivel_clientes
+                FROM previo p
+                INNER JOIN clientes c ON c.clave = p.clave
+                WHERE c.evac = %s
+                  AND c.activo = 1
+                  AND COALESCE(p.es_integral, 0) = 0
+            """
             cursor.execute(query, ("B",))
             resultados = cursor.fetchall()
+
+            # En temporada actual, CLIENTES es la fuente maestra de EVAC y nivel.
+            # No se modifica PREVIO: solo se normaliza la respuesta del endpoint.
+            for fila in resultados:
+                fila["evac"] = fila.pop("_evac_clientes", fila.get("evac"))
+                fila["nivel"] = fila.pop("_nivel_clientes", fila.get("nivel"))
         
         # Convertir valores Decimal a float para JSON
         for fila in resultados:
@@ -171,7 +214,13 @@ def obtener_previo_evac_go():
     try:
         conexion = obtener_conexion()
         with conexion.cursor(dictionary=True) as cursor:
-            query = "SELECT * FROM previo WHERE evac = %s"
+            query = """
+                SELECT p.*
+                FROM previo p
+                LEFT JOIN clientes c ON c.clave = p.clave
+                WHERE p.evac = %s
+                  AND (c.id IS NULL OR c.activo = 1)
+            """
             cursor.execute(query, ("GO",))
             resultados = cursor.fetchall()
         
@@ -322,17 +371,17 @@ def obtener_datos_previo():
     try:
         conexion = obtener_conexion()
         with conexion.cursor(dictionary=True) as cursor:
-            # Excluir las claves dadas
+            # Excluir las claves dadas y los clientes marcados como inactivos.
+            # Registros sin fila equivalente en clientes se conservan para no alterar integrales/históricos.
             cursor.execute("""
-                SELECT * 
-                FROM previo
-                WHERE clave NOT IN (
-                    'JC539','EC216','LC657',
-                    'GC411','MC679','MC677',
-                    'LC625','LC626','LC627',
-                    'LD653','MD680','ID492',
-                    'LD660','NA718','7C042'
-                )
+                SELECT p.* 
+                FROM previo p
+                LEFT JOIN clientes c ON c.clave = p.clave
+                WHERE (c.id IS NULL OR c.activo = 1)
+                  AND (
+                        COALESCE(p.es_integral, 0) = 1
+                        OR c.id_grupo IS NULL
+                      )
             """)
             resultados = cursor.fetchall()
             
@@ -350,6 +399,281 @@ def obtener_datos_previo():
             cursor.close()
         if conexion and conexion.is_connected():
             conexion.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# METAS MY27 — GLOBAL / EVAC A / EVAC B
+# ─────────────────────────────────────────────────────────────────────────────
+# Reglas de negocio:
+#   • Global Comercializadora = Partner + Partner Elite + Partner Elite Plus.
+#   • Global Distribuidor = solo nivel Distribuidor.
+#   • Clientes inactivos no participan.
+#   • Una integral se cuenta una sola vez en Global; sus sucursales no se duplican.
+#   • Para EVAC A/B, la meta de una integral se reparte entre A/B según el número
+#     de sucursales activas del grupo asignadas a cada EVAC. Así un grupo 2+2
+#     reparte 50/50 su meta consolidada, sin multiplicarla por sucursal.
+#   • EVAC GO no participa en las metas operativas A/B.
+#   • "Scott" se presenta como "Bicicletas" en los títulos MY27.
+
+_NIVELES_COMERCIALIZADORA = {
+    'PARTNER',
+    'PARTNER ELITE',
+    'PARTNER ELITE PLUS',
+}
+
+
+def _nivel_meta_bucket(nivel):
+    n = str(nivel or '').strip().upper()
+    if n in _NIVELES_COMERCIALIZADORA:
+        return 'comercializadora'
+    if n == 'DISTRIBUIDOR':
+        return 'distribuidor'
+    return None
+
+
+def _float_meta(value):
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _calcular_metas_my27(cursor):
+    """Calcula Global y EVAC A/B sin duplicar miembros de integrales."""
+
+    # Miembros activos con su fila individual de previo.
+    cursor.execute("""
+        SELECT
+            c.clave,
+            c.evac,
+            c.nivel AS nivel_cliente,
+            c.id_grupo,
+            p.compra_minima_anual,
+            p.compromiso_apparel_syncros_vittoria,
+            p.nivel AS nivel_previo
+        FROM clientes c
+        LEFT JOIN previo p
+               ON p.clave = c.clave
+              AND (p.es_integral = 0 OR p.es_integral IS NULL)
+        WHERE c.activo = 1
+          AND c.clave IS NOT NULL
+          AND c.clave <> ''
+    """)
+    miembros = cursor.fetchall() or []
+
+    # Una fila resumen por integral.
+    cursor.execute("""
+        SELECT
+            p.id,
+            p.clave,
+            p.grupo_integral AS id_grupo,
+            p.nivel,
+            p.compra_minima_anual,
+            p.compromiso_apparel_syncros_vittoria
+        FROM previo p
+        WHERE p.es_integral = 1
+          AND p.grupo_integral IS NOT NULL
+    """)
+    filas_integrales = cursor.fetchall() or []
+
+    integrales = {}
+    for row in filas_integrales:
+        gid = row.get('id_grupo')
+        if gid is None:
+            continue
+        # Si accidentalmente hubiera duplicados, conservar la primera fila.
+        integrales.setdefault(gid, row)
+
+    miembros_por_grupo = {}
+    for row in miembros:
+        gid = row.get('id_grupo')
+        if gid is not None:
+            miembros_por_grupo.setdefault(gid, []).append(row)
+
+    def nuevo_resumen():
+        return {
+            'comercializadora': 0.0,
+            'distribuidor': 0.0,
+            'total': 0.0,
+            'apparel': 0.0,
+            'bicicletas': 0.0,
+        }
+
+    global_meta = nuevo_resumen()
+    evac = {
+        'A': nuevo_resumen(),
+        'B': nuevo_resumen(),
+    }
+
+    detalle_global = []
+    detalle_evacs = {'A': [], 'B': []}
+
+    # 1) Clientes sin integral consolidada: cuentan individualmente.
+    for row in miembros:
+        gid = row.get('id_grupo')
+        if gid is not None and gid in integrales:
+            continue
+
+        nivel = row.get('nivel_cliente') or row.get('nivel_previo')
+        bucket = _nivel_meta_bucket(nivel)
+        if not bucket:
+            continue
+
+        meta = _float_meta(row.get('compra_minima_anual'))
+        meta_apparel = _float_meta(
+            row.get('compromiso_apparel_syncros_vittoria')
+        )
+        meta_bicicletas = meta - meta_apparel
+
+        global_meta[bucket] += meta
+        global_meta['apparel'] += meta_apparel
+        detalle_global.append({
+            'tipo': 'cliente',
+            'clave': row.get('clave'),
+            'nivel': nivel,
+            'meta': meta,
+            'meta_apparel': meta_apparel,
+            'meta_bicicletas': meta_bicicletas,
+        })
+
+        evac_key = str(row.get('evac') or '').strip().upper()
+        if evac_key in ('A', 'B'):
+            evac[evac_key][bucket] += meta
+            evac[evac_key]['apparel'] += meta_apparel
+            detalle_evacs[evac_key].append({
+                'tipo': 'cliente',
+                'clave': row.get('clave'),
+                'nivel': nivel,
+                'meta': meta,
+                'meta_apparel': meta_apparel,
+                'meta_bicicletas': meta_bicicletas,
+            })
+
+    # 2) Integrales: una sola vez en Global; en EVAC se distribuye por sucursales A/B.
+    for gid, integral in integrales.items():
+        miembros_grupo = miembros_por_grupo.get(gid, [])
+        if not miembros_grupo:
+            # Integral sin ningún cliente activo: no participa en metas actuales.
+            continue
+
+        nivel = integral.get('nivel')
+        bucket = _nivel_meta_bucket(nivel)
+        if not bucket:
+            continue
+
+        meta_integral = _float_meta(integral.get('compra_minima_anual'))
+        apparel_integral = _float_meta(
+            integral.get('compromiso_apparel_syncros_vittoria')
+        )
+        bicicletas_integral = meta_integral - apparel_integral
+
+        global_meta[bucket] += meta_integral
+        global_meta['apparel'] += apparel_integral
+        detalle_global.append({
+            'tipo': 'integral',
+            'clave': integral.get('clave'),
+            'grupo': gid,
+            'nivel': nivel,
+            'meta': meta_integral,
+            'meta_apparel': apparel_integral,
+            'meta_bicicletas': bicicletas_integral,
+            'sucursales_activas': len(miembros_grupo),
+        })
+
+        # GO queda fuera. Para repartir la meta operativa solo se toman A y B.
+        miembros_ab = [
+            m for m in miembros_grupo
+            if str(m.get('evac') or '').strip().upper() in ('A', 'B')
+        ]
+        total_ab = len(miembros_ab)
+        if total_ab <= 0:
+            continue
+
+        for evac_key in ('A', 'B'):
+            miembros_evac = [
+                m for m in miembros_ab
+                if str(m.get('evac') or '').strip().upper() == evac_key
+            ]
+            cantidad = len(miembros_evac)
+            if cantidad <= 0:
+                continue
+
+            proporcion = cantidad / total_ab
+            meta_asignada = meta_integral * proporcion
+            apparel_asignada = apparel_integral * proporcion
+            bicicletas_asignada = meta_asignada - apparel_asignada
+
+            evac[evac_key][bucket] += meta_asignada
+            evac[evac_key]['apparel'] += apparel_asignada
+            detalle_evacs[evac_key].append({
+                'tipo': 'integral',
+                'clave': integral.get('clave'),
+                'grupo': gid,
+                'nivel': nivel,
+                'meta_integral': meta_integral,
+                'meta_asignada': meta_asignada,
+                'apparel_integral': apparel_integral,
+                'apparel_asignada': apparel_asignada,
+                'bicicletas_asignada': bicicletas_asignada,
+                'sucursales_en_evac': cantidad,
+                'sucursales_ab_grupo': total_ab,
+                'claves': [m.get('clave') for m in miembros_evac],
+            })
+
+    for resumen in [global_meta, evac['A'], evac['B']]:
+        resumen['comercializadora'] = round(resumen['comercializadora'], 2)
+        resumen['distribuidor'] = round(resumen['distribuidor'], 2)
+        resumen['total'] = round(
+            resumen['comercializadora'] + resumen['distribuidor'], 2
+        )
+        resumen['apparel'] = round(resumen['apparel'], 2)
+        resumen['bicicletas'] = round(
+            resumen['total'] - resumen['apparel'], 2
+        )
+
+    return {
+        'global': global_meta,
+        'evac_a': evac['A'],
+        'evac_b': evac['B'],
+        'titulos': {
+            'comercializadora': 'Comercializadora',
+            'distribuidor': 'Distribuidor',
+            'bicicletas': 'Bicicletas',
+            'apparel': 'Apparel, Syncros, Vittoria',
+        },
+        'detalle': {
+            'global': detalle_global,
+            'evac_a': detalle_evacs['A'],
+            'evac_b': detalle_evacs['B'],
+        },
+        'reglas': {
+            'evac_go_activo': False,
+            'integrales_sin_duplicidad_global': True,
+            'integrales_repartidas_por_sucursales_en_evacs': True,
+            'meta_apparel_integral_repartida_sin_duplicidad': True,
+            'meta_bicicletas_es_total_menos_apparel': True,
+        },
+    }
+
+
+@caratulas_bp.route('/metas-caratulas-my27', methods=['GET'])
+def metas_caratulas_my27():
+    conexion = None
+    cursor = None
+    try:
+        conexion = obtener_conexion()
+        cursor = conexion.cursor(dictionary=True)
+        resultado = _calcular_metas_my27(cursor)
+        return jsonify(resultado), 200
+    except Exception as e:
+        logging.exception('Error calculando metas MY27 de carátulas')
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conexion and conexion.is_connected():
+            conexion.close()
+
 
 @caratulas_bp.route('/generar-pdf', methods=['POST'])
 def generar_caratula_pdf():
@@ -593,6 +917,16 @@ def detalle_compras_odoo():
 
     try:
         # ── 1) Determinar el dominio de partners según el modo de búsqueda ──────────────
+        # AG873 / AG874 son dos claves operativas del mismo contacto comercial en Odoo:
+        # AG873 es el contacto principal y AG874 una dirección de entrega hija.
+        # Para ese caso (Integral 5) la separación debe hacerse por partner_shipping_id,
+        # no por partner_id, porque la venta conserva al contacto principal como cliente.
+        _cliente_ref_norm = (cliente or '').strip().upper()
+        _split_por_entrega = (
+            str(grupo_odoo or '').strip() == '5'
+            or (ref_exacta and _cliente_ref_norm in {'AG873', 'AG874'})
+        )
+
         try:
             if grupo_odoo:
                 # Vista Global de integral: obtener todas las claves Y nombres del grupo
@@ -632,9 +966,9 @@ def detalle_compras_odoo():
             )
 
             # ── Fallback por nombre para distribuidores sin ref en Odoo ─────────────
-            # Si ref_exacta y no encontró nada: el distribuidor existe en nuestra DB
-            # pero no tiene clave/ref asignada en Odoo → buscar por nombre_cliente.
-            if not partners and ref_exacta:
+            # En AG873/AG874 NO usamos fallback por nombre: ambos tienen el mismo nombre
+            # comercial y eso volvería a mezclarlos. Para ellos exigimos la ref exacta.
+            if not partners and ref_exacta and not _split_por_entrega:
                 try:
                     _conn_fb = obtener_conexion()
                     _cur_fb = _conn_fb.cursor(dictionary=True)
@@ -656,10 +990,9 @@ def detalle_compras_odoo():
                     pass
 
             # ── Fallback por nombre para miembros de grupo sin ref en Odoo ──────────
-            # Algunos distribuidores del grupo pueden no tener ref en Odoo.
-            # Detectamos cuáles faltan comparando los refs devueltos vs los esperados,
-            # y hacemos una búsqueda adicional por nombre para cada uno.
-            if grupo_odoo and _grupo_rows:
+            # Para Integral 5 tampoco hacemos fallback por nombre porque AG873 y AG874
+            # comparten nombre; la separación depende de sus refs exactas en Odoo.
+            if grupo_odoo and _grupo_rows and not _split_por_entrega:
                 refs_encontradas = {(p.get('ref') or '').strip() for p in partners}
                 claves_sin_match = [
                     r for r in _grupo_rows
@@ -698,10 +1031,11 @@ def detalle_compras_odoo():
         if not partners:
             return jsonify({'data': [], 'rows': [], 'meta': {'total': 0}}), 200
 
-        # Siempre expandimos child_ids: los contactos hijo de un partner son
-        # sub-cuentas del mismo cliente (portales B2B, tiendas, etc.) y sus órdenes
-        # pertenecen al mismo distribuidor.  El filtro de COMPANY_ID y la búsqueda
-        # por ref garantizan que no mezclamos datos de otros clientes.
+        # IDs exactos encontrados por ref. Para AG873/AG874 estos son los IDs que
+        # deben compararse contra sale.order.partner_shipping_id.
+        exact_partner_ids = list({p['id'] for p in partners})
+
+        # Comportamiento histórico para el resto de clientes: se conservan child_ids.
         all_partner_ids = set()
         for p in partners:
             all_partner_ids.add(p['id'])
@@ -710,17 +1044,50 @@ def detalle_compras_odoo():
         partner_ids = list(all_partner_ids)
 
         # ── 2) Traer órdenes de venta desde la fecha de inicio de temporada del cliente ──
-        # Excluimos únicamente borradores (state='draft') — órdenes que aún no han
-        # sido confirmadas y no deben aparecer en el monitor.
-        # Las órdenes canceladas (state='cancel') SÍ se muestran con estatus "Cancelado".
+        # Para AG873/AG874 / Integral 5 se filtra por dirección de entrega
+        # (partner_shipping_id). Para todos los demás clientes se conserva partner_id.
+        # Excluimos únicamente borradores (state='draft'); canceladas sí se muestran.
+        sale_order_fields = [
+            'id', 'name', 'date_order', 'partner_id',
+            'order_line', 'amount_total', 'state'
+        ]
+        tiene_partner_shipping = False
+        try:
+            _so_fields = models.execute_kw(
+                ODOO_DB, uid, ODOO_PASSWORD,
+                'sale.order', 'fields_get',
+                [['partner_shipping_id']],
+                {'attributes': ['string']}
+            )
+            tiene_partner_shipping = 'partner_shipping_id' in (_so_fields or {})
+        except Exception as _shipping_field_ex:
+            logging.warning(
+                'detalle_compras_odoo: no se pudo validar partner_shipping_id: %s',
+                _shipping_field_ex
+            )
+
+        if tiene_partner_shipping:
+            sale_order_fields.append('partner_shipping_id')
+
+        if _split_por_entrega and tiene_partner_shipping:
+            partner_filter = ['partner_shipping_id', 'in', exact_partner_ids]
+        else:
+            if _split_por_entrega and not tiene_partner_shipping:
+                logging.warning(
+                    'detalle_compras_odoo: partner_shipping_id no disponible; '
+                    'se usa partner_id como fallback para %s / grupo %s',
+                    cliente, grupo_odoo
+                )
+            partner_filter = ['partner_id', 'in', partner_ids]
+
         try:
             orders = models.execute_kw(
                 ODOO_DB, uid, ODOO_PASSWORD,
                 'sale.order', 'search_read',
-                [[['partner_id', 'in', partner_ids],
+                [[partner_filter,
                   ['date_order', '>=', fecha_inicio_temporada],
                   ['state', '!=', 'draft']]],
-                {'fields': ['id', 'name', 'date_order', 'partner_id', 'order_line', 'amount_total', 'state'],
+                {'fields': sale_order_fields,
                  'order': 'date_order desc', 'limit': 0}
             )
         except Exception as ex:

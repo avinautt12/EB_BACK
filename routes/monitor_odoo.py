@@ -18,6 +18,10 @@ from utils.odoo_utils import get_odoo_models, ODOO_DB, ODOO_PASSWORD
 
 monitor_odoo_bp = Blueprint('monitor_odoo', __name__, url_prefix='')
 
+# Empresa que alimenta este monitor.
+# Odoo company_id 1 = ELITE BIKE.
+ODOO_COMPANY_ID = 1
+
 @monitor_odoo_bp.route('/monitor_odoo', methods=['GET'])
 def obtener_monitor():
     conexion = None
@@ -560,6 +564,27 @@ def sync_monitor_odoo():
             return jsonify({'success': False, 'error': f'No se pudo conectar a Odoo: {odoo_err}'}), 500
 
         # ── 1. Facturas posted desde la temporada ─────────────────────────────
+        # Leemos partner_shipping_id solo si el campo existe en esta base de Odoo.
+        # Así la mejora es compatible con instalaciones donde ese campo no esté disponible.
+        move_fields = ['id', 'name', 'invoice_date', 'partner_id', 'invoice_line_ids']
+        tiene_partner_shipping = False
+        try:
+            shipping_field = models.execute_kw(
+                ODOO_DB, uid, ODOO_PASSWORD,
+                'account.move', 'fields_get',
+                [['partner_shipping_id']],
+                {'attributes': ['string']}
+            )
+            tiene_partner_shipping = 'partner_shipping_id' in (shipping_field or {})
+        except Exception as _shipping_field_ex:
+            logging.warning(
+                'sync_monitor_odoo: no se pudo validar partner_shipping_id; se usa comportamiento anterior: %s',
+                _shipping_field_ex
+            )
+
+        if tiene_partner_shipping:
+            move_fields.append('partner_shipping_id')
+
         facturas = models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
             'account.move', 'search_read',
@@ -567,8 +592,13 @@ def sync_monitor_odoo():
                 ['move_type', '=', 'out_invoice'],
                 ['state', '=', 'posted'],
                 ['invoice_date', '>=', FECHA_INICIO],
+                ['company_id', '=', ODOO_COMPANY_ID],
             ]],
-            {'fields': ['id', 'name', 'invoice_date', 'partner_id', 'invoice_line_ids'], 'limit': 0}
+            {
+                'fields': move_fields,
+                'limit': 0,
+                'context': {'allowed_company_ids': [ODOO_COMPANY_ID]},
+            }
         )
 
         if not facturas:
@@ -584,6 +614,11 @@ def sync_monitor_odoo():
                     'invoice_name': f['name'],
                     'invoice_date': f['invoice_date'],
                     'partner_id': f['partner_id'][0] if f.get('partner_id') else None,
+                    'shipping_partner_id': (
+                        f['partner_shipping_id'][0]
+                        if tiene_partner_shipping and f.get('partner_shipping_id')
+                        else None
+                    ),
                 }
 
         if not all_line_ids:
@@ -597,7 +632,11 @@ def sync_monitor_odoo():
             {'fields': ['id', 'product_id', 'price_unit', 'quantity', 'display_type']}
         )
         # Solo líneas de producto (sin secciones/notas)
-        lines = [l for l in lines_raw if l.get('product_id') and not l.get('display_type')]
+        lines = [
+            l for l in lines_raw
+            if l.get('product_id')
+            and l.get('display_type') in (None, False, 'product')
+        ]
 
         # ── 4. Productos en batch ─────────────────────────────────────────────
         product_ids = list({l['product_id'][0] for l in lines})
@@ -628,7 +667,13 @@ def sync_monitor_odoo():
             categs_map[c['id']] = nombre.strip()
 
         # ── 6. Partners en batch ──────────────────────────────────────────────
-        partner_ids = list({ctx['partner_id'] for ctx in line_context.values() if ctx['partner_id']})
+        # Incluimos tanto el partner de facturación como la dirección de entrega.
+        partner_ids = list({
+            pid
+            for ctx in line_context.values()
+            for pid in (ctx.get('partner_id'), ctx.get('shipping_partner_id'))
+            if pid
+        })
         partners_raw = models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
             'res.partner', 'read',
@@ -640,8 +685,22 @@ def sync_monitor_odoo():
         # ── 7. Preparar lógica EVAC ───────────────────────────────────────────
         conexion = obtener_conexion()
         cursor = conexion.cursor(dictionary=True)
-        cursor.execute("SELECT clave, nombre_cliente, evac FROM clientes")
-        buscar_evac = _construir_buscar_evac(cursor.fetchall())
+        cursor.execute("SELECT clave, nombre_cliente, evac, activo FROM clientes")
+        clientes_sync = cursor.fetchall()
+        buscar_evac = _construir_buscar_evac(clientes_sync)
+
+        # Solo una dirección con ref propio y cliente ACTIVO puede apropiarse de la venta.
+        # Esto evita que una dirección vieja/inactiva capture ventas nuevas por accidente.
+        clientes_por_clave_sync = {
+            str(c.get('clave') or '').strip().upper(): c
+            for c in clientes_sync
+            if c.get('clave')
+        }
+        clientes_registrados_sync = {
+            clave
+            for clave, c in clientes_por_clave_sync.items()
+            if int(c.get('activo', 1) or 0) == 1
+        }
 
         # ── 8. Truncar e insertar ─────────────────────────────────────────────
         cursor.execute("TRUNCATE TABLE monitor")
@@ -675,6 +734,26 @@ def sync_monitor_odoo():
             contacto_referencia = (partner.get('ref') or '').strip().upper()
             contacto_nombre = (partner.get('name') or '').strip()
 
+            # Si la dirección de entrega tiene una ref distinta y esa ref está dada de
+            # alta como cliente activo, la venta pertenece a esa sucursal.
+            # Ejemplo: facturación AG873 + entrega AG874 -> monitor guarda AG874.
+            shipping_pid = ctx.get('shipping_partner_id')
+            if shipping_pid and shipping_pid != ctx.get('partner_id'):
+                ship_partner = partners_map.get(shipping_pid, {})
+                ship_ref = (ship_partner.get('ref') or '').strip().upper()
+                if (
+                    ship_ref
+                    and ship_ref != contacto_referencia
+                    and ship_ref in clientes_registrados_sync
+                ):
+                    contacto_referencia = ship_ref
+                    cliente_ship = clientes_por_clave_sync.get(ship_ref) or {}
+                    contacto_nombre = (
+                        (cliente_ship.get('nombre_cliente') or '').strip()
+                        or (ship_partner.get('name') or '').strip()
+                        or contacto_nombre
+                    )
+
             precio = float(line.get('price_unit') or 0)
             cantidad = int(float(line.get('quantity') or 0))
             venta_total = round(precio * cantidad * 1.16, 2)
@@ -697,7 +776,7 @@ def sync_monitor_odoo():
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 ctx['invoice_name'],
-                code or prod.get('name', ''),
+                code or '',
                 prod.get('name', ''),
                 contacto_referencia,
                 contacto_nombre,
