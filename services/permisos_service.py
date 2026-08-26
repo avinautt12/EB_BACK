@@ -1,5 +1,4 @@
 # services/permisos_service.py
-
 from db_conexion import obtener_conexion
 from services.usuarios_hijos_service import UsuariosHijosService
 
@@ -7,10 +6,7 @@ class PermisosService:
 
     @staticmethod
     def obtener_permisos_delegables(padre_id):
-        """
-        Obtiene ÚNICAMENTE los módulos y acciones activos que el Administrador Padre
-        tiene autorizados en su bolsa delegable, incluyendo datos de jerarquía.
-        """
+        """Obtiene ÚNICAMENTE los módulos y acciones activos con la jerarquía del padre."""
         conn = obtener_conexion()
         cur = conn.cursor(dictionary=True)
         try:
@@ -21,11 +17,13 @@ class PermisosService:
                     m.identificador,
                     IF(m.padre_id IS NULL OR m.padre_id = 0, 1, 0) AS es_raiz,
                     m.padre_id,
+                    p.identificador AS padre_identificador,
                     a.id AS accion_id,
                     a.nombre AS accion,
                     a.identificador AS accion_id_texto
                 FROM permisos_delegables pd
                 INNER JOIN modulos m ON pd.modulo_id = m.id
+                LEFT JOIN modulos p ON m.padre_id = p.id
                 INNER JOIN acciones a ON pd.accion_id = a.id
                 WHERE pd.administrador_id = %s
                   AND m.activo = 1
@@ -38,10 +36,7 @@ class PermisosService:
 
     @staticmethod
     def obtener_permisos_usuario(padre_id, hijo_id):
-        """
-        Obtiene los permisos asignados actualmente a un usuario hijo.
-        Soporta bypass para SuperAdmin (Rol 1) o validación estricta de pertenencia.
-        """
+        """Obtiene los permisos asignados a un usuario hijo con su módulo padre."""
         conn = obtener_conexion()
         cur = conn.cursor(dictionary=True)
         try:
@@ -50,21 +45,25 @@ class PermisosService:
             admin_res = cur.fetchone()
             es_super_admin = admin_res and admin_res.get('rol_id') == 1
 
-            # 2. Si no es SuperAdmin, validar que el hijo pertenezca al ámbito del padre
+            # 2. Si no es SuperAdmin, validar pertenencia
             if not es_super_admin:
                 if not UsuariosHijosService.validar_pertenencia_hijo(padre_id, hijo_id):
                     raise Exception("Acceso denegado: Este usuario no pertenece a su ámbito de administración.")
 
-            # 3. Consultar los permisos asignados en usuario_permisos
+            # 3. Consultar permisos con JOIN al módulo padre
             cur.execute("""
                 SELECT 
-                    up.modulo_id, 
+                    up.modulo_id,
                     m.nombre AS modulo,
-                    up.accion_id, 
+                    m.identificador,
+                    m.padre_id,
+                    p.identificador AS padre_identificador,
+                    up.accion_id,
                     a.nombre AS accion,
                     a.identificador AS accion_id_texto
                 FROM usuario_permisos up
                 INNER JOIN modulos m ON up.modulo_id = m.id
+                LEFT JOIN modulos p ON m.padre_id = p.id
                 INNER JOIN acciones a ON up.accion_id = a.id
                 WHERE up.usuario_id = %s
             """, (hijo_id,))
@@ -75,10 +74,8 @@ class PermisosService:
 
     @staticmethod
     def asignar_permiso_hijo(padre_id, hijo_id, modulo_id, accion_id):
-        """Asigna un permiso a un hijo aplicando las 2 validaciones de seguridad."""
         if not UsuariosHijosService.validar_pertenencia_hijo(padre_id, hijo_id):
             raise Exception("Acceso denegado: Este usuario no pertenece a su ámbito de administración.")
-
         conn = obtener_conexion()
         cur = conn.cursor()
         try:
@@ -86,7 +83,6 @@ class PermisosService:
                 SELECT 1 FROM permisos_delegables 
                 WHERE administrador_id = %s AND modulo_id = %s AND accion_id = %s
             """, (padre_id, modulo_id, accion_id))
-            
             if not cur.fetchone():
                 raise Exception("Operación no permitida: No tiene autorización para delegar este permiso.")
 
@@ -94,10 +90,8 @@ class PermisosService:
                 INSERT IGNORE INTO usuario_permisos (usuario_id, modulo_id, accion_id)
                 VALUES (%s, %s, %s)
             """, (hijo_id, modulo_id, accion_id))
-            
             conn.commit()
             return {"mensaje": "Permiso asignado correctamente al usuario hijo."}
-            
         except Exception as e:
             conn.rollback()
             raise e
@@ -107,10 +101,8 @@ class PermisosService:
 
     @staticmethod
     def revocar_permiso_hijo(padre_id, hijo_id, modulo_id, accion_id):
-        """Revoca un permiso asignado a un usuario hijo previa validación de pertenencia."""
         if not UsuariosHijosService.validar_pertenencia_hijo(padre_id, hijo_id):
             raise Exception("Acceso denegado: Este usuario no pertenece a su ámbito de administración.")
-
         conn = obtener_conexion()
         cur = conn.cursor()
         try:
