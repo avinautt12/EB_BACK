@@ -174,3 +174,42 @@ class UsuariosHijosService:
         finally:
             cur.close()
             conn.close()
+            
+    @staticmethod
+    def eliminar_usuario_hijo(padre_id, hijo_id):
+        """Elimina físicamente un usuario hijo (Rol 3) y sus relaciones previa validación de ámbito."""
+        if not UsuariosHijosService.validar_pertenencia_hijo(padre_id, hijo_id):
+            raise Exception("Acceso denegado: Este usuario no pertenece a su ámbito de administración.")
+        
+        conn = obtener_conexion()
+        cur = conn.cursor()
+        try:
+            # 1. Eliminar permisos asignados en usuario_permisos
+            cur.execute("DELETE FROM usuario_permisos WHERE usuario_id = %s", (hijo_id,))
+            # 2. Eliminar relación jerárquica en jerarquia_usuarios
+            cur.execute("DELETE FROM jerarquia_usuarios WHERE hijo_id = %s", (hijo_id,))
+            # 3. Eliminar usuario asegurando que sea un usuario hijo (rol_id = 3)
+            cur.execute("DELETE FROM usuarios WHERE id = %s AND rol_id = 3", (hijo_id,))
+            conn.commit()
+            return {"mensaje": "Usuario hijo eliminado permanentemente."}
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            cur.close()
+            conn.close()
+            
+    @staticmethod
+    def obtener_correo_padre(padre_id):
+        """Obtiene únicamente el correo electrónico del usuario Administrador (Rol 2)."""
+        conn = obtener_conexion()
+        cur = conn.cursor(dictionary=True)
+        try:
+            cur.execute("SELECT correo FROM usuarios WHERE id = %s", (padre_id,))
+            resultado = cur.fetchone()
+            return {"correo": resultado['correo']} if resultado else {"correo": ""}
+        except Exception as e:
+            raise e
+        finally:
+            cur.close()
+            conn.close()

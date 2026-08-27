@@ -23,10 +23,14 @@ def obtener_delegables():
 def obtener_permisos_usuario(hijo_id):
     """Obtiene la lista de permisos asignados actualmente a un usuario hijo."""
     try:
+        # Se recibe el padre_id de forma opcional
         padre_id = request.args.get('padre_id', type=int)
-        if not padre_id:
-            return jsonify({"error": "El parámetro padre_id es requerido."}), 400
+        
+        # --- SE ELIMINÓ LA VALIDACIÓN QUE CAUSABA EL ERROR 400 ---
+        # if not padre_id:
+        #     return jsonify({"error": "El parámetro padre_id es requerido."}), 400
             
+        # El servicio ahora se encarga de buscar el padre_id si viene como None
         permisos = PermisosService.obtener_permisos_usuario(padre_id, hijo_id)
         return jsonify({"permisos": permisos}), 200
     except Exception as e:

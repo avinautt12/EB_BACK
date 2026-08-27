@@ -97,17 +97,28 @@ class AdminSistemaService:
 
     @staticmethod
     def revocar_permiso_delegable(admin_id, modulo_id, accion_id):
-        """Retira un permiso de la bolsa delegable de un Administrador Cliente."""
+        """Retira un permiso de la bolsa delegable de un Administrador Cliente 
+           y lo elimina en cascada de todos sus usuarios hijos."""
         conn = obtener_conexion()
         cur = conn.cursor()
         try:
-            sql = """
+            # 1. Borrar físicamente el permiso de TODOS los usuarios hijos (Rol 3) que pertenezcan a este administrador
+            sql_hijos = """
+                DELETE up FROM usuario_permisos up
+                INNER JOIN jerarquia_usuarios ju ON up.usuario_id = ju.hijo_id
+                WHERE ju.padre_id = %s AND up.modulo_id = %s AND up.accion_id = %s
+            """
+            cur.execute(sql_hijos, (admin_id, modulo_id, accion_id))
+
+            # 2. Borrar el permiso de la bolsa delegable del Administrador (Rol 2)
+            sql_admin = """
                 DELETE FROM permisos_delegables
                 WHERE administrador_id = %s AND modulo_id = %s AND accion_id = %s
             """
-            cur.execute(sql, (admin_id, modulo_id, accion_id))
+            cur.execute(sql_admin, (admin_id, modulo_id, accion_id))
+
             conn.commit()
-            return {"mensaje": "Permiso delegable retirado al administrador."}
+            return {"mensaje": "Permiso delegable retirado al administrador y a sus usuarios dependientes."}
         except Exception as e:
             conn.rollback()
             raise e

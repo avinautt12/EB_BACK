@@ -87,3 +87,29 @@ def cambiar_estado(hijo_id):
         return jsonify(resultado), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 400
+    
+@usuarios_hijos_bp.route('/<int:hijo_id>', methods=['DELETE'])
+def eliminar_hijo(hijo_id):
+    """Elimina físicamente un usuario hijo previa validación del padre."""
+    try:
+        padre_id = request.args.get('padre_id', type=int)
+        if not padre_id:
+            data = request.get_json() or {}
+            padre_id = data.get('padre_id')
+            
+        if not padre_id:
+            return jsonify({"error": "El parámetro padre_id es requerido."}), 400
+            
+        resultado = UsuariosHijosService.eliminar_usuario_hijo(padre_id, hijo_id)
+        return jsonify(resultado), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+    
+@usuarios_hijos_bp.route('/correo-padre/<int:padre_id>', methods=['GET'])
+def obtener_correo_padre(padre_id):
+    """Endpoint dedicado a devolver el correo del administrador."""
+    try:
+        resultado = UsuariosHijosService.obtener_correo_padre(padre_id)
+        return jsonify(resultado), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
