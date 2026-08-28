@@ -1,7 +1,8 @@
 from flask import Blueprint, request, jsonify
 from db_conexion import obtener_conexion
 from utils.seguridad import hash_password, verificar_password
-from utils.jwt_utils import generar_token
+from utils.jwt_utils import generar_token, verificar_token_con_gracia
+import logging
 import sqlite3
 import os
 import re
@@ -312,6 +313,42 @@ def login():
     finally:
         if cursor: cursor.close()
         if conexion: conexion.close()
+
+@auth.route('/renovar_token', methods=['POST'])
+def renovar_token():
+    """Renueva el JWT del usuario si aún es válido o expiró dentro de los últimos 60 minutos."""
+    auth_header = request.headers.get('Authorization', '')
+    if not auth_header.startswith('Bearer '):
+        return jsonify({'error': 'Token requerido'}), 401
+
+    token = auth_header.split(' ', 1)[1]
+    payload = verificar_token_con_gracia(token, minutos_gracia=60)
+    if not payload:
+        return jsonify({'error': 'Token inválido o muy expirado. Inicia sesión nuevamente.'}), 401
+
+    conexion = None
+    cursor = None
+    try:
+        conexion = obtener_conexion()
+        cursor = conexion.cursor(dictionary=True)
+        cursor.execute("SELECT activo FROM usuarios WHERE id = %s", (payload['id'],))
+        user = cursor.fetchone()
+        if not user or not user['activo']:
+            return jsonify({'error': 'Usuario inactivo'}), 403
+
+        nuevo_token = generar_token(
+            payload['id'], payload['rol'], payload['usuario'],
+            payload['nombre'], payload.get('cliente_id'), payload.get('clave'),
+            payload.get('nombre_cliente'), payload.get('id_grupo'), payload.get('flujo', 0)
+        )
+        return jsonify({'token': nuevo_token}), 200
+    except Exception as e:
+        logging.error("Error renovando token: %s", e)
+        return jsonify({'error': 'Error interno al renovar sesión'}), 500
+    finally:
+        if cursor: cursor.close()
+        if conexion: conexion.close()
+
 
 @auth.route('/logout', methods=['POST'])
 def logout():

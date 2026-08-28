@@ -2,6 +2,7 @@ from flask import Blueprint, jsonify, request
 import logging
 from models.monitor_odoo_model import obtener_todos_los_registros
 from db_conexion import obtener_conexion
+from utils.temporada_utils import etiqueta_temporada
 import decimal
 
 previo_bp = Blueprint('previo', __name__, url_prefix='')
@@ -127,8 +128,53 @@ def actualizar_previo():
                 return int(round(value))
             return int(value or fallback_val)
 
+        # Snapshot: preservar el estado actual en previo_historico antes de borrarlo,
+        # para poder consultar temporadas anteriores una vez que se sobreescriban los datos.
+        cursor.execute("""
+            INSERT INTO previo_historico (
+                temporada, fecha_snapshot, id_previo, clave, evac, nombre_cliente, acumulado_anticipado, nivel,
+                nivel_cierre_compra_inicial, compra_minima_anual, porcentaje_anual, compra_minima_inicial,
+                avance_global, porcentaje_global, compromiso_scott, avance_global_scott, porcentaje_scott,
+                compromiso_jul_ago, avance_jul_ago, porcentaje_jul_ago,
+                compromiso_sep_oct, avance_sep_oct, porcentaje_sep_oct,
+                compromiso_nov_dic, avance_nov_dic, porcentaje_nov_dic,
+                compromiso_ene_feb, avance_ene_feb, porcentaje_ene_feb,
+                compromiso_mar_abr, avance_mar_abr, porcentaje_mar_abr,
+                compromiso_may_jun, avance_may_jun, porcentaje_may_jun,
+                compromiso_apparel_syncros_vittoria, avance_global_apparel_syncros_vittoria, porcentaje_apparel_syncros_vittoria,
+                compromiso_jul_ago_app, avance_jul_ago_app, porcentaje_jul_ago_app,
+                compromiso_sep_oct_app, avance_sep_oct_app, porcentaje_sep_oct_app,
+                compromiso_nov_dic_app, avance_nov_dic_app, porcentaje_nov_dic_app,
+                compromiso_ene_feb_app, avance_ene_feb_app, porcentaje_ene_feb_app,
+                compromiso_mar_abr_app, avance_mar_abr_app, porcentaje_mar_abr_app,
+                compromiso_may_jun_app, avance_may_jun_app, porcentaje_may_jun_app,
+                acumulado_syncros, acumulado_apparel, acumulado_vittoria, acumulado_bold,
+                es_integral, grupo_integral
+            )
+            SELECT
+                %s, NOW(), id, clave, evac, nombre_cliente, acumulado_anticipado, nivel,
+                nivel_cierre_compra_inicial, compra_minima_anual, porcentaje_anual, compra_minima_inicial,
+                avance_global, porcentaje_global, compromiso_scott, avance_global_scott, porcentaje_scott,
+                compromiso_jul_ago, avance_jul_ago, porcentaje_jul_ago,
+                compromiso_sep_oct, avance_sep_oct, porcentaje_sep_oct,
+                compromiso_nov_dic, avance_nov_dic, porcentaje_nov_dic,
+                compromiso_ene_feb, avance_ene_feb, porcentaje_ene_feb,
+                compromiso_mar_abr, avance_mar_abr, porcentaje_mar_abr,
+                compromiso_may_jun, avance_may_jun, porcentaje_may_jun,
+                compromiso_apparel_syncros_vittoria, avance_global_apparel_syncros_vittoria, porcentaje_apparel_syncros_vittoria,
+                compromiso_jul_ago_app, avance_jul_ago_app, porcentaje_jul_ago_app,
+                compromiso_sep_oct_app, avance_sep_oct_app, porcentaje_sep_oct_app,
+                compromiso_nov_dic_app, avance_nov_dic_app, porcentaje_nov_dic_app,
+                compromiso_ene_feb_app, avance_ene_feb_app, porcentaje_ene_feb_app,
+                compromiso_mar_abr_app, avance_mar_abr_app, porcentaje_mar_abr_app,
+                compromiso_may_jun_app, avance_may_jun_app, porcentaje_may_jun_app,
+                acumulado_syncros, acumulado_apparel, acumulado_vittoria, acumulado_bold,
+                es_integral, grupo_integral
+            FROM previo
+        """, (etiqueta_temporada(),))
+
         # Limpiamos la tabla antes de insertar lo nuevo
-        cursor.execute("DELETE FROM previo") 
+        cursor.execute("DELETE FROM previo")
         registros_insertados = 0
         
         for i, registro in enumerate(registros):
@@ -309,6 +355,48 @@ def obtener_previo_int():
             cursor.close()
         if conexion and conexion.is_connected():
             conexion.close()
+
+@previo_bp.route('/obtener_previo_fecha', methods=['GET'])
+def obtener_previo_fecha():
+    """
+    Recalcula (sin escribir en `previo`) los montos acotados a un rango de
+    fechas (fecha_desde=YYYY-MM-DD&fecha_hasta=YYYY-MM-DD), usando la misma
+    lógica de categorización que el recálculo en vivo. Para "ver como estaban
+    los montos" entre dos fechas de la temporada actual, sin mover el corte
+    real de temporada. fecha_desde es opcional (si se omite, usa el f_inicio
+    real de cada cliente); fecha_hasta es requerida.
+    """
+    fecha_desde = request.args.get('fecha_desde')
+    fecha_hasta = request.args.get('fecha_hasta') or request.args.get('fecha')
+    if not fecha_hasta:
+        return jsonify({'error': 'Se requiere el parámetro fecha_hasta (YYYY-MM-DD)'}), 400
+
+    conexion = None
+    cursor = None
+    try:
+        from routes.monitor_odoo import _recalcular_acumulados_previo
+
+        conexion = obtener_conexion()
+        cursor = conexion.cursor(dictionary=True)
+
+        resultados = _recalcular_acumulados_previo(
+            conexion, cursor,
+            fecha_corte_override=fecha_hasta,
+            fecha_inicio_override=fecha_desde,
+            dry_run=True
+        )
+        return jsonify(resultados), 200
+
+    except Exception as e:
+        logging.exception("Error en obtener_previo_fecha")
+        return jsonify({'error': str(e)}), 500
+
+    finally:
+        if cursor:
+            cursor.close()
+        if conexion:
+            conexion.close()
+
 
 @previo_bp.route('/recalcular_previo', methods=['POST'])
 def disparar_recalculo_previo():
